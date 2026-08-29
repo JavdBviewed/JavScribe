@@ -41,8 +41,7 @@ RUN git clone --depth 1 --branch "${CHICKENRICE_REF}" \
         chickenrice
 
 WORKDIR /opt/chickenrice
-RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} --upgrade pip \
-    && python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
+RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
         "faster-whisper>=1.0.0" \
         "ctranslate2>=4.5.0" \
         "transformers>=4.30.0" \
