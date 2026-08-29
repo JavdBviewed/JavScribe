@@ -1,0 +1,56 @@
+# ---------- Python ----------
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+venv/
+.python-version.local
+
+# ---------- 模型权重（永不进仓库） ----------
+models/
+**/models/
+*.gguf
+*.onnx
+*.safetensors
+# 注: *.bin 已通过 .gitattributes 标记 binary；CT2 模型目录(含 model.bin)
+# 若误放进工作区，用下面的目录规则兜底
+hainan*/
+chickenrice-models/
+
+# ---------- 本地机器相关配置 ----------
+config/*.local.json
+config/*-local.json
+.env
+.env.*
+
+# ---------- 运行时产物 ----------
+*.opus
+*.tmp
+*.bak
+inbox/
+*.log
+logs/
+
+# ---------- 媒体文件（误拖进工作区时兜底） ----------
+*.mp4
+*.mkv
+*.ts
+*.m2ts
+*.mov
+*.avi
+*.webm
+*.mp3
+*.flac
+*.m4a
+*.aac
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+Desktop.ini
