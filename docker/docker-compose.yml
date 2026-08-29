@@ -1,0 +1,40 @@
+# JavScribe — company GPU server deployment (one container = engine + service)
+#
+#   cd /opt/JavScribe
+#   JAV_WATCH_DIR=/path/to/your/media \
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+# Env overrides:
+#   JAV_PORT        host port for the progress/upload API (default 8300)
+#   JAV_MODELS_DIR  host dir for model weights (default /opt/jav-scribe/models)
+#   JAV_WATCH_DIR   host dir to watch for finished downloads (default /media/jav)
+name: jav-scribe
+
+services:
+  jav-scribe:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        CHICKENRICE_REF: v1.9
+    image: javscribe:latest
+    container_name: jav-scribe
+    restart: unless-stopped
+    shm_size: "4g"
+    environment:
+      TZ: Asia/Shanghai
+      CUDA_VISIBLE_DEVICES: "all"
+    ports:
+      - "${JAV_PORT:-8300}:8300"
+    volumes:
+      # Model weights (first-boot download, persists across rebuilds)
+      - ${JAV_MODELS_DIR:-/opt/jav-scribe/models}:/opt/chickenrice/models
+      # Media directory to watch (BT/PT landing spot; .zh.srt lands next to source)
+      - ${JAV_WATCH_DIR:-/media/jav}:/media/jav
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

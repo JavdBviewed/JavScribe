@@ -1,0 +1,61 @@
+{
+  "profile": "server",
+  "profiles": {
+    "server": {
+      "infer": {
+        "command": "python /opt/chickenrice/infer.py",
+        "cwd": "/opt/chickenrice",
+        "model": "models/whisper-large-v2-translate-zh-v0.2-st-ct2",
+        "device": "cuda",
+        "preset": "gpu_batch",
+        "log_level": "DEBUG",
+        "batch": true,
+        "max_batch_size": 8,
+        "extra_args": []
+      },
+      "subtitle": {
+        "formats": [
+          "srt"
+        ],
+        "lang_tag": "zh",
+        "naming": "rename",
+        "output_dir": null,
+        "skip_if_exists": true,
+        "overwrite": false,
+        "tag_formats": [
+          "srt",
+          "vtt"
+        ]
+      },
+      "polish": {
+        "enabled": false,
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "batch_lines": 60
+      },
+      "emby": {
+        "enabled": false,
+        "url": "",
+        "api_key": ""
+      },
+      "watch": {
+        "dirs": [
+          "/media/jav"
+        ],
+        "interval_s": 10,
+        "process_existing": false
+      },
+      "jasna": {
+        "enabled": false,
+        "command": "",
+        "output": "{stem}_restored{ext}",
+        "preset": "Default"
+      }
+    }
+  },
+  "progress": {
+    "host": "0.0.0.0",
+    "port": 8300
+  }
+}
