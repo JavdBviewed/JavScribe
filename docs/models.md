@@ -40,7 +40,7 @@ JavScribe 本体不含任何模型。它调用的是 **TransWithAI ChickenRice�
 ```bash
 git clone --depth 1 --branch v1.9 https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice /opt/chickenrice
 cd /opt/chickenrice
-python3 -m pip install faster-whisper ctranslate2 transformers librosa onnxruntime pyjson5 requests
+python3 -m pip install --break-system-packages faster-whisper ctranslate2 transformers librosa onnxruntime pyjson5 requests  # Ubuntu 24.04 需要该参数(PEP 668)
 # 下载模型（HF 不可达时脚本自动回退 hf-mirror）：
 python3 download_models.py      # VAD + whisper-base 配置
 python3 download_models.py --hf-model chickenrice0721/whisper-large-v2-translate-zh-v0.2-st-ct2

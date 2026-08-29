@@ -24,6 +24,7 @@ ARG CHICKENRICE_REF=v1.9
 ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai
