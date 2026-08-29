@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # JavScribe server image — JAV subtitle generation (ASR + ja→zh)
 #
 # Contents:
