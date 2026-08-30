@@ -1,0 +1,29 @@
+# JavScribe-Web control room — a single service.
+#
+# Workshops (JavScribe `serve`) run separately on each GPU machine; this
+# service only polls them and relays uploads.
+#
+#   JAV_ENGINES="车间A=http://<IP_A>:8300,车间B=http://<IP_B>:8300" \
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+# Env overrides:
+#   JAV_ENGINES      preset workshop table, comma-separated name=URL
+#   JAV_WEB_PORT     host port (default 8400)
+#   JAV_WEB_DATA_DIR host dir for the engine registry (default /opt/jav-scribe-web/data)
+name: jav-scribe-web
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: javscribe-web:latest
+    container_name: jav-scribe-web
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      JAV_ENGINES: "${JAV_ENGINES:-}"
+    ports:
+      - "${JAV_WEB_PORT:-8400}:8400"
+    volumes:
+      - ${JAV_WEB_DATA_DIR:-/opt/jav-scribe-web/data}:/data
