@@ -1,0 +1,42 @@
+# JavScribe 跨平台换行策略
+# 仓库内统一存 LF；checkout 时按平台/用途展开
+* text=auto
+
+# Windows 批处理必须 CRLF（cmd.exe 对 LF-only 脚本行为不可靠）
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 脚本与配置在 Linux 服务器上运行，强制 LF
+*.sh   text eol=lf
+
+# 源码/文档/配置：一律 LF（Python 在 Windows 上读 LF 源码无问题）
+*.py   text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.qss  text eol=lf
+*.spec text eol=lf
+*.srt  text eol=lf
+*.vtt  text eol=lf
+
+# 二进制
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.gif  binary
+*.exe  binary
+*.dll  binary
+*.so   binary
+*.zip  binary
+*.7z   binary
+*.mp4  binary
+*.mkv  binary
+*.opus binary
+*.gguf binary
+*.bin  binary
+*.onnx binary
+*.safetensors binary
