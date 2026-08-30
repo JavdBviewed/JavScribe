@@ -56,7 +56,8 @@ RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
 # `base` CUDA image flavor). Install from PyPI and link into /usr/local/lib.
 RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
         "nvidia-cublas-cu12>=12.8" \
-    && CUBLAS_LIB_DIR=$(python3 -c "import os, nvidia.cublas; print(os.path.join(os.path.dirname(nvidia.cublas.__file__), 'lib'))") \
+    && CUBLAS_LIB_DIR=$(find /usr -type d -path "*/nvidia/cublas/lib" 2>/dev/null | head -1) \
+    && [ -n "${CUBLAS_LIB_DIR}" ] \
     && ln -sf "${CUBLAS_LIB_DIR}/libcublas.so.12" "${CUBLAS_LIB_DIR}/libcublasLt.so.12" /usr/local/lib/ \
     && ldconfig
 
