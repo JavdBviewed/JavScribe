@@ -13,8 +13,9 @@
 #   docker build -f docker/Dockerfile -t javscribe:latest .
 
 # Base already present on the target server (no Docker Hub pull needed).
-# CTranslate2's pip wheels bundle the CUDA runtime libraries, so the slim
-# `base` flavor plus the host driver is sufficient.
+# The `base` flavor only carries the CUDA driver stub; CTranslate2's pip
+# wheel (CUDA build) dlopens cuBLAS 12 from the system at inference time,
+# so it is installed from PyPI below and linked into the default path.
 ARG CUDA_BASE=nvidia/cuda:12.8.0-base-ubuntu24.04
 FROM ${CUDA_BASE}
 
@@ -49,6 +50,15 @@ RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
         "onnxruntime>=1.17.0" \
         pyjson5 \
         requests
+
+# cuBLAS 12 runtime for CTranslate2's CUDA wheel: the pip package dlopens
+# libcublas.so.12 at inference time and does not bundle it (absent from the
+# `base` CUDA image flavor). Install from PyPI and link into /usr/local/lib.
+RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
+        "nvidia-cublas-cu12>=12.8" \
+    && CUBLAS_LIB_DIR=$(python3 -c "import os, nvidia.cublas; print(os.path.join(os.path.dirname(nvidia.cublas.__file__), 'lib'))") \
+    && ln -sf "${CUBLAS_LIB_DIR}/libcublas.so.12" "${CUBLAS_LIB_DIR}/libcublasLt.so.12" /usr/local/lib/ \
+    && ldconfig
 
 # ---- JavScribe (this repo; headless path is stdlib-only, no GUI deps) ----
 COPY . /opt/JavScribe
