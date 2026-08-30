@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JavScribe 中控室</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>JavScribe 中控室</h1>
+  <div id="health" class="muted">连接中…</div>
+</header>
+
+<section>
+  <div class="sec-head">
+    <h2>车间</h2>
+    <form id="engine-form">
+      <input id="engine-name" placeholder="名称（如 公司3090）" required maxlength="40">
+      <input id="engine-url" type="url" placeholder="http://地址:8300" required>
+      <button type="submit">添加</button>
+    </form>
+  </div>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th></th><th>名称</th><th>地址</th><th>设备</th><th>版本</th><th>运行中</th><th></th></tr></thead>
+    <tbody id="engine-rows"></tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>任务</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>车间</th><th>文件</th><th>状态</th><th>进度</th><th>位置</th><th>耗时</th><th></th></tr></thead>
+    <tbody id="job-rows"></tbody>
+  </table>
+  </div>
+  <div id="jobs-empty" class="muted">暂无任务</div>
+</section>
+
+<section>
+  <h2>派工单</h2>
+  <div id="drop">
+    <p>把影片拖到这里，或点击选择文件（mp4 / mkv / ts / mov …）</p>
+    <p class="muted small">文件会先完整上传到本服务再抽音轨派给车间；跨网络或大文件建议用 CLI：<span class="mono">jav-scribe upload 影片.mkv --remote http://&lt;车间&gt;:8300</span>（只传音轨，约 35MB）</p>
+    <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
+  </div>
+  <div id="dispatch-bar" class="muted" hidden>
+    <span id="dispatch-name"></span>
+    <select id="engine-select"></select>
+    <button id="dispatch-go">开始</button>
+    <span id="dispatch-status"></span>
+  </div>
+  <div id="dispatch-progress" hidden><div id="dispatch-fill"></div></div>
+</section>
+
+<footer class="muted small">JavScribe-Web · 进度每 5 秒自动刷新</footer>
+<script src="/app.js"></script>
+</body>
+</html>
