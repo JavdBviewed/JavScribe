@@ -50,7 +50,7 @@ JavScribe 配置：
 
 ```json
 "infer": {
-  "command": "python /opt/chickenrice/infer.py",
+  "command": "python3 /opt/chickenrice/infer.py",
   "cwd": "/opt/chickenrice",
   "model": "models/whisper-large-v2-translate-zh-v0.2-st-ct2",
   "device": "cuda",
