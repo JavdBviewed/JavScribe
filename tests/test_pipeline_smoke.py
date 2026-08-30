@@ -70,6 +70,21 @@ FAKE_LIE = (
     '    print("正在写入：%s.srt" % p)  # logs full name + .srt, wrote <stem>.srt\n'
 )
 
+# Fake engine #3: English stdout (ChickenRice v1.9 inside Docker / EN locale)
+FAKE_EN = (
+    "import sys, pathlib\n"
+    "files = [a for a in sys.argv[1:] if not a.startswith('-')]\n"
+    'print("Loading Whisper model...")\n'
+    'print("Found %d files to process" % len(files))\n'
+    "for i, f in enumerate(files, 1):\n"
+    '    print("Processing (translate) (%d/%d): %s" % (i, len(files), f))\n'
+    '    print("Duration: 30.00s")\n'
+    '    print("[0:30 --> 1:00] konnichiwa")\n'
+    "    out = pathlib.Path(f).with_suffix('.srt')\n"
+    "    out.write_text('1\\n00:00:30,000 --> 00:01:00,000\\nnihao\\n', encoding='utf-8')\n"
+    '    print("Writing: %s" % out)\n'
+)
+
 
 def _write_fake(tmp: Path, code: str) -> Path:
     fake = tmp / "fake_infer.py"
@@ -135,6 +150,21 @@ def test_mismatched_log_path() -> None:
         print("  test_mismatched_log_path OK")
 
 
+def test_run_and_finalize_english_log() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video = tmp / "demo.mkv"
+        video.write_bytes(b"fake")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_EN)), log=lambda s: None, profile="test")
+        job = engine.submit([video], run_in_thread=False)
+        assert job.files[0].status == TaskStatus.DONE, job.files[0].to_dict()
+        assert job.files[0].duration_s == 30.0, job.files[0].duration_s
+        zh = video.with_name("demo.zh.srt")
+        assert zh.is_file(), f"missing {zh}"
+        assert not video.with_suffix(".srt").exists()
+        print("  test_run_and_finalize_english_log OK")
+
+
 def test_watch_stability() -> None:
     """A file that is still growing (BT/PT in progress) is not handed over
     until its size is stable across two scans."""
@@ -162,5 +192,6 @@ if __name__ == "__main__":
     test_skip_if_exists()
     test_overwrite()
     test_mismatched_log_path()
+    test_run_and_finalize_english_log()
     test_watch_stability()
     print("ALL SMOKE TESTS PASSED")

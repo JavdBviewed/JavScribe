@@ -4,7 +4,9 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-# infer.exe stdout patterns (see latest.log for samples)
+# infer stdout patterns. ChickenRice logs in the host locale:
+# Chinese on a zh Windows install, English inside the Docker image.
+# Every EN pattern mirrors its CN twin with the same group layout.
 PATTERN_TOTAL = re.compile(r"找到\s+(\d+)\s+个文件待处理")
 PATTERN_TRANSLATING = re.compile(
     r"正在翻译\s*[（(]\s*(\d+)\s*/\s*(\d+)\s*[)）]\s*[：:]\s*(.+?)\s*$"
@@ -19,6 +21,13 @@ PATTERN_DEVICE = re.compile(
 PATTERN_LOAD_MODEL = re.compile(r"正在加载\s*Whisper\s*模型")
 PATTERN_VAD_READY = re.compile(r"增强\s*VAD\s*已激活")
 PATTERN_WRITING = re.compile(r"正在写入\s*[：:]\s*(.+?)\s*$")
+PATTERN_TOTAL_EN = re.compile(r"Found\s+(\d+)\s+files?\s+to\s+process")
+PATTERN_TRANSLATING_EN = re.compile(
+    r"(?:Processing|Transcribing|Translating)\s*\(\s*[a-z]+\s*\)\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*[：:]\s*(.+?)\s*$"
+)
+PATTERN_DURATION_EN = re.compile(r"Duration\s*[：:]\s*([\d.]+)\s*s\b")
+PATTERN_LOAD_MODEL_EN = re.compile(r"Loading\s+Whisper\s+model")
+PATTERN_WRITING_EN = re.compile(r"Writing\s*[：:]\s*(.+?)\s*$")
 PATTERN_CN_DUR = re.compile(
     r"(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分)?\s*(?:(\d+(?:\.\d+)?)\s*秒)?"
 )
@@ -63,7 +72,7 @@ class LogParser:
     def feed(self, line: str) -> LogEvent:
         line = line.rstrip()
 
-        m = PATTERN_TRANSLATING.search(line)
+        m = PATTERN_TRANSLATING.search(line) or PATTERN_TRANSLATING_EN.search(line)
         if m:
             self.current_file = m.group(3).strip()
             self.current_duration_s = None
@@ -82,6 +91,12 @@ class LogParser:
                 self.current_duration_s = dur
             return LogEvent(kind="duration", raw=line, duration_s=dur)
 
+        m = PATTERN_DURATION_EN.search(line)
+        if m:
+            dur = float(m.group(1))
+            self.current_duration_s = dur
+            return LogEvent(kind="duration", raw=line, duration_s=dur)
+
         m = PATTERN_TIMESTAMP.search(line)
         if m and self.current_duration_s:
             end_min = int(m.group(3))
@@ -95,7 +110,7 @@ class LogParser:
                 progress=progress,
             )
 
-        m = PATTERN_TOTAL.search(line)
+        m = PATTERN_TOTAL.search(line) or PATTERN_TOTAL_EN.search(line)
         if m:
             self.total_files = int(m.group(1))
             return LogEvent(
@@ -105,7 +120,7 @@ class LogParser:
                 detail=f"找到 {self.total_files} 个文件",
             )
 
-        m = PATTERN_WRITING.search(line)
+        m = PATTERN_WRITING.search(line) or PATTERN_WRITING_EN.search(line)
         if m:
             out_path = m.group(1).strip()
             ext = ""
@@ -119,7 +134,7 @@ class LogParser:
                 output_format=ext or None,
             )
 
-        if PATTERN_LOAD_MODEL.search(line):
+        if PATTERN_LOAD_MODEL.search(line) or PATTERN_LOAD_MODEL_EN.search(line):
             return LogEvent(kind="model_load", raw=line, detail="加载模型中…")
 
         return LogEvent(kind="raw", raw=line)
