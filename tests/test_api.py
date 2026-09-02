@@ -1,8 +1,11 @@
 """Control room API with a canned poller snapshot (no network)."""
 from __future__ import annotations
 
+import asyncio
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -12,6 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from jav_scribe_web.api import build_app  # noqa: E402
 from jav_scribe_web.config import EngineStore  # noqa: E402
 from jav_scribe_web.engines.base import EngineInfo  # noqa: E402
+from jav_scribe_web.engines.javscribe import JavScribeEngine  # noqa: E402
 from jav_scribe_web.poller import Poller  # noqa: E402
 
 RUNNING_JOB = {
@@ -37,18 +41,23 @@ DONE_JOB = {
 }
 
 
+def _make_store_and_poller(td: str):
+    store = EngineStore(td)
+    store.add("车间A", "http://10.0.0.1:8300")
+    store.add("车间B", "http://10.0.0.2:8300")
+    poller = Poller(store)
+    poller.engines = {
+        "车间A": EngineInfo("车间A", "http://10.0.0.1:8300", online=True, device="cuda",
+                            version="0.1.0", jobs_running=1),
+        "车间B": EngineInfo("车间B", "http://10.0.0.2:8300", online=False, error="boom"),
+    }
+    poller.jobs = {"车间A": [RUNNING_JOB, DONE_JOB], "车间B": []}
+    return store, poller
+
+
 def make_client():
     with tempfile.TemporaryDirectory() as td:
-        store = EngineStore(td)
-        store.add("车间A", "http://10.0.0.1:8300")
-        store.add("车间B", "http://10.0.0.2:8300")
-        poller = Poller(store)
-        poller.engines = {
-            "车间A": EngineInfo("车间A", "http://10.0.0.1:8300", online=True, device="cuda",
-                                version="0.1.0", jobs_running=1),
-            "车间B": EngineInfo("车间B", "http://10.0.0.2:8300", online=False, error="boom"),
-        }
-        poller.jobs = {"车间A": [RUNNING_JOB, DONE_JOB], "车间B": []}
+        store, poller = _make_store_and_poller(td)
         client = TestClient(build_app(store, poller))
         return client, store
 
@@ -94,9 +103,92 @@ def test_static_index() -> None:
     assert r.status_code == 200 and "中控室" in r.text
 
 
+def _wait_upload(client, upload_id: str, timeout: float = 30.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        d = client.get(f"/api/uploads/{upload_id}").json()
+        if d["phase"] in ("done", "error"):
+            return d
+        time.sleep(0.1)
+    raise AssertionError(f"upload {upload_id} stuck in phase {d['phase']}")
+
+
+def test_upload_pipeline_dispatches_opus() -> None:
+    """2s tone: upload -> extract (progress) -> fake workshop gets an ogg opus."""
+    captured: dict = {}
+
+    async def fake_upload_audio(self, audio_bytes: bytes, name: str) -> str:
+        captured["bytes"] = audio_bytes
+        captured["name"] = name
+        return "job-fake-1"
+
+    JavScribeEngine.upload_audio = fake_upload_audio  # type: ignore[method-assign]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            store, poller = _make_store_and_poller(td)
+            client = TestClient(build_app(store, poller))
+            src = Path(td) / "tone2.wav"
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                 "-ar", "48000", str(src)],
+                check=True,
+            )
+            with client:  # single event loop so the background task survives
+                with open(src, "rb") as fh:
+                    r = client.post(
+                        "/api/upload",
+                        files={"file": ("tone2.wav", fh, "audio/wav")},
+                        data={"engine": "车间A"},
+                    )
+                assert r.status_code == 202, r.text
+                body = r.json()
+                upload_id = body["upload_id"]
+                assert body["engine"] == "车间A" and body["size_mb"] > 0
+                assert 1.8 < body["duration_s"] < 2.2
+                d = _wait_upload(client, upload_id)
+                assert d["phase"] == "done", d
+                assert d["job_id"] == "job-fake-1"
+                assert d["progress"] == 1.0 and d["audio_mb"] is not None
+        assert captured["name"] == "tone2.wav"
+        assert captured["bytes"][:4] == b"OggS", "must be ogg/opus"
+        assert len(captured["bytes"]) > 1000
+    finally:
+        del JavScribeEngine.upload_audio  # restore real method
+
+
+def test_upload_error_no_audio() -> None:
+    """Video-only file -> extraction fails -> phase error with message."""
+    with tempfile.TemporaryDirectory() as td:
+        store, poller = _make_store_and_poller(td)
+        client = TestClient(build_app(store, poller))
+        src = Path(td) / "noaudio.mp4"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1",
+             "-c:v", "libx264", "-preset", "ultrafast", str(src)],
+            check=True,
+        )
+        with client:  # single event loop so the background task survives
+            with open(src, "rb") as fh:
+                r = client.post(
+                    "/api/upload",
+                    files={"file": ("noaudio.mp4", fh, "video/mp4")},
+                    data={"engine": "车间A"},
+                )
+            assert r.status_code == 202, r.text
+            d = _wait_upload(client, r.json()["upload_id"])
+            assert d["phase"] == "error", d
+            assert d["error"] and "音轨提取失败" in d["error"]
+        # unknown upload id -> 404
+        assert client.get("/api/uploads/nope").status_code == 404
+
+
 if __name__ == "__main__":
     test_health_and_engines()
     test_jobs_aggregated_and_sorted()
     test_engine_crud()
     test_static_index()
+    test_upload_pipeline_dispatches_opus()
+    test_upload_error_no_audio()
     print("  test_api OK")

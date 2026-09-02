@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -12,13 +15,14 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .audio import extract_audio
+from .audio import extract_audio_progress, probe_duration
 from .config import EngineStore
 from .engines.javscribe import JavScribeEngine
 from .poller import Poller
 
 STATIC_DIR = Path(__file__).parent / "static"
 UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
+UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
 
 
 def _job_rows(engine: str, job: dict) -> list[dict]:
@@ -70,8 +74,54 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
     return rows
 
 
+# -- 派工单流水线（上传 → 本地抽音轨 → 转发车间）----------------------------------
+
+@dataclass
+class UploadTask:
+    """One 派工单 pipeline run; phases: extracting -> dispatching -> done/error."""
+
+    id: str
+    engine: str
+    name: str
+    size_mb: float
+    phase: str = "extracting"
+    progress: float = 0.0
+    created: float = field(default_factory=time.time)
+    finished: float | None = None
+    audio_mb: float | None = None
+    job_id: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "engine": self.engine,
+            "name": self.name,
+            "size_mb": self.size_mb,
+            "phase": self.phase,
+            "progress": round(self.progress, 4),
+            "created": self.created,
+            "finished": self.finished,
+            "audio_mb": self.audio_mb,
+            "job_id": self.job_id,
+            "error": self.error,
+        }
+
+
 def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
     app = FastAPI(title="JavScribe-Web", version=__version__, lifespan=lifespan)
+
+    _uploads: dict[str, UploadTask] = {}
+    _upload_locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(engine_name: str) -> asyncio.Lock:
+        return _upload_locks.setdefault(engine_name, asyncio.Lock())
+
+    def _prune_uploads() -> None:
+        cutoff = time.time() - UPLOAD_TTL_S
+        stale = [k for k, t in _uploads.items() if (t.finished or 0) and t.finished < cutoff]
+        for k in stale:
+            _uploads.pop(k, None)
 
     @app.get("/api/health")
     async def api_health() -> dict:
@@ -115,23 +165,56 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
         )
         return rows
 
-    # -- 派工单：浏览器上传 → 抽音轨 → 转发车间 ---------------------------------
-    _upload_locks: dict[str, asyncio.Lock] = {}
+    # -- 派工单：浏览器上传 → 本地抽音轨 → 转发车间（2 段式，进度可查）-----------
 
-    def _lock_for(engine_name: str) -> asyncio.Lock:
-        return _upload_locks.setdefault(engine_name, asyncio.Lock())
+    async def _run_upload(task: UploadTask, video_tmp: Path) -> None:
+        entry = store.get(task.engine)
+        assert entry is not None
+        audio_tmp = video_tmp.with_suffix(".opus")
+        try:
+            try:
+                size = await extract_audio_progress(
+                    video_tmp,
+                    audio_tmp,
+                    on_progress=lambda frac: setattr(task, "progress", frac),
+                )
+                task.audio_mb = round(size / 1048576, 1)
+            except Exception as ex:
+                task.phase = "error"
+                task.error = f"音轨提取失败: {ex}"
+                return
+            task.phase = "dispatching"
+            eng = JavScribeEngine(task.engine, entry["url"])
+            try:
+                async with _lock_for(task.engine):
+                    task.job_id = await eng.upload_audio(
+                        audio_tmp.read_bytes(), task.name or "remote"
+                    )
+            except Exception as ex:
+                task.phase = "error"
+                task.error = f"车间拒绝任务: {ex}"
+                return
+            finally:
+                await eng.close()
+            task.phase = "done"
+            task.progress = 1.0
+        finally:
+            task.finished = time.time()
+            video_tmp.unlink(missing_ok=True)
+            audio_tmp.unlink(missing_ok=True)
 
     @app.post("/api/upload", status_code=202)
     async def api_upload(file: UploadFile = File(...), engine: str = Form(...)) -> dict:
         entry = store.get(engine)
         if entry is None:
             raise HTTPException(404, "engine not found")
+        _prune_uploads()
         max_bytes = int(UPLOAD_MAX_GB * 1024**3)
-        fd, name = tempfile.mkstemp(suffix=Path(file.filename or "").suffix or ".bin", prefix="javweb_up_")
+        fd, name = tempfile.mkstemp(
+            suffix=Path(file.filename or "").suffix or ".bin", prefix="javweb_up_"
+        )
         tmp = Path(name)
-        import os as _os
-
-        _os.close(fd)
+        os.close(fd)
         received = 0
         try:
             with open(tmp, "wb") as fh:
@@ -140,29 +223,35 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
                     if received > max_bytes:
                         raise HTTPException(413, f"file too large (max {UPLOAD_MAX_GB:g}GB)")
                     fh.write(chunk)
-            try:
-                audio_tmp, audio_size = await extract_audio(tmp)
-            except Exception as ex:
-                raise HTTPException(400, f"音轨提取失败: {ex}")
-        finally:
+        except BaseException:
             tmp.unlink(missing_ok=True)
-        eng = JavScribeEngine(engine, entry["url"])
-        try:
-            async with _lock_for(engine):
-                job_id = await eng.upload_audio(audio_tmp.read_bytes(), file.filename or "remote")
-        except Exception as ex:
-            raise HTTPException(502, f"车间拒绝任务: {ex}")
-        finally:
-            audio_tmp.unlink(missing_ok=True)
-            await eng.close()
+            raise
+        task = UploadTask(
+            id=uuid.uuid4().hex[:8],
+            engine=engine,
+            name=file.filename or "remote",
+            size_mb=round(received / 1048576, 1),
+        )
+        _uploads[task.id] = task
+        asyncio.create_task(_run_upload(task, tmp))
         return {
             "ok": True,
+            "upload_id": task.id,
             "engine": engine,
-            "job_id": job_id,
-            "audio_mb": round(audio_size / 1048576, 1),
+            "name": task.name,
+            "size_mb": task.size_mb,
+            "duration_s": round(probe_duration(tmp), 1),
         }
 
+    @app.get("/api/uploads/{upload_id}")
+    async def api_upload_status(upload_id: str) -> dict:
+        task = _uploads.get(upload_id)
+        if task is None:
+            raise HTTPException(404, "upload not found (已过期或 id 无效)")
+        return task.to_dict()
+
     # -- srt 下载（代理车间 /result）-------------------------------------------
+
     @app.get("/api/jobs/{engine}/{job_id}/result")
     async def api_result(engine: str, job_id: str) -> Response:
         entry = store.get(engine)

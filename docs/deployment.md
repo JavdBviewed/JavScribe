@@ -41,10 +41,18 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 ## 上传两条链路
 
-- **页面派工单**：浏览器把整片传到中控 → 中控抽音轨 → 音轨发给车间。
-  适合中控与文件同网段（局域网内秒传）。
+- **页面派工单**（2 段式，全程有进度）：
+  1. 浏览器把整片传到中控（本地传输，不跨网络）→ `POST /api/upload` 立即返回
+     `202 {upload_id, duration_s, ...}`
+  2. 中控后台抽 16kHz mono opus 音轨（ffmpeg `-progress` 实时进度），完成后把
+     音轨 PUT 给车间。前端每 1s 轮询 `GET /api/uploads/{upload_id}` 展示
+     `phase: extracting(带 0-1 progress) → dispatching → done(带 job_id)/error`
+  适合中控与文件同网段（局域网内秒传）；跨网络时见下条。
 - **CLI 远端流程**（跨网络推荐）：`jav-scribe upload 影片.mkv --remote http://<车间>:8300`
   ——在本地抽音轨，只传 ~35MB 的 opus，不传整片。任务同样出现在中控大屏上。
+
+其余接口：`GET /api/health`、`GET/POST/DELETE /api/engines`、`GET /api/jobs`、
+`GET /api/jobs/{engine}/{job_id}/result`（代理车间 srt 下载）。
 
 ## 安全
 

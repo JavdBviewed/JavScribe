@@ -1,3 +1,4 @@
+
 :root {
   --bg: #f5f6f8;
   --card: #ffffff;
@@ -51,6 +52,7 @@ td:nth-child(2) { max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--err); }
+.eng-err { color: var(--err); font-size: 11.5px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .st-done { color: var(--ok); }
 .st-error { color: var(--err); }
 .st-running { color: var(--accent); }
@@ -64,8 +66,10 @@ input, select, button {
   background: var(--card);
   color: var(--fg);
 }
+select { padding: 4px 8px; }
 button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; }
 button:hover { filter: brightness(1.08); }
+button:disabled { opacity: 0.5; cursor: default; filter: none; }
 button.del { background: none; border: none; color: var(--muted); padding: 2px 6px; }
 button.del:hover { color: var(--err); filter: none; }
 .prog { display: flex; align-items: center; gap: 8px; min-width: 160px; }
@@ -83,6 +87,34 @@ a.dl:hover { text-decoration: underline; }
 }
 #drop:hover, #drop.hover { border-color: var(--accent); }
 #dispatch-bar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+#dispatch-name { font-weight: 500; }
+#dispatch-status { min-width: 120px; }
 #dispatch-progress { height: 8px; border-radius: 4px; background: var(--bar-bg); margin-top: 8px; overflow: hidden; }
-#dispatch-fill { height: 100%; width: 0; background: var(--accent); }
+#dispatch-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
+#toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+}
+.toast {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  max-width: 360px;
+  animation: toast-in 0.2s ease-out;
+}
+.toast.ok { border-left-color: var(--ok); }
+.toast.err { border-left-color: var(--err); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
 footer { padding: 10px 24px 26px; }
