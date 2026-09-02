@@ -17,3 +17,4 @@ models/
 config/*.local.json
 .env
 *.log
+web/

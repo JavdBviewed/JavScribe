@@ -113,7 +113,24 @@ src/jav_scribe/
 └── gui (app/main_window/widgets)  # Windows 图形界面
 ```
 
+另见 `web/`：中控室（独立 Web 服务，见 [web/README.md](web/README.md)）。
+
 ## 安全
+
+## 中控室（web/）
+
+多车间 Web 中控：聚合 N 个 `serve` 车间的 `/health` + `/jobs`，大屏看进度、
+页面派工（本机抽 16kHz opus 音轨、只把音轨派给车间）、下载 srt。
+纯静态前端、无构建链；接口与部署细节见 [web/README.md](web/README.md)。
+
+```bash
+cd web
+JAV_ENGINES="车间A=http://<IP_A>:8300,车间B=http://<IP_B>:8300" \
+  docker compose -f docker/docker-compose.yml up -d --build
+# 浏览器打开 http://<本机>:8400
+```
+
+中控是**无状态聚合器**：任务态以车间内存为准，只持久化车间登记表（数据卷）。
 
 进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
 
