@@ -8,65 +8,113 @@
 </head>
 <body>
 <header>
-  <h1>JavScribe 中控室</h1>
-  <div id="health" class="muted">连接中…</div>
+  <div class="brand">
+    <span class="brand-dot" id="brand-dot"></span>
+    <div class="brand-text">
+      <h1>中控室</h1>
+      <span class="brand-sub">JAVSCRIBE · CONTROL ROOM</span>
+    </div>
+  </div>
+  <div class="hud">
+    <span id="health" class="hud-item">连接中…</span>
+    <span id="clock" class="hud-item mono">--:--:--</span>
+  </div>
 </header>
 
-<section>
-  <div class="sec-head">
-    <h2>车间</h2>
-    <form id="engine-form">
-      <input id="engine-name" placeholder="名称（如 公司3090）" required maxlength="40">
-      <input id="engine-url" type="url" placeholder="http://地址:8300" required>
-      <button type="submit">添加</button>
-    </form>
-  </div>
-  <div class="table-wrap">
-  <table>
-    <thead><tr><th></th><th>名称</th><th>地址</th><th>设备</th><th>版本</th><th>运行中</th><th></th></tr></thead>
-    <tbody id="engine-rows"></tbody>
-  </table>
-  </div>
-</section>
+<main>
+  <section id="sec-engines">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Workshops</span><h2>车间</h2></div>
+      <form id="engine-form" autocomplete="off">
+        <input id="engine-name" placeholder="名称，如 公司3090" required maxlength="40">
+        <input id="engine-url" type="url" placeholder="http://地址:8300" required>
+        <button type="submit" class="btn">添加车间</button>
+      </form>
+    </div>
+    <div id="engine-grid"></div>
+    <div id="engines-empty" class="empty">
+      <div class="empty-icon">&#9673;</div>
+      <div>还没有车间</div>
+      <div class="muted small">用上方表单添加，或用环境变量 <span class="mono">JAV_ENGINES="名称=URL"</span> 预置</div>
+    </div>
+  </section>
 
-<section>
-  <div class="sec-head">
-    <h2>任务</h2>
-    <span id="job-counts" class="muted small"></span>
-    <select id="job-filter" title="筛选">
-      <option value="all">全部</option>
-      <option value="running">进行中</option>
-      <option value="finished">已完成</option>
-    </select>
-    <span id="last-updated" class="muted small"></span>
-  </div>
-  <div class="table-wrap">
-  <table>
-    <thead><tr><th>车间</th><th>文件</th><th>状态</th><th>进度</th><th>位置</th><th>耗时</th><th></th></tr></thead>
-    <tbody id="job-rows"></tbody>
-  </table>
-  </div>
-  <div id="jobs-empty" class="muted">暂无任务</div>
-</section>
+  <section id="sec-jobs">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Tasks</span><h2>任务</h2></div>
+      <div id="job-stats" class="stats"></div>
+      <div id="job-filter" class="seg" role="group" aria-label="筛选任务">
+        <button type="button" data-f="all" class="on">全部</button>
+        <button type="button" data-f="running">进行中</button>
+        <button type="button" data-f="finished">已完成</button>
+      </div>
+      <span id="last-updated" class="muted small mono"></span>
+    </div>
+    <div class="job-head mono">
+      <span>车间</span><span>文件</span><span>状态</span><span>进度</span><span>位置</span><span>耗时</span><span></span>
+    </div>
+    <div id="job-list" class="table-wrap"></div>
+    <div id="jobs-empty" class="empty">
+      <div class="empty-icon">&#9636;</div>
+      <div id="jobs-empty-text">暂无任务</div>
+      <div class="muted small">把影片拖到下方派工单，或等车间监听目录自动入列</div>
+    </div>
+  </section>
 
-<section>
-  <h2>派工单</h2>
-  <div id="drop">
-    <p>把影片拖到这里，或点击选择文件（mp4 / mkv / ts / mov …）</p>
-    <p class="muted small">原片只传到本服务（不出本机）→ 本地抽 16kHz opus 音轨 → 音轨派给车间解析生成；跨网络只走音轨（2.5h 约 35MB）。纯 CLI 等价：<span class="mono">jav-scribe upload 影片.mkv --remote http://&lt;车间&gt;:8300</span></p>
-    <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
-  </div>
-  <div id="dispatch-bar" hidden>
-    <span id="dispatch-name"></span>
-    <select id="engine-select"></select>
-    <button id="dispatch-go">开始</button>
-    <span id="dispatch-status" class="muted small"></span>
-  </div>
-  <div id="dispatch-progress" hidden><div id="dispatch-fill"></div></div>
-</section>
+  <section id="sec-dispatch">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Dispatch</span><h2>派工单</h2></div>
+    </div>
 
-<footer class="muted small">JavScribe-Web · 进度每 5 秒自动刷新 · 派工流水线每 1 秒更新</footer>
-<div id="toasts"></div>
+    <div id="drop" role="button" tabindex="0" aria-label="选择影片文件">
+      <div class="drop-icon">&#9654;</div>
+      <div class="drop-main">拖入影片，或点击选择文件</div>
+      <div class="muted small">mp4 / mkv / ts / mov … 原片只到本服务（不出本机），抽音轨后只把 opus 派给车间</div>
+      <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
+    </div>
+
+    <div id="file-chip" hidden>
+      <span class="chip-icon">&#9636;</span>
+      <span id="chip-name"></span>
+      <span id="chip-size" class="chip-size mono"></span>
+      <button type="button" id="chip-x" class="icon-btn" title="移除文件">&#10005;</button>
+    </div>
+
+    <div id="dispatch-bar">
+      <label class="field">
+        <span class="field-label">派给车间</span>
+        <select id="engine-select"></select>
+      </label>
+      <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始派工</button>
+    </div>
+
+    <div id="pipeline" hidden>
+      <div class="step" id="step-upload">
+        <div class="step-dot">1</div>
+        <div class="step-body"><div class="step-name">上传</div><div class="step-meta" id="meta-upload"></div></div>
+      </div>
+      <div class="step-line" id="line-1"></div>
+      <div class="step" id="step-extract">
+        <div class="step-dot">2</div>
+        <div class="step-body"><div class="step-name">抽音轨</div><div class="step-meta" id="meta-extract"></div></div>
+      </div>
+      <div class="step-line" id="line-2"></div>
+      <div class="step" id="step-dispatch">
+        <div class="step-dot">3</div>
+        <div class="step-body"><div class="step-name">派工</div><div class="step-meta" id="meta-dispatch"></div></div>
+      </div>
+      <div id="dispatch-progress"><div id="dispatch-fill"></div></div>
+    </div>
+    <div id="dispatch-status" class="dispatch-status" hidden></div>
+  </section>
+</main>
+
+<footer>
+  <span class="mono">JAVSCRIBE-WEB</span>
+  <span id="foot-ver" class="muted mono"></span>
+  <span class="muted">大屏 5s · 流水线 1s</span>
+</footer>
+<div id="toasts" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>
