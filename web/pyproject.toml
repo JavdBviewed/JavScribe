@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jav-scribe-web"
+version = "0.1.0"
+description = "JavScribe control room: aggregate N subtitle workshops (JavScribe serve endpoints) with a web dashboard, upload dispatch and SRT download"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+jav-scribe-web = "jav_scribe_web.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jav_scribe_web = ["static/*"]
