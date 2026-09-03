@@ -286,5 +286,26 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    # -- 跳过任务「仍要重新生成」(代理车间 POST /jobs/<id>/retry) --------------
+
+    @app.post("/api/jobs/{engine}/{job_id}/retry")
+    async def api_retry(engine: str, job_id: str) -> dict:
+        entry = store.get(engine)
+        if entry is None:
+            raise HTTPException(404, "engine not found")
+        eng = JavScribeEngine(engine, entry["url"])
+        try:
+            return await eng.retry(job_id)
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 404:
+                raise HTTPException(404, "任务不存在（已过期）")
+            if ex.response.status_code == 409:
+                raise HTTPException(409, "无可重新生成的文件（非跳过或已处理）")
+            raise HTTPException(502, f"workshop error: HTTP {ex.response.status_code}")
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"workshop unreachable: {ex}")
+        finally:
+            await eng.close()
+
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

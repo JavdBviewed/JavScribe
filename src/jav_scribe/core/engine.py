@@ -103,6 +103,29 @@ class Engine:
     def submit_remote_files(self, files: list[Path], source_name: str) -> Job:
         return self.submit(files, source_kind="remote", label=source_name)
 
+    def retry_job(self, job_id: str) -> "Job | None":
+        """「仍要重新生成」：对任务中 SKIPPED 的文件删掉已存在字幕并重新入队。
+
+        返回新任务；无跳过的文件（或任务已滚出内存）时返回 None。
+        """
+        job = self.job_by_id(job_id)
+        if job is None:
+            return None
+        lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
+        paths: list[Path] = []
+        for task in job.files:
+            if task.status != TaskStatus.SKIPPED:
+                continue
+            target = existing_lang_sub(task.path, lang)
+            if target is not None:
+                target.unlink(missing_ok=True)
+                self.log(f"[engine] 重新生成：已删除旧字幕 {target}")
+            paths.append(task.path)
+        if not paths:
+            return None
+        self.log(f"[engine] 任务 {job_id} 重新生成 {len(paths)} 个文件")
+        return self.submit(paths, source_kind=job.source_kind, label=job.label)
+
     def stop(self) -> None:
         self._stop_evt.set()
         if self._runner is not None:
@@ -139,7 +162,7 @@ class Engine:
                 task.status = TaskStatus.SKIPPED
                 task.phase = TaskPhase.DONE
                 task.progress = 1.0
-                task.message = f"已存在 {target.name}"
+                task.message = f"已存在 {target}"
                 task.finished = time.time()
                 self.log(f"[engine] 跳过（字幕已存在）: {task.path.name}")
                 continue

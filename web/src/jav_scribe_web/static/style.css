@@ -399,6 +399,13 @@ input:focus, select:focus {
 .dl-btn:hover { box-shadow: 0 3px 10px -3px var(--ok); }
 .dl-btn:active { transform: scale(0.96); }
 
+.job-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+/* 「仍要重新生成」：accent 琥珀色，区别于绿色下载键 */
+.dl-btn.retry { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.dl-btn.retry:hover { box-shadow: 0 3px 10px -3px var(--accent); }
+.dl-btn.retry:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
+.retried-note { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
 /* ---------- empty states ---------- */
 .empty {
   text-align: center;

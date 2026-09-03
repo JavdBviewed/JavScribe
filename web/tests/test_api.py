@@ -210,6 +210,37 @@ def test_result_proxy_sanitizes_negative_srt() -> None:
 
 
 
+def test_retry_proxy() -> None:
+    """跳过任务「仍要重新生成」：代理车间 POST /jobs/<id>/retry。"""
+    import httpx
+
+    calls: list[str] = []
+
+    async def fake_retry(self, job_id: str) -> dict:
+        calls.append(job_id)
+        if job_id == "j-409":
+            raise httpx.HTTPStatusError("conflict", request=httpx.Request("POST", "http://x"),
+                                        response=httpx.Response(409, request=httpx.Request("POST", "http://x")))
+        return {"ok": True, "job_id": "j-new-1"}
+
+    JavScribeEngine.retry = fake_retry  # type: ignore[method-assign]
+    try:
+        client, _ = make_client()
+        r = client.post("/api/jobs/车间A/j-done/retry")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "job_id": "j-new-1"}
+        assert calls == ["j-done"]
+        # 车间 409（无跳过的文件）-> 409 中文提示
+        r = client.post("/api/jobs/车间A/j-409/retry")
+        assert r.status_code == 409 and "重新生成" in r.json()["detail"], r.text
+        # 未知车间 -> 404
+        assert client.post("/api/jobs/不存在/j-x/retry").status_code == 404
+        print("  test_retry_proxy OK")
+    finally:
+        del JavScribeEngine.retry  # restore real method
+
+
+
 if __name__ == "__main__":
     test_health_and_engines()
     test_jobs_aggregated_and_sorted()
@@ -218,4 +249,5 @@ if __name__ == "__main__":
     test_upload_pipeline_dispatches_opus()
     test_upload_error_no_audio()
     test_result_proxy_sanitizes_negative_srt()
+    test_retry_proxy()
     print("  test_api OK")

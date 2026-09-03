@@ -1,7 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const DEFAULT_TITLE = "JavScribe 中控室";
-const state = { file: null, filter: "all", busy: false, knownJobs: new Map() };
+const state = { file: null, filter: "all", busy: false, knownJobs: new Map(), retried: new Set() };
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -141,10 +141,16 @@ function renderJobs(rows) {
       const el = now - j.created;
       eta = el > 5 ? `<span class="eta">剩 ~${fmtDuration(el * (1 - j.progress) / j.progress)}</span>` : "";
     }
-    const sub = (j.label && j.label !== j.file) ? j.label : (j.message || "");
+    // 跳过行优先显示 message（含已存在字幕的完整路径）
+    const sub = j.status === "skipped" && j.message ? j.message
+      : (j.label && j.label !== j.file) ? j.label : (j.message || "");
     const dl = j.status === "done" && j.job_id
       ? `<a class="dl-btn" href="/api/jobs/${encodeURIComponent(j.engine)}/${encodeURIComponent(j.job_id)}/result" download>&#8595; 下载 srt</a>`
       : "";
+    const retryKey = j.engine + "|" + j.job_id;
+    const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
+      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新派工">&#8635; 仍要重新生成</button>`
+      : (j.status === "skipped" ? `<span class="retried-note">已重新派工</span>` : "");
     const row = document.createElement("div");
     row.className = "job-grid job-row" + (isRun ? " running" : "");
     row.innerHTML = `
@@ -154,9 +160,30 @@ function renderJobs(rows) {
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span>${eta}</div>
       <div class="job-cell mono">${esc(pos)}</div>
       <div class="job-cell mono">${esc(elapsed)}</div>
-      <div>${dl}</div>`;
+      <div class="job-actions">${dl}${retry}</div>`;
     list.appendChild(row);
   }
+  list.querySelectorAll(".retry").forEach((b) => {
+    b.onclick = async () => {
+      const tr = b.closest(".job-row");
+      const name = tr.querySelector(".fn")?.textContent || "";
+      const jid = b.dataset.jid, eng = b.dataset.eng;
+      state.retried.add(eng + "|" + jid);
+      b.disabled = true; b.textContent = "重新派工中…";
+      const r = await fetch(`/api/jobs/${encodeURIComponent(eng)}/${encodeURIComponent(jid)}/retry`, { method: "POST" });
+      if (r.ok) {
+        const d = await r.json();
+        toast(`「${name}」已删旧字幕重新派工 → 任务 ${d.job_id}`, "ok");
+        refresh();
+      } else {
+        let msg;
+        try { msg = (await r.json()).detail; } catch (_e) {}
+        state.retried.delete(eng + "|" + jid);
+        toast(`重新生成失败：${msg || r.status}`, "err");
+        refresh();
+      }
+    };
+  });
 }
 
 // ---------- 筛选 ----------
@@ -328,11 +355,16 @@ function finishDispatch(ok) {
 }
 
 function pollUpload(id, engine) {
+  let extractT0 = null;
   const timer = setInterval(async () => {
     let d;
     try { d = await jget("/api/uploads/" + id); } catch (_e) { return; }
     if (d.phase === "extracting") {
-      setStep("step-extract", "active", "2", `抽音轨中 · ${Math.round(d.progress * 100)}%`);
+      if (extractT0 == null) extractT0 = Date.now() / 1000;
+      let meta = `抽音轨中 · ${Math.round(d.progress * 100)}%`;
+      const el = Date.now() / 1000 - extractT0;
+      if (el > 5 && d.progress > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - d.progress) / d.progress)}`;
+      setStep("step-extract", "active", "2", meta);
       $("dispatch-fill").style.width = (d.progress * 100).toFixed(1) + "%";
     } else if (d.phase === "dispatching") {
       setStep("step-extract", "done", "\u2713", `音轨 ${d.audio_mb} MB`);

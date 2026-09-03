@@ -5,6 +5,7 @@ Protocol (JavScribe repo, progress_api.py):
   GET  /jobs                       -> [Job summary]
   GET  /jobs/<id>                  -> Job detail (includes files[])
   PUT  /upload?source=NAME         -> 201 {ok, job_id, file}   (body = audio bytes)
+  POST /jobs/<id>/retry          -> 201 {ok, job_id}  (re-queue SKIPPED files, force regenerate)
   GET  /jobs/<id>/result           -> SRT bytes
 """
 from __future__ import annotations
@@ -74,6 +75,15 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         name = _attachment_name(r.headers.get("content-disposition")) or f"{job_id}.srt"
         return r.content, name
+
+    async def retry(self, job_id: str) -> dict:
+        """「仍要重新生成」：车间删除已存在字幕并重新入队跳过的文件。
+
+        返回 {ok, job_id}；车间 404/409 时原样抛出 HTTPStatusError。
+        """
+        r = await self._get_client().post(f"{self.url}/jobs/{job_id}/retry")
+        r.raise_for_status()
+        return r.json()
 
 
 def _attachment_name(content_disposition: str | None) -> str | None:

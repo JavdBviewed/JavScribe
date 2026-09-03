@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from textwrap import dedent
 from pathlib import Path
 
@@ -136,6 +137,38 @@ def test_overwrite() -> None:
         assert job.files[0].status == TaskStatus.DONE, job.files[0].to_dict()
         assert "你好" in video.with_name("demo.zh.srt").read_text(encoding="utf-8")
         print("  test_overwrite OK")
+
+
+def test_retry_skipped_regenerates() -> None:
+    """「仍要重新生成」：跳过的文件删旧字幕、重新入队并真正产出。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video = tmp / "demo.mkv"
+        video.write_bytes(b"fake")
+        zh = video.with_name("demo.zh.srt")
+        zh.write_text("旧字幕\n", encoding="utf-8")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_OK)), log=lambda s: None, profile="test")
+        job = engine.submit([video], run_in_thread=False)
+        assert job.files[0].status == TaskStatus.SKIPPED, job.files[0].to_dict()
+        # 跳过消息带完整路径
+        assert str(zh) in job.files[0].message, job.files[0].message
+        # 无跳过文件时 retry 返回 None
+        done_job = engine.submit([tmp / "none"], run_in_thread=False)  # 文件不存在 → 失败，非跳过
+        assert engine.retry_job(done_job.id) is None
+        # retry：删旧字幕 + 新任务完成
+        new_job = engine.retry_job(job.id)
+        assert new_job is not None and new_job.id != job.id
+        assert not zh.exists(), "旧字幕应已删除"
+        deadline = time.time() + 30
+        while time.time() < deadline and new_job.files[0].status not in (
+            TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELED
+        ):
+            time.sleep(0.05)
+        assert new_job.files[0].status == TaskStatus.DONE, new_job.files[0].to_dict()
+        assert "你好" in zh.read_text(encoding="utf-8")
+        # 原任务仍保持 skipped（历史不改写）
+        assert job.files[0].status == TaskStatus.SKIPPED
+        print("  test_retry_skipped_regenerates OK")
 
 
 def test_mismatched_log_path() -> None:
@@ -313,6 +346,7 @@ if __name__ == "__main__":
     test_overwrite()
     test_mismatched_log_path()
     test_run_and_finalize_english_log()
+    test_retry_skipped_regenerates()
     test_sanitize_evidence_pattern()
     test_sanitize_valid_passthrough()
     test_sanitize_unparseable_untouched()

@@ -5,6 +5,7 @@ Endpoints (all JSON unless noted):
   GET  /jobs                   -> list of job summaries
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
+  POST /jobs/<id>/retry       -> re-queue SKIPPED files (force regenerate)
   PUT  /upload?source=<name>   -> body = audio bytes; creates a remote job
                                    (X-Source-Name header or ?source=, ?ext=)
   GET  /jobs/<id>/result.srt   -> alias of /result
@@ -85,6 +86,18 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(200, data, "text/plain")
                 return
             self._send(200, job.to_dict(detail=True))
+            return
+        self._send(404, {"ok": False, "error": "not found"})
+
+    # -- POST /jobs/<id>/retry -------------------------------------------------
+    def do_POST(self) -> None:
+        parts = self.path.split("?")[0].strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
+            job = self.engine.retry_job(parts[1])
+            if job is None:
+                self._send(409, {"ok": False, "error": "no retryable file（无跳过的文件，或任务已过期）"})
+            else:
+                self._send(201, {"ok": True, "job_id": job.id})
             return
         self._send(404, {"ok": False, "error": "not found"})
 
