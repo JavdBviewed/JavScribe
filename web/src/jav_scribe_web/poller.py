@@ -1,4 +1,4 @@
-"""Periodic refresh of the in-memory snapshot of all workshops."""
+"""Periodic refresh of the in-memory snapshot of all subtitle services."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ from .engines.javscribe import JavScribeEngine
 class Poller:
     """Refreshes {engine: EngineInfo} and {engine: [job details]} in place.
 
-    The control room keeps no task state of its own: on a workshop restart
+    The workbench keeps no task state of its own: on a service restart
     its job list is simply gone, and the snapshot follows. Failed engines
     keep their last known jobs with online=False.
     """
@@ -72,11 +72,13 @@ class Poller:
                 device=h.get("device", ""),
                 version=h.get("version", ""),
                 jobs_running=running,
+                has_key=bool(entry.get("api_key")),
             )
             self.jobs[name] = details
         except Exception as ex:
             prev = self.engines.get(name)
-            info = EngineInfo(name=name, url=url, online=False, error=str(ex)[:200])
+            info = EngineInfo(name=name, url=url, online=False, error=str(ex)[:200],
+                              has_key=bool(entry.get("api_key")))
             if prev is not None:
                 info.device = prev.device
                 info.version = prev.version

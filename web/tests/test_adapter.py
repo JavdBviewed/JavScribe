@@ -105,8 +105,72 @@ def test_jobs_tolerates_non_list() -> None:
     asyncio.run(run())
 
 
+def test_config_get_put_sends_api_key() -> None:
+    seen: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/config" and request.method == "GET":
+            seen["get_key"] = {"k": request.headers.get("X-Api-Key")}
+            return httpx.Response(200, json={"ok": True, "profile": "server", "items": [
+                {"path": "subtitle.lang_tag", "label": "字幕语言标签", "type": "string", "value": "zh"},
+            ]})
+        if p == "/config" and request.method == "PUT":
+            body = json.loads(request.content.decode())
+            seen["put"] = {"key": request.headers.get("X-Api-Key"), "body": body}
+            return httpx.Response(200, json={"ok": True, "updated": ["subtitle.lang_tag"]})
+        return httpx.Response(404, json={"ok": False, "error": "not found"})
+
+    async def run():
+        e = JavScribeEngine("w", BASE, api_key="k1")
+        e._client = _client(handler)
+        try:
+            d = await e.config()
+            assert d["ok"] and d["items"][0]["path"] == "subtitle.lang_tag"
+            assert seen["get_key"]["k"] == "k1"
+            r = await e.config_update({"subtitle.lang_tag": "ja"})
+            assert r == {"ok": True, "updated": ["subtitle.lang_tag"]}
+            assert seen["put"]["key"] == "k1"
+            assert seen["put"]["body"] == {"values": {"subtitle.lang_tag": "ja"}}
+        finally:
+            await e.close()
+        # no key -> no auth header
+        e2 = JavScribeEngine("w", BASE)
+        e2._client = _client(handler)
+        try:
+            await e2.config()
+            assert seen["get_key"]["k"] is None
+        finally:
+            await e2.close()
+
+    asyncio.run(run())
+
+
+def test_config_error_propagates() -> None:
+    import httpx as _httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"ok": False, "error": "API Key 不正确"})
+
+    async def run():
+        e = JavScribeEngine("w", BASE, api_key="wrong")
+        e._client = _client(handler)
+        try:
+            try:
+                await e.config()
+                raise AssertionError("expected HTTPStatusError")
+            except _httpx.HTTPStatusError as ex:
+                assert ex.response.status_code == 401
+        finally:
+            await e.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_health_jobs_detail()
     test_upload_ok_and_rejected()
     test_jobs_tolerates_non_list()
+    test_config_get_put_sends_api_key()
+    test_config_error_propagates()
     print("  test_adapter OK")

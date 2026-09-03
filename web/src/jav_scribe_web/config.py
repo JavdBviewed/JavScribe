@@ -1,6 +1,6 @@
 """Engine registry: the only state the control room persists.
 
-Engines are named workshop endpoints (JavScribe `serve` URLs). The preset
+Engines are named subtitle-service endpoints (JavScribe `serve` URLs). The preset
 table can be supplied via the JAV_ENGINES environment variable
 (`name=url,name=url`); engines added/removed through the API are persisted
 to <data_dir>/engines.json. Env presets are merged idempotently on every
@@ -45,7 +45,7 @@ class EngineStore:
         self._engines: dict[str, dict] = {}
         self._load_file()
         for name, url in parse_engines_env(os.environ.get("JAV_ENGINES", "")):
-            self._upsert(name, url)
+            self._upsert(name, url)  # api_key=None: 保留已登记的 key
 
     # -- persistence ------------------------------------------------------
     def _load_file(self) -> None:
@@ -56,7 +56,8 @@ class EngineStore:
             for entry in data.get("engines", []):
                 name, url = entry["name"], entry["url"]
                 if name and is_url(url):
-                    self._upsert(name, url)
+                    # 旧文件可能没有 api_key 字段（向后兼容）
+                    self._upsert(name, url, entry.get("api_key", ""))
         except (json.JSONDecodeError, KeyError, TypeError):
             # Corrupt registry: start fresh rather than crash the service.
             pass
@@ -71,10 +72,17 @@ class EngineStore:
         tmp.replace(self._path)
 
     # -- mutation ----------------------------------------------------------
-    def _upsert(self, name: str, url: str) -> None:
-        self._engines[name] = {"name": name, "url": url.rstrip("/")}
+    def _upsert(self, name: str, url: str, api_key: Optional[str] = None) -> None:
+        """Register/refresh an engine. api_key=None keeps the stored key
+        (env preset merge must not wipe a key set via the API)."""
+        entry = {"name": name, "url": url.rstrip("/")}
+        if api_key is None:
+            entry["api_key"] = self._engines.get(name, {}).get("api_key", "")
+        else:
+            entry["api_key"] = api_key.strip()
+        self._engines[name] = entry
 
-    def add(self, name: str, url: str) -> Optional[dict]:
+    def add(self, name: str, url: str, api_key: Optional[str] = None) -> Optional[dict]:
         """Add or update an engine. Returns the entry, or None if rejected."""
         name = (name or "").strip()
         url = (url or "").strip()
@@ -84,9 +92,19 @@ class EngineStore:
             existing = self._engines.get(name)
             if existing is not None and existing["url"] != url.rstrip("/"):
                 return None  # same name pointing elsewhere is a different engine
-            self._upsert(name, url)
+            self._upsert(name, url, api_key)
             self._save()
             return self._engines[name]
+
+    def set_api_key(self, name: str, api_key: str) -> Optional[dict]:
+        """Update only the stored API key for an existing engine."""
+        with self._lock:
+            entry = self._engines.get(name)
+            if entry is None:
+                return None
+            entry["api_key"] = (api_key or "").strip()
+            self._save()
+            return entry
 
     def remove(self, name: str) -> bool:
         with self._lock:

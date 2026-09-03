@@ -1,6 +1,6 @@
-"""SRT 防御性清洗（中控下载代理侧兜底）。
+"""SRT 防御性清洗（工作台下载代理侧兜底）。
 
-与主仓 `jav_scribe/core/finalize.py` 的同名逻辑保持一致（中控与车间是两个
+与主仓 `jav_scribe/core/finalize.py` 的同名逻辑保持一致（工作台与服务是两个
 独立部署体，各自内置一份，避免跨包依赖）。
 
 背景：上游引擎（faster-whisper 批量推断 + translate 任务）偶发产出负的 cue

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class EngineInfo:
-    """Latest known state of one workshop endpoint."""
+    """Latest known state of one subtitle-service endpoint."""
 
     name: str
     url: str
@@ -23,6 +23,7 @@ class EngineInfo:
     version: str = ""
     jobs_running: int = 0
     error: str = ""
+    has_key: bool = False
     updated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -34,6 +35,7 @@ class EngineInfo:
             "version": self.version,
             "jobs_running": self.jobs_running,
             "error": self.error,
+            "has_key": self.has_key,
             "updated_at": self.updated_at,
         }
 
@@ -48,7 +50,7 @@ class EngineAdapter(ABC):
 
     @abstractmethod
     async def jobs(self) -> list[dict]:
-        """Job summaries in workshop format (JavScribe Job.to_dict)."""
+        """Job summaries in service format (JavScribe Job.to_dict)."""
 
     @abstractmethod
     async def job_detail(self, job_id: str) -> dict:

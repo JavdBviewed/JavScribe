@@ -12,8 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import httpx  # noqa: E402
+
 from jav_scribe_web.api import build_app  # noqa: E402
 from jav_scribe_web.config import EngineStore  # noqa: E402
+from jav_scribe_web.engines import javscribe as _jsm  # noqa: E402
 from jav_scribe_web.engines.base import EngineInfo  # noqa: E402
 from jav_scribe_web.engines.javscribe import JavScribeEngine  # noqa: E402
 from jav_scribe_web.poller import Poller  # noqa: E402
@@ -100,7 +103,7 @@ def test_engine_crud() -> None:
 def test_static_index() -> None:
     client, _ = make_client()
     r = client.get("/")
-    assert r.status_code == 200 and "中控室" in r.text
+    assert r.status_code == 200 and "字幕工作台" in r.text
 
 
 def _wait_upload(client, upload_id: str, timeout: float = 30.0) -> dict:
@@ -179,7 +182,7 @@ def test_upload_error_no_audio() -> None:
             assert r.status_code == 202, r.text
             d = _wait_upload(client, r.json()["upload_id"])
             assert d["phase"] == "error", d
-            assert d["error"] and "音轨提取失败" in d["error"]
+            assert d["error"] and "提取音频失败" in d["error"]
         # unknown upload id -> 404
         assert client.get("/api/uploads/nope").status_code == 404
 
@@ -251,3 +254,102 @@ if __name__ == "__main__":
     test_result_proxy_sanitizes_negative_srt()
     test_retry_proxy()
     print("  test_api OK")
+
+
+# ---------- engine api_key + /config proxy ----------
+
+def _status_err(code: int, msg: str) -> httpx.HTTPStatusError:
+    req = httpx.Request("GET", "http://10.0.0.3:8300/config")
+    resp = httpx.Response(code, json={"ok": False, "error": msg}, request=req)
+    return httpx.HTTPStatusError(f"HTTP {code}", request=req, response=resp)
+
+
+def test_engine_api_key_registration() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        store = EngineStore(td)
+        poller = Poller(store)
+        client = TestClient(build_app(store, poller))
+        r = client.post(
+            "/api/engines",
+            json={"name": "srv", "url": "http://10.0.0.3:8300", "api_key": "k9"},
+        )
+        assert r.status_code == 201 and r.json()["has_key"] is True
+        assert store.get("srv")["api_key"] == "k9"
+        # 列表回 has_key（模拟一次 poller tick 之后）
+        poller.engines["srv"] = EngineInfo(
+            "srv", "http://10.0.0.3:8300", online=True, has_key=True
+        )
+        listed = next(e for e in client.get("/api/engines").json() if e["name"] == "srv")
+        assert listed["has_key"] is True
+        assert "api_key" not in listed  # 列表不回显 key 明文
+        assert client.put("/api/engines/srv", json={"api_key": "k10"}).status_code == 200
+        assert store.get("srv")["api_key"] == "k10"
+        assert client.put("/api/engines/nope", json={"api_key": "x"}).status_code == 404
+
+
+def test_config_proxy_ok_and_key_passthrough() -> None:
+    client, store = make_client()
+    store.add("srv", "http://10.0.0.3:8300")
+    store.set_api_key("srv", "k1")
+    captured: dict = {}
+    orig_get, orig_put = _jsm.JavScribeEngine.config, _jsm.JavScribeEngine.config_update
+
+    async def fake_config(self):
+        captured["key"] = self.api_key
+        return {
+            "ok": True, "profile": "server",
+            "items": [{"path": "subtitle.lang_tag", "label": "字幕语言标签", "type": "string", "value": "zh"}],
+        }
+
+    async def fake_put(self, values):
+        captured["values"] = values
+        return {"ok": True, "updated": list(values)}
+
+    _jsm.JavScribeEngine.config, _jsm.JavScribeEngine.config_update = fake_config, fake_put
+    try:
+        r = client.get("/api/engines/srv/config")
+        assert r.status_code == 200
+        assert r.json()["items"][0]["path"] == "subtitle.lang_tag"
+        assert captured["key"] == "k1", "api_key 未从登记表透传给适配器"
+        r = client.put("/api/engines/srv/config", json={"values": {"subtitle.lang_tag": "ja"}})
+        assert r.status_code == 200 and r.json()["updated"] == ["subtitle.lang_tag"]
+        assert captured["values"] == {"subtitle.lang_tag": "ja"}
+        # 缺 values / 未知服务
+        assert client.put("/api/engines/srv/config", json={}).status_code == 400
+        assert client.put("/api/engines/srv/config", json={"values": {}}).status_code == 400
+        assert client.get("/api/engines/nope/config").status_code == 404
+    finally:
+        _jsm.JavScribeEngine.config, _jsm.JavScribeEngine.config_update = orig_get, orig_put
+
+
+def test_config_proxy_error_mapping() -> None:
+    client, store = make_client()
+    store.add("srv", "http://10.0.0.3:8300")
+    store.set_api_key("srv", "k1")
+    orig = _jsm.JavScribeEngine.config
+
+    def _raise(err):
+        async def fake(self):
+            raise err
+        return fake
+
+    cases = [
+        (_status_err(401, "API Key 不正确"), 400, "API Key"),
+        (_status_err(403, "服务未设置 API Key（JAVSCRIBE_API_KEY）"), 400, "尚未设置"),
+        (_status_err(404, "not found"), 400, "版本过旧"),
+        (_status_err(400, "不支持的配置项: nope"), 400, "不支持的配置项"),
+    ]
+    try:
+        for err, want_code, want_frag in cases:
+            _jsm.JavScribeEngine.config = _raise(err)
+            r = client.get("/api/engines/srv/config")
+            assert r.status_code == want_code, (want_code, r.status_code, r.text)
+            assert want_frag in r.json()["detail"], (want_frag, r.text)
+        # 连接失败 -> 502 服务不可达
+        async def fake_unreachable(self):
+            raise httpx.ConnectError("boom")
+        _jsm.JavScribeEngine.config = fake_unreachable
+        r = client.get("/api/engines/srv/config")
+        assert r.status_code == 502 and "不可达" in r.json()["detail"], r.text
+    finally:
+        _jsm.JavScribeEngine.config = orig

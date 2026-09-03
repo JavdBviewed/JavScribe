@@ -1,4 +1,4 @@
-# JavScribe-Web control room image (no GPU required — runs on any node).
+# JavScribe-Web subtitle workbench image (no GPU required — runs on any node).
 #
 # The base defaults to nvidia/cuda:12.8.0-base-ubuntu24.04: already present on
 # the reference server, so no Docker Hub pull is needed. If your network can
@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai
 
-# ffmpeg is needed for server-side audio track extraction (派工单 upload path)
+# ffmpeg is needed for server-side audio extraction (generate upload path)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 python3-pip ffmpeg ca-certificates \

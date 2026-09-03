@@ -31,7 +31,7 @@ def main() -> None:
     async def lifespan(app):
         task = asyncio.get_running_loop().create_task(poller.run())
         log.info(
-            "JavScribe-Web v%s 启动 | 车间 %d 个 | http://0.0.0.0:%d",
+            "JavScribe-Web v%s 启动 | 服务 %d 个 | http://0.0.0.0:%d",
             __version__,
             len(store.engines),
             port,

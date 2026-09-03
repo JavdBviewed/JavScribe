@@ -1,4 +1,4 @@
-"""Control room HTTP API + static frontend."""
+"""Subtitle workbench HTTP API + static frontend."""
 from __future__ import annotations
 
 import asyncio
@@ -77,11 +77,11 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
     return rows
 
 
-# -- 派工单流水线（上传 → 本地抽音轨 → 转发车间）----------------------------------
+# -- 字幕生成流水线（上传 → 本地提取音频 → 转发服务）----------------------------------
 
 @dataclass
 class UploadTask:
-    """One 派工单 pipeline run; phases: extracting -> dispatching -> done/error."""
+    """One subtitle-generation pipeline run; phases: extracting -> dispatching -> done/error."""
 
     id: str
     engine: str
@@ -143,15 +143,26 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
 
     @app.post("/api/engines", status_code=201)
     async def api_add_engine(body: dict) -> dict:
-        entry = store.add(str(body.get("name", "")), str(body.get("url", "")))
+        entry = store.add(
+            str(body.get("name", "")),
+            str(body.get("url", "")),
+            body.get("api_key", ""),
+        )
         if entry is None:
             raise HTTPException(400, "name/url 无效，或该名称已指向其它地址")
-        return entry
+        return {"ok": True, "name": entry["name"], "url": entry["url"], "has_key": bool(entry["api_key"])}
+
+    @app.put("/api/engines/{name}")
+    async def api_update_engine(name: str, body: dict) -> dict:
+        entry = store.set_api_key(name, str(body.get("api_key", "")) if body else "")
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        return {"ok": True, "name": entry["name"], "has_key": bool(entry["api_key"])}
 
     @app.delete("/api/engines/{name}")
     async def api_remove_engine(name: str) -> dict:
         if not store.remove(name):
-            raise HTTPException(404, "engine not found")
+            raise HTTPException(404, "服务不存在")
         return {"ok": True}
 
     @app.get("/api/jobs")
@@ -168,7 +179,7 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
         )
         return rows
 
-    # -- 派工单：浏览器上传 → 本地抽音轨 → 转发车间（2 段式，进度可查）-----------
+    # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
 
     async def _run_upload(task: UploadTask, video_tmp: Path) -> None:
         entry = store.get(task.engine)
@@ -184,7 +195,7 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
                 task.audio_mb = round(size / 1048576, 1)
             except Exception as ex:
                 task.phase = "error"
-                task.error = f"音轨提取失败: {ex}"
+                task.error = f"提取音频失败: {ex}"
                 return
             task.phase = "dispatching"
             eng = JavScribeEngine(task.engine, entry["url"])
@@ -195,7 +206,7 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
                     )
             except Exception as ex:
                 task.phase = "error"
-                task.error = f"车间拒绝任务: {ex}"
+                task.error = f"服务拒绝任务: {ex}"
                 return
             finally:
                 await eng.close()
@@ -253,7 +264,7 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             raise HTTPException(404, "upload not found (已过期或 id 无效)")
         return task.to_dict()
 
-    # -- srt 下载（代理车间 /result）-------------------------------------------
+    # -- srt 下载（代理服务 /result）-------------------------------------------
 
     @app.get("/api/jobs/{engine}/{job_id}/result")
     async def api_result(engine: str, job_id: str) -> Response:
@@ -266,12 +277,12 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
         except httpx.HTTPStatusError as ex:
             if ex.response.status_code == 404:
                 raise HTTPException(404, "no result yet (任务未完成或无输出)")
-            raise HTTPException(502, f"workshop error: HTTP {ex.response.status_code}")
+            raise HTTPException(502, f"服务请求失败: HTTP {ex.response.status_code}")
         except httpx.HTTPError as ex:
-            raise HTTPException(502, f"workshop unreachable: {ex}")
+            raise HTTPException(502, f"服务不可达: {ex}")
         finally:
             await eng.close()
-        # 防御兜底：车间引擎偶发产出负时间戳 srt（见 srt_sanitizer 注释），
+        # 防御兜底：服务引擎偶发产出负时间戳 srt（见 srt_sanitizer 注释），
         # 下载代理处统一清洗，保证用户拿到的文件合法。
         data, _fixed = sanitize_srt_bytes(data, log=_log.warning)
         label = next(
@@ -286,7 +297,7 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    # -- 跳过任务「仍要重新生成」(代理车间 POST /jobs/<id>/retry) --------------
+    # -- 跳过任务「仍要重新生成」(代理服务 POST /jobs/<id>/retry) --------------
 
     @app.post("/api/jobs/{engine}/{job_id}/retry")
     async def api_retry(engine: str, job_id: str) -> dict:
@@ -301,9 +312,61 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
                 raise HTTPException(404, "任务不存在（已过期）")
             if ex.response.status_code == 409:
                 raise HTTPException(409, "无可重新生成的文件（非跳过或已处理）")
-            raise HTTPException(502, f"workshop error: HTTP {ex.response.status_code}")
+            raise HTTPException(502, f"服务请求失败: HTTP {ex.response.status_code}")
         except httpx.HTTPError as ex:
-            raise HTTPException(502, f"workshop unreachable: {ex}")
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
+    # -- 服务设置（代理 /config，X-Api-Key 鉴权在服务侧执行）-----------------
+
+    def _map_config_error(ex: httpx.HTTPStatusError) -> HTTPException:
+        code = ex.response.status_code
+        if code in (401, 403):
+            detail = "该服务尚未设置 API Key，或工作台登记的 Key 不正确"
+            if code == 403:
+                detail = "该服务尚未设置 API Key（需在服务端配置 JAVSCRIBE_API_KEY）"
+            else:
+                detail = "API Key 不正确：请核对服务端的 JAVSCRIBE_API_KEY 与工作台登记值"
+            return HTTPException(400, detail)
+        if code == 404:
+            return HTTPException(400, "该服务版本过旧，不支持配置管理（请升级 JavScribe 服务）")
+        try:
+            msg = ex.response.json().get("error", "")
+        except Exception:  # noqa: BLE001
+            msg = ""
+        return HTTPException(code if 400 <= code < 500 else 502, f"服务请求失败: {msg or code}")
+
+    @app.get("/api/engines/{name}/config")
+    async def api_engine_config(name: str) -> dict:
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
+        try:
+            return await eng.config()
+        except httpx.HTTPStatusError as ex:
+            raise _map_config_error(ex)
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
+    @app.put("/api/engines/{name}/config")
+    async def api_engine_config_update(name: str, body: dict) -> dict:
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        values = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(values, dict) or not values:
+            raise HTTPException(400, "values 不能为空")
+        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
+        try:
+            return await eng.config_update(values)
+        except httpx.HTTPStatusError as ex:
+            raise _map_config_error(ex)
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
         finally:
             await eng.close()
 

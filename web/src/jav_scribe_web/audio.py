@@ -1,7 +1,7 @@
 """Audio track extraction (identical params to the JavScribe CLI upload flow).
 
 16kHz mono opus @32kbps: ~35MB per 2.5h movie. Only the track crosses the
-network to a workshop; the video itself never leaves this service.
+network to a subtitle service; the video itself never leaves this service.
 """
 from __future__ import annotations
 

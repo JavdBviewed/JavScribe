@@ -51,7 +51,7 @@ def test_add_remove_persist() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EngineStore(td)
         e = store.add("w", "http://10.9.9.9:8300/")
-        assert e == {"name": "w", "url": "http://10.9.9.9:8300"}
+        assert e == {"name": "w", "url": "http://10.9.9.9:8300", "api_key": ""}
         # same name same url = idempotent update
         assert store.add("w", "http://10.9.9.9:8300")["url"] == "http://10.9.9.9:8300"
         # same name different url = rejected
@@ -68,6 +68,31 @@ def test_add_remove_persist() -> None:
         assert EngineStore(td).get("v")["url"] == "http://1.2.3.4:8300"
 
 
+def test_api_key_handling() -> None:
+    os.environ.pop("JAV_ENGINES", None)
+    with tempfile.TemporaryDirectory() as td:
+        store = EngineStore(td)
+        # add with key
+        e = store.add("w", "http://10.9.9.9:8300", "k1")
+        assert e["api_key"] == "k1"
+        # persistence round-trip keeps the key
+        assert EngineStore(td).get("w")["api_key"] == "k1"
+        # set_api_key updates / rejects unknown
+        assert store.set_api_key("w", "k2")["api_key"] == "k2"
+        assert store.set_api_key("nope", "x") is None
+        assert EngineStore(td).get("w")["api_key"] == "k2"
+        # add() with explicit "" resets the key
+        assert store.add("w", "http://10.9.9.9:8300", "")["api_key"] == ""
+        # env preset merge must not wipe a stored key
+        os.environ["JAV_ENGINES"] = "w=http://10.9.9.9:8300"
+        try:
+            store.set_api_key("w", "keep-me")
+            reloaded = EngineStore(td)
+            assert reloaded.get("w")["api_key"] == "keep-me"
+        finally:
+            os.environ.pop("JAV_ENGINES", None)
+
+
 def test_corrupt_registry_recovers() -> None:
     os.environ.pop("JAV_ENGINES", None)
     with tempfile.TemporaryDirectory() as td:
@@ -82,5 +107,6 @@ if __name__ == "__main__":
     test_is_url()
     test_env_merge_idempotent()
     test_add_remove_persist()
+    test_api_key_handling()
     test_corrupt_registry_recovers()
     print("  test_config OK")

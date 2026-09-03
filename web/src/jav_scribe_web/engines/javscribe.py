@@ -7,6 +7,8 @@ Protocol (JavScribe repo, progress_api.py):
   PUT  /upload?source=NAME         -> 201 {ok, job_id, file}   (body = audio bytes)
   POST /jobs/<id>/retry          -> 201 {ok, job_id}  (re-queue SKIPPED files, force regenerate)
   GET  /jobs/<id>/result           -> SRT bytes
+  GET  /config                     -> {ok, profile, items[]}      (X-Api-Key)
+  PUT  /config {"values": {...}}   -> {ok, updated[]}             (X-Api-Key)
 """
 from __future__ import annotations
 
@@ -24,9 +26,16 @@ class EngineUploadError(RuntimeError):
 
 
 class JavScribeEngine(EngineAdapter):
-    def __init__(self, name: str, url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        api_key: str = "",
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.name = name
         self.url = url.rstrip("/")
+        self.api_key = (api_key or "").strip()
         self._client = client
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -67,7 +76,7 @@ class JavScribeEngine(EngineAdapter):
             headers={"X-Source-Name": source_name, "Content-Type": "application/octet-stream"},
         )
         if r.status_code != 201:
-            raise EngineUploadError(f"workshop rejected upload: HTTP {r.status_code}")
+            raise EngineUploadError(f"service rejected upload: HTTP {r.status_code}")
         return str(r.json()["job_id"])
 
     async def result(self, job_id: str) -> tuple[bytes, str]:
@@ -77,11 +86,33 @@ class JavScribeEngine(EngineAdapter):
         return r.content, name
 
     async def retry(self, job_id: str) -> dict:
-        """「仍要重新生成」：车间删除已存在字幕并重新入队跳过的文件。
+        """「仍要重新生成」：服务删除已存在字幕并重新入队跳过的文件。
 
-        返回 {ok, job_id}；车间 404/409 时原样抛出 HTTPStatusError。
+        返回 {ok, job_id}；服务 404/409 时原样抛出 HTTPStatusError。
         """
         r = await self._get_client().post(f"{self.url}/jobs/{job_id}/retry")
+        r.raise_for_status()
+        return r.json()
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"X-Api-Key": self.api_key} if self.api_key else {}
+
+    async def config(self) -> dict:
+        """GET /config（服务侧白名单设置项，敏感项打码）。
+
+        服务未设 key → 403；key 不符 → 401；旧镜像无此端点 → 404。
+        """
+        r = await self._get_client().get(f"{self.url}/config", headers=self._auth_headers())
+        r.raise_for_status()
+        return r.json()
+
+    async def config_update(self, values: dict) -> dict:
+        """PUT /config：白名单校验由服务侧执行；返回 {ok, updated[]}。"""
+        r = await self._get_client().put(
+            f"{self.url}/config",
+            json={"values": values},
+            headers=self._auth_headers(),
+        )
         r.raise_for_status()
         return r.json()
 
