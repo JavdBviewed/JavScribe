@@ -24,7 +24,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .config import config_file_path, load_config
 from .constants import APP_VERSION, DEFAULT_PROGRESS_PORT, REMOTE_AUDIO_KBITRATE
 
 
@@ -159,7 +159,13 @@ def cmd_serve(args) -> int:
             engine.expand(files), source_kind="watch", label=str(files[0].parent)
         ),
     )
-    http = ProgressHTTP(engine, host=host, port=port, profile=profile)
+    http = ProgressHTTP(
+        engine,
+        host=host,
+        port=port,
+        profile=profile,
+        config_path=config_file_path(args.config),
+    )
     http.start()
     watcher.start()
     _log(f"[serve] 进度接口: http://<本机IP>:{port}/health | 上传: PUT /upload?source=NAME")

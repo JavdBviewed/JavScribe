@@ -5,9 +5,10 @@
 #   docker compose -f docker/docker-compose.yml up -d --build
 #
 # Env overrides:
-#   JAV_PORT        host port for the progress/upload API (default 8300)
-#   JAV_MODELS_DIR  host dir for model weights (default /opt/jav-scribe/models)
-#   JAV_WATCH_DIR   host dir to watch for finished downloads (default /media/jav)
+#   JAV_PORT          host port for the progress/upload API (default 8300)
+#   JAV_MODELS_DIR    host dir for model weights (default /opt/jav-scribe/models)
+#   JAV_WATCH_DIR     host dir to watch for finished downloads (default /media/jav)
+#   JAVSCRIBE_API_KEY  auth key for the /config settings API (optional)
 name: jav-scribe
 
 services:
@@ -23,6 +24,9 @@ services:
     shm_size: "4g"
     environment:
       TZ: Asia/Shanghai
+      # Optional: enables /config (settings) management with X-Api-Key auth.
+      # The web workbench stores the same key per service when you add it.
+      JAVSCRIBE_API_KEY: "${JAVSCRIBE_API_KEY:-}"
     ports:
       - "${JAV_PORT:-8300}:8300"
     volumes:

@@ -79,6 +79,9 @@ DEFAULTS: dict[str, Any] = {
         "host": DEFAULT_PROGRESS_HOST,
         "port": DEFAULT_PROGRESS_PORT,
     },
+    # 进度/配置管理 API 的鉴权 key。推荐 env JAVSCRIBE_API_KEY（见下方 fallback），
+    # 也支持直接写在配置文件（profiles.<active>.api.key）。
+    "api": {"key": ""},
 }
 
 
@@ -92,7 +95,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def _config_file_path(explicit: str | None) -> Path | None:
+def config_file_path(explicit: str | None) -> Path | None:
+    """Resolve the config file path actually in use (None when no file)."""
     candidates = []
     if explicit:
         candidates.append(Path(explicit))
@@ -113,7 +117,7 @@ def load_config(
 ) -> tuple[dict[str, Any], str]:
     """Return (merged_profile_config, profile_name)."""
     file_data: dict[str, Any] = {}
-    p = _config_file_path(path)
+    p = config_file_path(path)
     if p:
         try:
             file_data = json.loads(p.read_text(encoding="utf-8"))
@@ -153,5 +157,7 @@ def load_config(
         cfg["polish"]["api_key"] = os.environ["JAVSCRIBE_LLM_API_KEY"]
     if not cfg.get("emby", {}).get("api_key") and os.environ.get("JAVSCRIBE_EMBY_API_KEY"):
         cfg["emby"]["api_key"] = os.environ["JAVSCRIBE_EMBY_API_KEY"]
+    if not cfg.get("api", {}).get("key") and os.environ.get("JAVSCRIBE_API_KEY"):
+        cfg["api"]["key"] = os.environ["JAVSCRIBE_API_KEY"]
 
     return cfg, profile_name
