@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from textwrap import dedent
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -165,6 +166,125 @@ def test_run_and_finalize_english_log() -> None:
         print("  test_run_and_finalize_english_log OK")
 
 
+# ---------------------------------------------------------------------------
+# SRT 防御性清洗（负时间戳/乱序兜底）
+# ---------------------------------------------------------------------------
+
+from jav_scribe.core.finalize import sanitize_srt_file, sanitize_srt_text  # noqa: E402
+
+# 取证样本：PJAM-045 首部 2 条负 start（faster-whisper translate 首段无起始时间戳）
+EVIDENCE_HEAD = (
+    "1\n"
+    "-1:45:55,320 --> 00:00:23,880\n"
+    "毕竟科长你啊 只要喝醉了就肯定会搭讪的吧？\n"
+    "\n"
+    "2\n"
+    "-1:51:58,760 --> 00:01:58,300\n"
+    "嘛 也是呢 确实是店长的本领\n"
+    "\n"
+    "3\n"
+    "00:00:09,300 --> 00:00:15,660\n"
+    "之前啊 我去大阪喝了一点 虽然不是很想喝\n"
+    "\n"
+)
+
+
+def _parse_back(text: str) -> list[tuple[int, int]]:
+    out = []
+    for blk in text.strip().split("\n\n"):
+        lines = blk.split("\n")
+        ts = [l for l in lines if "-->" in l][0]
+        def ms(hms):
+            h, m, s = hms.split(":")
+            s, x = s.split(",")
+            return (int(h) * 3600 + int(m) * 60 + int(s)) * 1000 + int(x)
+        a, b = ts.split(" --> ")
+        out.append((ms(a), ms(b)))
+    return out
+
+
+def test_sanitize_evidence_pattern() -> None:
+    """取证模式：前 2 条负 start → 全量非负、按 start 升序、文本不变、重编号。"""
+    logs: list[str] = []
+    new_text, fixed = sanitize_srt_text(EVIDENCE_HEAD, log=logs.append)
+    assert fixed == 2, logs
+    cues = _parse_back(new_text)
+    assert all(s >= 0 for s, _ in cues), cues
+    assert cues == sorted(cues), cues
+    # 两条负值 clamp 到 0，end 不变
+    assert (0, 23880) in cues and (0, 118300) in cues and (9300, 15660) in cues
+    assert "毕竟科长你啊" in new_text and "店长的本领" in new_text
+    assert "之前啊" in new_text
+    assert "1\n00:00:00,000 --> 00:00:23,880" in new_text
+    print("  test_sanitize_evidence_pattern OK")
+
+
+def test_sanitize_valid_passthrough() -> None:
+    valid = "1\n00:00:01,000 --> 00:00:02,000\n甲\n\n2\n00:00:03,000 --> 00:00:04,000\n乙\n\n"
+    new_text, fixed = sanitize_srt_text(valid)
+    assert fixed == 0 and new_text == valid
+    print("  test_sanitize_valid_passthrough OK")
+
+
+def test_sanitize_unparseable_untouched() -> None:
+    for garbage in ("", "\n\n", "这不是 srt", "1\n乱来 --> 乱来\n文本\n\n", "1\n00:00:01,000 --> 00:00:02,000\n文本\r\n"):
+        new_text, fixed = sanitize_srt_text(garbage)
+        assert new_text == garbage and fixed == 0, repr(garbage)
+    print("  test_sanitize_unparseable_untouched OK")
+
+
+def test_sanitize_end_negative_and_inverted() -> None:
+    text = (
+        "1\n-00:00:10,000 --> -00:00:05,000\n甲\n\n"   # 整条全负
+        "2\n00:00:20,000 --> 00:00:10,000\n乙\n\n"      # end < start
+        "3\n00:00:30,000 --> 00:00:40,000\n丙\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 2, new_text
+    cues = _parse_back(new_text)
+    assert cues == [(0, 0), (20000, 20000), (30000, 40000)], cues
+    assert "甲\n\n" in new_text and "乙\n\n" in new_text and "丙\n\n" in new_text
+    print("  test_sanitize_end_negative_and_inverted OK")
+
+
+def test_sanitize_file_roundtrip() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "a.srt"
+        f.write_text(EVIDENCE_HEAD, encoding="utf-8")
+        assert sanitize_srt_file(f) == 2
+        assert sanitize_srt_file(f) == 0  # 二次幂等
+    print("  test_sanitize_file_roundtrip OK")
+
+
+# Fake engine #3: 写出负时间戳 srt（模拟 faster-whisper translate 首段异常）
+FAKE_NEG = (
+    "import sys, pathlib\n"
+    "files = [a for a in sys.argv[1:] if not a.startswith('-')]\n"
+    "for i, f in enumerate(files, 1):\n"
+    '    print("正在翻译 (%d/%d)：%s" % (i, len(files), f))\n'
+    "    p = pathlib.Path(f)\n"
+    '    out = p.with_suffix(".srt")\n'
+    '    out.write_text("1\\n-1:45:55,320 --> 00:00:23,880\\n甲\\n\\n2\\n00:00:09,300 --> 00:00:15,660\\n乙\\n\\n", encoding="utf-8")\n'
+    '    print("正在写入：%s" % out)\n'
+)
+
+
+def test_run_finalize_sanitizes_negative() -> None:
+    """端到端：引擎写出负时间戳 → finalize 落位的 zh.srt 必须合法。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video = tmp / "demo.mkv"
+        video.write_bytes(b"fake")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_NEG)), log=lambda s: None, profile="test")
+        job = engine.submit([video], run_in_thread=False)
+        assert job.files[0].status == TaskStatus.DONE, job.files[0].to_dict()
+        zh = video.with_name("demo.zh.srt")
+        cues = _parse_back(zh.read_text(encoding="utf-8"))
+        assert all(s >= 0 for s, _ in cues), cues
+        assert cues == sorted(cues)
+        print("  test_run_finalize_sanitizes_negative OK")
+
+
 def test_watch_stability() -> None:
     """A file that is still growing (BT/PT in progress) is not handed over
     until its size is stable across two scans."""
@@ -193,5 +313,11 @@ if __name__ == "__main__":
     test_overwrite()
     test_mismatched_log_path()
     test_run_and_finalize_english_log()
+    test_sanitize_evidence_pattern()
+    test_sanitize_valid_passthrough()
+    test_sanitize_unparseable_untouched()
+    test_sanitize_end_negative_and_inverted()
+    test_sanitize_file_roundtrip()
+    test_run_finalize_sanitizes_negative()
     test_watch_stability()
     print("ALL SMOKE TESTS PASSED")

@@ -184,6 +184,32 @@ def test_upload_error_no_audio() -> None:
         assert client.get("/api/uploads/nope").status_code == 404
 
 
+def test_result_proxy_sanitizes_negative_srt() -> None:
+    """下载代理：车间回传负时间戳 srt -> 代理出口必须已清洗。"""
+    NEG = (
+        "1\n-1:45:55,320 --> 00:00:23,880\n甲\n\n"
+        "2\n00:00:09,300 --> 00:00:15,660\n乙\n\n"
+    )
+
+    async def fake_result(self, job_id: str):
+        return NEG.encode("utf-8"), "PJAM-045.mp4.zh.srt"
+
+    JavScribeEngine.result = fake_result  # type: ignore[method-assign]
+    try:
+        client, _ = make_client()
+        r = client.get("/api/jobs/车间A/j-done/result")
+        assert r.status_code == 200, r.text
+        body = r.content.decode("utf-8")
+        assert "-1:45:55" not in body, body
+        assert "1\n00:00:00,000 --> 00:00:23,880" in body, body
+        assert "2\n00:00:09,300 --> 00:00:15,660" in body, body
+        assert 'filename="PJAM-001.zh.srt"' in r.headers.get("content-disposition", "")
+        print("  test_result_proxy_sanitizes_negative_srt OK")
+    finally:
+        del JavScribeEngine.result  # restore real method
+
+
+
 if __name__ == "__main__":
     test_health_and_engines()
     test_jobs_aggregated_and_sorted()
@@ -191,4 +217,5 @@ if __name__ == "__main__":
     test_static_index()
     test_upload_pipeline_dispatches_opus()
     test_upload_error_no_audio()
+    test_result_proxy_sanitizes_negative_srt()
     print("  test_api OK")

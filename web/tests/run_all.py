@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-MODULES = ["test_config", "test_adapter", "test_api", "test_audio"]
+MODULES = ["test_config", "test_adapter", "test_api", "test_audio", "test_sanitizer"]
 
 
 def main() -> int:

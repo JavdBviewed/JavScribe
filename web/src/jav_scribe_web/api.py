@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 import time
@@ -19,8 +20,10 @@ from .audio import extract_audio_progress, probe_duration
 from .config import EngineStore
 from .engines.javscribe import JavScribeEngine
 from .poller import Poller
+from .srt_sanitizer import sanitize_srt_bytes
 
 STATIC_DIR = Path(__file__).parent / "static"
+_log = logging.getLogger("jav-scribe-web")
 UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
 UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
 
@@ -268,6 +271,9 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             raise HTTPException(502, f"workshop unreachable: {ex}")
         finally:
             await eng.close()
+        # 防御兜底：车间引擎偶发产出负时间戳 srt（见 srt_sanitizer 注释），
+        # 下载代理处统一清洗，保证用户拿到的文件合法。
+        data, _fixed = sanitize_srt_bytes(data, log=_log.warning)
         label = next(
             (j.get("label", "") for j in poller.jobs.get(engine, []) if j.get("id") == job_id),
             "",
