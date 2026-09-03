@@ -13,7 +13,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jav_scribe.core.engine import Engine  # noqa: E402
+from jav_scribe.core.progress_api import ProgressHTTP  # noqa: E402
 from jav_scribe.core.task import TaskStatus  # noqa: E402
+
+import json  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+
+def _http_post(url: str) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as ex:
+        return ex.code, json.loads(ex.read().decode())
 
 
 def _base_cfg(fake: Path) -> dict:
@@ -169,6 +183,36 @@ def test_retry_skipped_regenerates() -> None:
         # 原任务仍保持 skipped（历史不改写）
         assert job.files[0].status == TaskStatus.SKIPPED
         print("  test_retry_skipped_regenerates OK")
+
+
+def test_retry_api_status_codes() -> None:
+    """retry 端点状态码：未知任务 404 / 无跳过文件 409 / 有跳过文件 201。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video = tmp / "demo.mkv"
+        video.write_bytes(b"fake")
+        zh = video.with_name("demo.zh.srt")
+        zh.write_text("旧字幕\n", encoding="utf-8")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_OK)), log=lambda s: None, profile="test")
+        httpd = ProgressHTTP(engine, host="127.0.0.1", port=0, inbox_dir=tmp)
+        httpd.start()
+        base = f"http://127.0.0.1:{httpd.server.server_address[1]}"
+        try:
+            code, body = _http_post(f"{base}/jobs/no-such-job/retry")
+            assert code == 404 and body.get("ok") is False, (code, body)
+            # 已知任务但无跳过文件 → 409
+            plain = engine.submit([video], run_in_thread=False)  # 有字幕 → skipped
+            plain2 = engine.submit([tmp / "ghost.mkv"], run_in_thread=False)  # 失败，非跳过
+            code, body = _http_post(f"{base}/jobs/{plain2.id}/retry")
+            assert code == 409 and body.get("ok") is False, (code, body)
+            # 有跳过文件 → 201 + 新 job_id
+            code, body = _http_post(f"{base}/jobs/{plain.id}/retry")
+            assert code == 201 and body.get("ok") is True, (code, body)
+            assert body.get("job_id") and body["job_id"] != plain.id, body
+            assert not zh.exists(), "retry 应删除旧字幕"
+        finally:
+            httpd.stop()
+        print("  test_retry_api_status_codes OK")
 
 
 def test_mismatched_log_path() -> None:
@@ -347,6 +391,7 @@ if __name__ == "__main__":
     test_mismatched_log_path()
     test_run_and_finalize_english_log()
     test_retry_skipped_regenerates()
+    test_retry_api_status_codes()
     test_sanitize_evidence_pattern()
     test_sanitize_valid_passthrough()
     test_sanitize_unparseable_untouched()

@@ -93,6 +93,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parts = self.path.split("?")[0].strip("/").split("/")
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
+            if self.engine.job_by_id(parts[1]) is None:
+                self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})
+                return
             job = self.engine.retry_job(parts[1])
             if job is None:
                 self._send(409, {"ok": False, "error": "no retryable file（无跳过的文件，或任务已过期）"})
