@@ -3,6 +3,10 @@
    warm ink surfaces · amber phosphor accent · mono data
    ============================================================ */
 
+/* hidden 属性兜底：任何 display 覆盖（如 display:flex 的 chip/遮罩）
+   都会压掉 UA 的 [hidden]{display:none}，这里统一强制隐藏 */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #f2efe9;
   --bg-glow: rgba(224, 123, 26, 0.05);
