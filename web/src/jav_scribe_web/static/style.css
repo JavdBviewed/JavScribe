@@ -500,10 +500,10 @@ input:focus, select:focus {
 #engine-select { min-width: 200px; cursor: pointer; }
 #dispatch-go { font-size: 14px; padding: 10px 22px; }
 
-/* pipeline stepper */
-#pipeline { margin-top: 18px; }
-.steps-row { display: flex; align-items: flex-start; gap: 0; }
-.step { display: flex; align-items: center; gap: 10px; }
+/* pipeline stepper（垂直时间线：圆点间用短连接线，不做全宽线，避免误看成进度条） */
+#pipeline { margin-top: 18px; display: flex; flex-direction: column; animation: rise 0.25s ease both; }
+.step { display: flex; align-items: flex-start; gap: 12px; }
+.step-body { min-width: 0; }
 .step-dot {
   flex: none;
   width: 30px; height: 30px;
@@ -516,7 +516,7 @@ input:focus, select:focus {
   background: var(--surface);
   transition: all 0.25s;
 }
-.step-name { font-weight: 650; font-size: 13px; color: var(--muted); transition: color 0.25s; }
+.step-name { font-weight: 650; font-size: 13px; color: var(--muted); transition: color 0.25s; padding-top: 5px; }
 .step-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 2px; min-height: 14px; }
 .step.active .step-dot {
   border-color: var(--accent);
@@ -531,23 +531,25 @@ input:focus, select:focus {
 .step.error .step-dot { border-color: var(--err); background: var(--err); color: #fff; }
 .step.error .step-name { color: var(--err); }
 .step-line {
-  flex: 1;
-  height: 1.5px;
+  width: 2px;
+  height: 20px;
+  margin-left: 14px; /* 与 30px 圆点中轴对齐 */
   background: var(--line-strong);
-  margin: 0 12px;
-  margin-top: 14px;
+  border-radius: 1px;
   position: relative;
   overflow: hidden;
 }
 .step-line::after {
   content: "";
   position: absolute;
-  inset: 0;
-  width: 0%;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 0%;
   background: var(--ok);
-  transition: width 0.4s ease;
+  transition: height 0.4s ease;
 }
-.step-line.on::after { width: 100%; }
+.step-line.on::after { height: 100%; }
 #dispatch-progress { height: 5px; border-radius: 4px; background: var(--line); margin-top: 16px; overflow: hidden; }
 #dispatch-fill { height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width 0.35s ease; }
 #dispatch-status { margin-top: 12px; font-size: 12.5px; color: var(--muted); }

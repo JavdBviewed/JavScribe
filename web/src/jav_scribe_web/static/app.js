@@ -350,6 +350,26 @@ function setStep(id, cls, dot, meta) {
   if (meta != null) $(id.replace("step-", "meta-")).textContent = meta;
 }
 
+// 进度条设宽；instant=true 时跳过过渡（阶段重置归零不能播“回退”动画）
+function setFill(width, instant) {
+  const el = $("dispatch-fill");
+  if (instant) {
+    el.style.transition = "none";
+    el.style.width = width;
+    void el.offsetWidth;
+    el.style.transition = "";
+  } else {
+    el.style.width = width;
+  }
+}
+
+// 提取阶段收尾（轮询可能跳过 extracting 直接到 dispatching/done，需兜底补齐）
+function markExtractDone(audioMb) {
+  setStep("step-extract", "done", "\u2713",
+    audioMb != null ? `音频 ${audioMb} MB` : "音频提取完成");
+  $("line-2").classList.add("on");
+}
+
 function resetPipeline() {
   $("pipeline").hidden = true;
   setStep("step-upload", "", "1", "");
@@ -357,7 +377,7 @@ function resetPipeline() {
   setStep("step-dispatch", "", "3", "");
   $("line-1").classList.remove("on");
   $("line-2").classList.remove("on");
-  $("dispatch-fill").style.width = "0";
+  setFill("0", true);
   $("dispatch-status").hidden = true;
   $("dispatch-status").className = "dispatch-status";
 }
@@ -471,15 +491,28 @@ function preparePipeline(label) {
   setStep("step-dispatch", "", "3", "");
   $("line-1").classList.remove("on");
   $("line-2").classList.remove("on");
-  $("dispatch-fill").style.width = "0";
+  setFill("0", true);
 }
 
 function startSingle(engine) {
+  const file = state.file;
   state.busy = true;
   updateGo();
   localStorage.setItem("javweb_engine", engine);
   preparePipeline();
-  uploadOne(state.file, engine).then((ok) => finishDispatch(ok));
+  uploadOne(file, engine).then(([ok, d]) => {
+    if (ok) {
+      showStatus(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}，见上方任务表`, "ok");
+      toast(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}`, "ok");
+      finishDispatch(true);
+      refresh();
+    } else {
+      const msg = (d && d.error) || "上传失败";
+      showStatus(`${file.name}：${msg}`, "err");
+      toast(`${file.name}：${msg}`, "err");
+      finishDispatch(false);
+    }
+  });
 }
 
 async function startBatch(engine) {
@@ -491,7 +524,9 @@ async function startBatch(engine) {
   let okN = 0;
   for (let i = 0; i < queue.length; i++) {
     const prefix = `文件 ${i + 1}/${queue.length} · `;
-    if (await uploadOne(queue[i], engine, prefix)) okN++;
+    preparePipeline(prefix + "开始上传…");
+    const [ok] = await uploadOne(queue[i], engine, prefix);
+    if (ok) okN++;
   }
   showStatus(
     okN === queue.length
@@ -524,30 +559,26 @@ function uploadOne(f, engine, labelPrefix) {
       const pct = ev.loaded / ev.total * 100;
       setStep("step-upload", "active", "1",
         `${prefix}${mb(ev.loaded)} / ${mb(ev.total)} MB · ${pct.toFixed(1)}%`);
-      $("dispatch-fill").style.width = pct + "%";
+      setFill(pct + "%");
     };
     xhr.onload = () => {
       if (xhr.status === 202) {
         const d = JSON.parse(xhr.responseText);
-        setStep("step-upload", "done", "\u2713", `${prefix}${mb(d.size_mb)} MB 已接收`);
+        setStep("step-upload", "done", "\u2713", `${prefix}${d.size_mb} MB 已接收`);
         $("line-1").classList.add("on");
         setStep("step-extract", "active", "2", "准备提取音频…");
-        $("dispatch-fill").style.width = "0";
-        pollUpload(d.upload_id, engine, prefix, (ok) => resolve(ok));
+        setFill("0", true);
+        pollUpload(d.upload_id, engine, prefix, resolve);
       } else {
         let msg = "失败: " + xhr.status;
         try { msg = JSON.parse(xhr.responseText).detail; } catch (_e) {}
         setStep("step-upload", "error", "\u2715", msg);
-        showStatus(`${prefix}上传失败：${msg}`, "err");
-        toast(`${f.name} 上传失败：${msg}`, "err");
-        resolve(false);
+        resolve([false, { error: msg }]);
       }
     };
     xhr.onerror = () => {
       setStep("step-upload", "error", "\u2715", "网络错误");
-      showStatus(`${prefix}上传失败（网络错误）`, "err");
-      toast(`${f.name} 上传失败（网络错误）`, "err");
-      resolve(false);
+      resolve([false, { error: "上传失败（网络错误）" }]);
     };
     xhr.send(fd);
   });
@@ -583,28 +614,23 @@ function pollUpload(id, engine, labelPrefix, onDone) {
       const el = Date.now() / 1000 - extractT0;
       if (el > 5 && d.progress > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - d.progress) / d.progress)}`;
       setStep("step-extract", "active", "2", meta);
-      $("dispatch-fill").style.width = (d.progress * 100).toFixed(1) + "%";
+      setFill((d.progress * 100).toFixed(1) + "%");
     } else if (d.phase === "dispatching") {
-      setStep("step-extract", "done", "\u2713", `音频 ${d.audio_mb} MB`);
-      $("line-2").classList.add("on");
+      markExtractDone(d.audio_mb);
       setStep("step-dispatch", "active", "3", "提交中…");
-      $("dispatch-fill").style.width = "100%";
+      setFill("100%");
     } else if (d.phase === "done") {
       clearInterval(timer);
+      markExtractDone(d.audio_mb);
       setStep("step-dispatch", "done", "\u2713", `任务 ${d.job_id}`);
-      if (onDone) { onDone(true); return; }
-      showStatus(`已提交到「${engine}」· ${prefix}${d.name} → 任务 ${d.job_id}，见上方任务表`, "ok");
-      toast(`已提交到「${engine}」· ${prefix}${d.name} → 任务 ${d.job_id}`, "ok");
-      finishDispatch(true);
-      refresh();
+      setFill("100%");
+      onDone([true, d]);
     } else if (d.phase === "error") {
       clearInterval(timer);
       const which = d.job_id ? "step-dispatch" : "step-extract";
+      if (which === "step-dispatch") markExtractDone(d.audio_mb);
       setStep(which, "error", "\u2715", d.error || "失败");
-      if (onDone) { onDone(false); return; }
-      showStatus(d.error || "失败", "err");
-      toast(d.error || "提交失败", "err");
-      finishDispatch(false);
+      onDone([false, d]);
     }
   }, 1000);
 }
