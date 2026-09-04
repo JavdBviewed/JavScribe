@@ -370,5 +370,40 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
         finally:
             await eng.close()
 
+    # -- 文件夹扫描（代理 /scan + /scan/submit，X-Api-Key 鉴权在服务侧执行）---
+
+    @app.get("/api/engines/{name}/scan")
+    async def api_engine_scan(name: str, path: str) -> dict:
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
+        try:
+            return await eng.scan(path)
+        except httpx.HTTPStatusError as ex:
+            raise _map_config_error(ex)
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
+    @app.post("/api/engines/{name}/scan/submit")
+    async def api_engine_scan_submit(name: str, body: dict) -> dict:
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        files = body.get("files") if isinstance(body, dict) else None
+        if not isinstance(files, list) or not files:
+            raise HTTPException(400, "files 需要非空数组（绝对路径列表）")
+        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
+        try:
+            return await eng.scan_submit(files)
+        except httpx.HTTPStatusError as ex:
+            raise _map_config_error(ex)
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

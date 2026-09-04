@@ -353,3 +353,70 @@ def test_config_proxy_error_mapping() -> None:
         assert r.status_code == 502 and "不可达" in r.json()["detail"], r.text
     finally:
         _jsm.JavScribeEngine.config = orig
+
+def test_scan_proxy_ok_and_key_passthrough() -> None:
+    client, store = make_client()
+    store.add("srv", "http://10.0.0.3:8300")
+    store.set_api_key("srv", "k1")
+    captured: dict = {}
+    orig_scan, orig_submit = _jsm.JavScribeEngine.scan, _jsm.JavScribeEngine.scan_submit
+
+    async def fake_scan(self, path):
+        captured["key"] = self.api_key
+        captured["path"] = path
+        return {"ok": True, "path": path, "items": [
+            {"path": "/m/a.mp4", "name": "a.mp4", "size": 10, "has_subtitle": False, "subtitle": None},
+        ], "truncated": False}
+
+    async def fake_submit(self, files):
+        captured["files"] = files
+        return {"ok": True, "job_id": "j1", "files": len(files)}
+
+    _jsm.JavScribeEngine.scan, _jsm.JavScribeEngine.scan_submit = fake_scan, fake_submit
+    try:
+        r = client.get("/api/engines/srv/scan", params={"path": "/m"})
+        assert r.status_code == 200, r.text
+        assert r.json()["items"][0]["name"] == "a.mp4"
+        assert captured["key"] == "k1" and captured["path"] == "/m"
+        r = client.post("/api/engines/srv/scan/submit", json={"files": ["/m/a.mp4"]})
+        assert r.status_code == 200 and r.json()["job_id"] == "j1", r.text
+        assert captured["files"] == ["/m/a.mp4"]
+        # 空 files / 未知服务
+        assert client.post("/api/engines/srv/scan/submit", json={}).status_code == 400
+        assert client.post("/api/engines/srv/scan/submit", json={"files": []}).status_code == 400
+        assert client.get("/api/engines/nope/scan", params={"path": "/m"}).status_code == 404
+    finally:
+        _jsm.JavScribeEngine.scan, _jsm.JavScribeEngine.scan_submit = orig_scan, orig_submit
+
+
+def test_scan_proxy_error_mapping() -> None:
+    client, store = make_client()
+    store.add("srv", "http://10.0.0.3:8300")
+    store.set_api_key("srv", "k1")
+    orig_scan = _jsm.JavScribeEngine.scan
+
+    def _raise(err):
+        async def fake(self, path):
+            raise err
+        return fake
+
+    cases = [
+        (_status_err(401, "API Key 不正确"), 400, "API Key"),
+        (_status_err(403, "服务未设置 API Key（JAVSCRIBE_API_KEY）"), 400, "尚未设置"),
+        (_status_err(404, "not found"), 400, "版本过旧"),
+        (_status_err(400, "需要绝对路径"), 400, "需要绝对路径"),
+    ]
+    try:
+        for err, want_code, want_frag in cases:
+            _jsm.JavScribeEngine.scan = _raise(err)
+            r = client.get("/api/engines/srv/scan", params={"path": "/m"})
+            assert r.status_code == want_code, (want_code, r.status_code, r.text)
+            assert want_frag in r.json()["detail"], (want_frag, r.text)
+        # 连接失败 -> 502 服务不可达
+        async def fake_unreachable(self, path):
+            raise httpx.ConnectError("boom")
+        _jsm.JavScribeEngine.scan = fake_unreachable
+        r = client.get("/api/engines/srv/scan", params={"path": "/m"})
+        assert r.status_code == 502 and "不可达" in r.json()["detail"], r.text
+    finally:
+        _jsm.JavScribeEngine.scan = orig_scan

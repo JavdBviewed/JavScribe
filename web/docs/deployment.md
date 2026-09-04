@@ -72,6 +72,29 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 工作台代理路由：`GET/PUT /api/engines/{name}/config`（Key 由工作台按服务自动携带）。
 
+## 文件夹扫描（/scan）
+
+服务侧（`serve`）提供本机目录扫描与批量入队，鉴权与 `/config` 同级（`X-Api-Key`）：
+
+- 服务侧：`GET /scan?path=/绝对/目录` → 按活动 profile 的 `scan.*` 规则列出视频
+  （`{path, name, size, has_subtitle, subtitle}`，上限 5000 项，超出 `truncated: true`）；
+  「已有字幕」判定 = 同目录存在 `<片名>` + `subtitle_patterns` 之一（如
+  `PJAM-045.mp4` 旁有 `PJAM-045.zh.srt` 或 `PJAM-045.srt`）。
+- 服务侧：`POST /scan/submit {"files": [绝对路径...]}` → 校验后入队为一个任务
+  （label「文件夹扫描 · N 项」），返回 201 `{ok, job_id, files}`。
+  注意：入队即按服务 `subtitle.skip_if_exists` 策略处理——扫描 UI 的「已有字幕」
+  只是提示（可强制勾选提交），**是否真的跳过仍由引擎按既有规则决定**。
+- 规则（活动 profile `scan` 段，均可在工作台「服务设置」热调）：
+  - `video_exts`：视频扩展名列表（默认 11 种 mp4/mkv/avi/mov/webm/flv/wmv/ts/m2ts/mpg/mpeg）
+  - `subtitle_patterns`：字幕判定后缀（默认 `.zh.srt`、`.srt`）
+  - `recurse`：是否递归子目录（默认 true）
+- 工作台代理路由：`GET /api/engines/{name}/scan?path=...`、
+  `POST /api/engines/{name}/scan/submit`（Key 自动携带；错误映射与 /config 一致：
+  未设 Key 403 / Key 不符 401 / 旧镜像无端点 404 均映射为 400 中文提示，路径非法 400）。
+- 安全定位：`/scan` 能列举服务机器上的**任意目录**（含文件名与大小）并把任意
+  本地文件路径入队处理，敏感性与 `/config` 相当，**不要对外暴露**；
+  浏览器端「选择文件夹」走的是用户本地电脑的 webkitdirectory，与服务端无关。
+
 其余接口：`GET /api/health`、`GET/POST/PUT/DELETE /api/engines`、`GET /api/jobs`、
 `GET /api/jobs/{engine}/{job_id}/result`（代理服务 srt 下载）、
 `POST /api/jobs/{engine}/{job_id}/retry`（跳过任务重新生成）。
@@ -79,5 +102,6 @@ docker compose -f docker/docker-compose.yml up -d --build
 ## 安全
 
 本服务**无鉴权**（与服务一致），只应暴露在内网 / VPN。`/api/upload` 可向服务
-派发 GPU 任务，暴露面等同服务的 `/upload`。`/config` 有 `X-Api-Key` 鉴权，
-但 Key 是服务级共享密钥，不要随意指派给不可信方。
+派发 GPU 任务，暴露面等同服务的 `/upload`。`/config` 与 `/scan`、`/scan/submit`
+有 `X-Api-Key` 鉴权，但 Key 是服务级共享密钥，不要随意指派给不可信方；
+`/scan` 可枚举服务机器任意目录，泄露即等于交出该机的媒体库清单。

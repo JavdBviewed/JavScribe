@@ -167,10 +167,48 @@ def test_config_error_propagates() -> None:
     asyncio.run(run())
 
 
+def test_scan_get_post_sends_api_key() -> None:
+    seen: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/scan" and request.method == "GET":
+            seen["get"] = {
+                "key": request.headers.get("X-Api-Key"),
+                "path": request.url.params.get("path"),
+            }
+            return httpx.Response(200, json={"ok": True, "path": "/media/x", "items": [
+                {"path": "/media/x/a.mp4", "name": "a.mp4", "size": 10,
+                 "has_subtitle": True, "subtitle": "a.zh.srt"},
+            ], "truncated": False})
+        if p == "/scan/submit" and request.method == "POST":
+            body = json.loads(request.content.decode())
+            seen["post"] = {"key": request.headers.get("X-Api-Key"), "body": body}
+            return httpx.Response(201, json={"ok": True, "job_id": "j1", "files": 2})
+        return httpx.Response(404, json={"ok": False, "error": "not found"})
+
+    async def run():
+        e = JavScribeEngine("w", BASE, api_key="k1")
+        e._client = _client(handler)
+        try:
+            d = await e.scan("/media/x")
+            assert d["ok"] and d["items"][0]["name"] == "a.mp4"
+            assert seen["get"]["key"] == "k1" and seen["get"]["path"] == "/media/x"
+            r = await e.scan_submit(["/media/x/a.mp4", "/media/x/sub/d.mp4"])
+            assert r["job_id"] == "j1" and r["files"] == 2
+            assert seen["post"]["key"] == "k1"
+            assert seen["post"]["body"] == {"files": ["/media/x/a.mp4", "/media/x/sub/d.mp4"]}
+        finally:
+            await e.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_health_jobs_detail()
     test_upload_ok_and_rejected()
     test_jobs_tolerates_non_list()
     test_config_get_put_sends_api_key()
     test_config_error_propagates()
+    test_scan_get_post_sends_api_key()
     print("  test_adapter OK")

@@ -116,6 +116,24 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
+    async def scan(self, path: str) -> dict:
+        """GET /scan?path=：按服务侧扫描规则列出目录内视频文件（含字幕标记）。"""
+        r = await self._get_client().get(
+            f"{self.url}/scan", params={"path": path}, headers=self._auth_headers()
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def scan_submit(self, files: list[str]) -> dict:
+        """POST /scan/submit：把勾选的本地视频路径批量入队。返回 {ok, job_id, files}。"""
+        r = await self._get_client().post(
+            f"{self.url}/scan/submit",
+            json={"files": files},
+            headers=self._auth_headers(),
+        )
+        r.raise_for_status()
+        return r.json()
+
 
 def _attachment_name(content_disposition: str | None) -> str | None:
     if not content_disposition:

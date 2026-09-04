@@ -1,7 +1,20 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const DEFAULT_TITLE = "JavScribe 字幕工作台";
-const state = { file: null, filter: "all", busy: false, knownJobs: new Map(), retried: new Set(), engines: [], cfgItems: [] };
+const state = {
+  file: null,
+  folderFiles: null,
+  filter: "all",
+  busy: false,
+  knownJobs: new Map(),
+  retried: new Set(),
+  engines: [],
+  cfgItems: [],
+  scanItems: [],
+  scanChecked: new Set(),
+};
+const VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"];
+const LOCAL_SUB_PATTERNS = [".zh.srt", ".srt"]; // 与服务端默认一致，仅本地过滤用
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -233,11 +246,26 @@ function renderSelect(engines) {
   updateGo();
 }
 
+function pendingCount() {
+  if (state.folderFiles) return state.folderFiles.filter((v) => !v.hasSub).length;
+  return state.file ? 1 : 0;
+}
+
 function updateGo() {
-  $("dispatch-go").disabled = state.busy || !state.file || !$("engine-select").value;
+  const n = pendingCount();
+  const ok = !state.busy && n > 0 && !!$("engine-select").value;
+  $("dispatch-go").disabled = !ok;
+  $("dispatch-go").innerHTML = n > 1 ? "&#9654; 开始生成（" + n + " 项）" : "&#9654; 开始生成";
+  updateScanGo();
+}
+
+function updateScanGo() {
+  $("scan-go").disabled =
+    !$("scan-path").value.trim() || !$("engine-select").value || state.busy;
 }
 
 $("engine-select").onchange = updateGo;
+$("scan-path").oninput = updateScanGo;
 
 function setStep(id, cls, dot, meta) {
   const el = $(id);
@@ -261,6 +289,7 @@ function resetPipeline() {
 function setFile(f) {
   if (!f) return;
   state.file = f;
+  if (state.folderFiles) clearFolder();
   $("file-chip").hidden = false;
   $("chip-name").textContent = f.name;
   $("chip-size").textContent = mb(f.size) + " MB";
@@ -292,55 +321,161 @@ $("chip-x").onclick = () => {
   updateGo();
 };
 
+// ---------- 选择文件夹（浏览器本地过滤，不依赖服务端） ----------
+function videoExt(name) {
+  const m = /\.([a-z0-9]{1,8})$/i.exec(name);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function clearFolder() {
+  state.folderFiles = null;
+  $("folder").value = "";
+  $("folder-chip").hidden = true;
+  resetPipeline();
+  updateGo();
+}
+
+function setFolder(files) {
+  if (!files || !files.length) return;
+  state.file = null;
+  $("file").value = "";
+  $("file-chip").hidden = true;
+  $("drop").classList.remove("has-file");
+  // 同目录名集合：用于判断「<stem>.zh.srt / <stem>.srt」是否已随文件夹选中
+  const byDir = new Map();
+  for (const f of files) {
+    const rel = f.webkitRelativePath || f.name;
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    if (!byDir.has(dir)) byDir.set(dir, new Set());
+    byDir.get(dir).add(f.name.toLowerCase());
+  }
+  const vids = [];
+  for (const f of files) {
+    if (!VIDEO_EXTS.includes(videoExt(f.name)) || f.size <= 0) continue;
+    const rel = f.webkitRelativePath || f.name;
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    const base = f.name.replace(/\.[^.]+$/, "").toLowerCase();
+    const names = byDir.get(dir) || new Set();
+    const hasSub = LOCAL_SUB_PATTERNS.some((pat) => names.has(base + pat));
+    vids.push({ file: f, hasSub });
+  }
+  if (!vids.length) {
+    toast("该文件夹里没有支持的视频文件（mp4 / mkv / ts / mov …）", "err");
+    return;
+  }
+  state.folderFiles = vids;
+  const subN = vids.filter((v) => v.hasSub).length;
+  $("folder-chip-text").textContent = subN
+    ? `${vids.length} 个视频（${subN} 个已有字幕，将跳过）`
+    : `${vids.length} 个视频`;
+  $("folder-chip").hidden = false;
+  resetPipeline();
+  updateGo();
+}
+
+$("pick-folder").onclick = (ev) => {
+  ev.stopPropagation();
+  if (!state.busy) $("folder").click();
+};
+$("folder").onchange = (ev) => setFolder([...ev.target.files]);
+$("folder-x").onclick = () => { if (!state.busy) clearFolder(); };
+
 $("dispatch-go").onclick = () => {
   const engine = $("engine-select").value;
-  if (!state.file || !engine || state.busy) return;
-  state.busy = true;
-  updateGo();
-  localStorage.setItem("javweb_engine", engine);
-  const fd = new FormData();
-  fd.append("file", state.file);
-  fd.append("engine", engine);
+  if (!engine || state.busy) return;
+  if (state.folderFiles) { startBatch(engine); return; }
+  if (!state.file) return;
+  startSingle(engine);
+};
+
+function preparePipeline(label) {
   $("pipeline").hidden = false;
-  setStep("step-upload", "active", "1", "开始上传…");
+  setStep("step-upload", "active", "1", label || "开始上传…");
   setStep("step-extract", "", "2", "");
   setStep("step-dispatch", "", "3", "");
   $("line-1").classList.remove("on");
   $("line-2").classList.remove("on");
   $("dispatch-fill").style.width = "0";
+}
 
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
-  xhr.upload.onprogress = (ev) => {
-    if (!ev.lengthComputable) return;
-    const pct = ev.loaded / ev.total * 100;
-    setStep("step-upload", "active", "1",
-      `${mb(ev.loaded)} / ${mb(ev.total)} MB · ${pct.toFixed(1)}%`);
-    $("dispatch-fill").style.width = pct + "%";
-  };
-  xhr.onload = () => {
-    if (xhr.status === 202) {
-      const d = JSON.parse(xhr.responseText);
-      setStep("step-upload", "done", "\u2713", `${mb(d.size_mb)} MB 已接收`);
-      $("line-1").classList.add("on");
-      setStep("step-extract", "active", "2", "准备提取音频…");
-      $("dispatch-fill").style.width = "0";
-      pollUpload(d.upload_id, engine);
-    } else {
-      let msg = "失败: " + xhr.status;
-      try { msg = JSON.parse(xhr.responseText).detail; } catch (_e) {}
-      setStep("step-upload", "error", "\u2715", msg);
-      showStatus(msg, "err");
-      finishDispatch(false);
-    }
-  };
-  xhr.onerror = () => {
-    setStep("step-upload", "error", "\u2715", "网络错误");
-    showStatus("上传失败（网络错误）", "err");
-    finishDispatch(false);
-  };
-  xhr.send(fd);
-};
+function startSingle(engine) {
+  state.busy = true;
+  updateGo();
+  localStorage.setItem("javweb_engine", engine);
+  preparePipeline();
+  uploadOne(state.file, engine).then((ok) => finishDispatch(ok));
+}
+
+async function startBatch(engine) {
+  const queue = state.folderFiles.filter((v) => !v.hasSub).map((v) => v.file);
+  state.busy = true;
+  updateGo();
+  localStorage.setItem("javweb_engine", engine);
+  preparePipeline(`文件 1/${queue.length}`);
+  let okN = 0;
+  for (let i = 0; i < queue.length; i++) {
+    const prefix = `文件 ${i + 1}/${queue.length} · `;
+    if (await uploadOne(queue[i], engine, prefix)) okN++;
+  }
+  showStatus(
+    okN === queue.length
+      ? `批量完成：已提交 ${okN}/${queue.length} 项，见上方任务表`
+      : `批量完成：成功 ${okN}/${queue.length} 项，其余失败（可重新选择文件夹）`,
+    okN ? "ok" : "err"
+  );
+  finishBatch();
+  refresh();
+}
+
+function finishBatch() {
+  state.busy = false;
+  state.folderFiles = null;
+  $("folder").value = "";
+  $("folder-chip").hidden = true;
+  updateGo();
+}
+
+function uploadOne(f, engine, labelPrefix) {
+  const prefix = labelPrefix || "";
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("engine", engine);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      const pct = ev.loaded / ev.total * 100;
+      setStep("step-upload", "active", "1",
+        `${prefix}${mb(ev.loaded)} / ${mb(ev.total)} MB · ${pct.toFixed(1)}%`);
+      $("dispatch-fill").style.width = pct + "%";
+    };
+    xhr.onload = () => {
+      if (xhr.status === 202) {
+        const d = JSON.parse(xhr.responseText);
+        setStep("step-upload", "done", "\u2713", `${prefix}${mb(d.size_mb)} MB 已接收`);
+        $("line-1").classList.add("on");
+        setStep("step-extract", "active", "2", "准备提取音频…");
+        $("dispatch-fill").style.width = "0";
+        pollUpload(d.upload_id, engine, prefix, (ok) => resolve(ok));
+      } else {
+        let msg = "失败: " + xhr.status;
+        try { msg = JSON.parse(xhr.responseText).detail; } catch (_e) {}
+        setStep("step-upload", "error", "\u2715", msg);
+        showStatus(`${prefix}上传失败：${msg}`, "err");
+        toast(`${f.name} 上传失败：${msg}`, "err");
+        resolve(false);
+      }
+    };
+    xhr.onerror = () => {
+      setStep("step-upload", "error", "\u2715", "网络错误");
+      showStatus(`${prefix}上传失败（网络错误）`, "err");
+      toast(`${f.name} 上传失败（网络错误）`, "err");
+      resolve(false);
+    };
+    xhr.send(fd);
+  });
+}
 
 function showStatus(text, cls) {
   const el = $("dispatch-status");
@@ -360,14 +495,15 @@ function finishDispatch(ok) {
   updateGo();
 }
 
-function pollUpload(id, engine) {
+function pollUpload(id, engine, labelPrefix, onDone) {
+  const prefix = labelPrefix || "";
   let extractT0 = null;
   const timer = setInterval(async () => {
     let d;
     try { d = await jget("/api/uploads/" + id); } catch (_e) { return; }
     if (d.phase === "extracting") {
       if (extractT0 == null) extractT0 = Date.now() / 1000;
-      let meta = `提取音频中 · ${Math.round(d.progress * 100)}%`;
+      let meta = `${prefix}提取音频中 · ${Math.round(d.progress * 100)}%`;
       const el = Date.now() / 1000 - extractT0;
       if (el > 5 && d.progress > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - d.progress) / d.progress)}`;
       setStep("step-extract", "active", "2", meta);
@@ -380,14 +516,16 @@ function pollUpload(id, engine) {
     } else if (d.phase === "done") {
       clearInterval(timer);
       setStep("step-dispatch", "done", "\u2713", `任务 ${d.job_id}`);
-      showStatus(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}，见上方任务表`, "ok");
-      toast(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}`, "ok");
+      if (onDone) { onDone(true); return; }
+      showStatus(`已提交到「${engine}」· ${prefix}${d.name} → 任务 ${d.job_id}，见上方任务表`, "ok");
+      toast(`已提交到「${engine}」· ${prefix}${d.name} → 任务 ${d.job_id}`, "ok");
       finishDispatch(true);
       refresh();
     } else if (d.phase === "error") {
       clearInterval(timer);
       const which = d.job_id ? "step-dispatch" : "step-extract";
       setStep(which, "error", "\u2715", d.error || "失败");
+      if (onDone) { onDone(false); return; }
       showStatus(d.error || "失败", "err");
       toast(d.error || "提交失败", "err");
       finishDispatch(false);
@@ -397,7 +535,7 @@ function pollUpload(id, engine) {
 
 
 // ---------- 服务设置 modal ----------
-const GROUP_ZH = { subtitle: "字幕", infer: "推理引擎", polish: "AI 润色", emby: "Emby", jasna: "音频修复" };
+const GROUP_ZH = { subtitle: "字幕", infer: "推理引擎", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };
 
 function showModal(title) {
   $("modal-title").textContent = title;
@@ -502,6 +640,12 @@ function configFieldHtml(it) {
     return `<label class="field"><span class="field-label">${esc(it.label)}</span>
       <select id="${id}" data-path="${esc(it.path)}">${opts}</select></label>`;
   }
+  if (it.type === "list") {
+    const val = Array.isArray(it.value) ? it.value.join(", ") : (it.value == null ? "" : String(it.value));
+    return `<label class="field"><span class="field-label">${esc(it.label)}</span>
+      <input id="${id}" type="text" class="mono" data-path="${esc(it.path)}"
+             value="${esc(val)}" placeholder="逗号分隔，如 mp4, mkv"></label>`;
+  }
   const type = it.type === "int" ? "number" : it.type === "secret" ? "password" : "text";
   const val = it.type === "secret" ? "" : (it.value == null ? "" : it.value);
   const ph = it.type === "secret" ? (it.value === "***" ? "已设置，留空保持不变" : "") : "";
@@ -544,6 +688,127 @@ async function saveConfig(name) {
     toast(msg, "err");
   }
 }
+
+// ---------- 服务端目录扫描 ----------
+$("scan-go").onclick = async () => {
+  const engine = $("engine-select").value;
+  const path = $("scan-path").value.trim();
+  if (!engine || !path || state.busy) return;
+  const e = (state.engines || []).find((x) => x.name === engine);
+  if (!e || !e.has_key) {
+    toast("请先在「服务设置」里为这个服务登记 API Key，才能扫描", "err");
+    return;
+  }
+  $("scan-go").disabled = true;
+  $("scan-results").hidden = false;
+  $("scan-table").innerHTML = '<div class="muted small scan-loading">扫描中…</div>';
+  $("scan-submit").hidden = false;
+  $("scan-submit").disabled = true;
+  try {
+    const d = await jgetOrDetail(
+      `/api/engines/${encodeURIComponent(engine)}/scan?path=${encodeURIComponent(path)}`
+    );
+    state.scanItems = d.items || [];
+    // 默认勾选没有字幕的；有字幕的留待用户强制勾选
+    state.scanChecked = new Set(
+      state.scanItems.filter((i) => !i.has_subtitle).map((i) => i.path)
+    );
+    renderScanResults(d);
+  } catch (err) {
+    $("scan-table").innerHTML = "";
+    $("scan-results").hidden = true;
+    $("scan-submit").hidden = true;
+    toast(err.message, "err");
+  } finally {
+    updateScanGo();
+  }
+};
+
+function renderScanResults(d) {
+  const items = state.scanItems;
+  if (!items.length) {
+    $("scan-table").innerHTML =
+      '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名）</div>';
+  } else {
+    $("scan-table").innerHTML = `
+      <table class="scan-table">
+        <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
+        <tbody>
+          ${items.map((i) => `
+            <tr class="${i.has_subtitle ? "has-sub" : ""}">
+              <td class="col-check"><input type="checkbox" data-path="${esc(i.path)}"${state.scanChecked.has(i.path) ? " checked" : ""}></td>
+              <td class="scan-name mono" title="${esc(i.path)}">${esc(i.name)}</td>
+              <td class="col-size mono muted">${mb(i.size)} MB</td>
+              <td class="col-sub">${i.has_subtitle ? `<span class="tag subtag">${esc(i.subtitle)}</span>` : '<span class="muted">—</span>'}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>`;
+    $("scan-table").querySelectorAll("input[type=checkbox]").forEach((cb) => {
+      cb.onchange = () => {
+        if (cb.checked) state.scanChecked.add(cb.dataset.path);
+        else state.scanChecked.delete(cb.dataset.path);
+        updateScanSummary();
+      };
+    });
+  }
+  $("scan-results").hidden = false;
+  $("scan-submit").hidden = false;
+  updateScanSummary(d.truncated);
+}
+
+function updateScanSummary(truncated) {
+  const n = state.scanChecked.size;
+  const total = state.scanItems.length;
+  let text = total ? `已选 ${n} / ${total} · 已有字幕的默认不勾选` : "";
+  if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
+  $("scan-count").textContent = text;
+  const b = $("scan-submit");
+  b.disabled = n === 0 || !$("engine-select").value || state.busy;
+  b.innerHTML = "&#9654; 开始生成（" + n + " 项）";
+  const all = $("scan-select-all");
+  if (all) all.checked = total > 0 && state.scanChecked.size === total;
+}
+
+$("scan-select-all").onchange = (ev) => {
+  state.scanChecked = ev.target.checked
+    ? new Set(state.scanItems.map((i) => i.path))
+    : new Set();
+  $("scan-table").querySelectorAll("input[type=checkbox]")
+    .forEach((cb) => { cb.checked = ev.target.checked; });
+  updateScanSummary();
+};
+
+$("scan-submit").onclick = async () => {
+  const engine = $("engine-select").value;
+  const files = [...state.scanChecked];
+  if (!engine || !files.length || state.busy) return;
+  $("scan-submit").disabled = true;
+  try {
+    const r = await fetch(`/api/engines/${encodeURIComponent(engine)}/scan/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files }),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      toast(`已入队 ${d.files} 项 → 任务 ${d.job_id}`, "ok");
+      state.scanItems = [];
+      state.scanChecked = new Set();
+      $("scan-results").hidden = true;
+      $("scan-submit").hidden = true;
+      $("scan-table").innerHTML = "";
+      refresh();
+    } else {
+      let msg;
+      try { msg = (await r.json()).detail; } catch (_e) {}
+      toast(msg || r.status, "err");
+    }
+  } catch (_e) {
+    toast("网络错误", "err");
+  } finally {
+    updateScanSummary();
+  }
+};
 
 // ---------- 时钟 ----------
 function tick() {

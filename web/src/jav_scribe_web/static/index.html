@@ -71,7 +71,10 @@
       <div class="drop-icon">&#9654;</div>
       <div class="drop-main">拖入影片，或点击选择文件</div>
       <div class="muted small">mp4 / mkv / ts / mov … 原片只到本服务（不出本机），提取音频后只把 opus 发给服务</div>
+      <button type="button" id="pick-folder" class="btn drop-pick">选择文件夹</button>
+      <div class="muted small drop-pick-hint">一次选中整个文件夹（浏览器本地过滤视频与字幕）</div>
       <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
+      <input type="file" id="folder" hidden webkitdirectory>
     </div>
 
     <div id="file-chip" hidden>
@@ -81,12 +84,42 @@
       <button type="button" id="chip-x" class="icon-btn" title="移除文件">&#10005;</button>
     </div>
 
+    <div id="folder-chip" hidden>
+      <span class="chip-icon">&#9635;</span>
+      <span id="folder-chip-text"></span>
+      <button type="button" id="folder-x" class="icon-btn" title="清除文件夹">&#10005;</button>
+    </div>
+
     <div id="dispatch-bar">
       <label class="field">
         <span class="field-label">选择服务</span>
         <select id="engine-select"></select>
       </label>
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
+    </div>
+
+    <div id="scan-panel">
+      <div class="scan-head">
+        <span class="scan-title">扫描服务机器上的目录</span>
+        <span class="muted small">填所选服务运行机器上的目录路径（如下载落地目录）；视频范围与字幕判定规则可在「服务设置」里调整</span>
+      </div>
+      <div class="scan-bar">
+        <label class="field grow">
+          <span class="field-label">目录路径</span>
+          <input id="scan-path" class="mono" placeholder="/media/jav" spellcheck="false" autocomplete="off">
+        </label>
+        <button id="scan-go" class="btn" disabled>扫描</button>
+      </div>
+      <div id="scan-results" hidden>
+        <div class="scan-summary">
+          <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
+          <span id="scan-count" class="muted small mono"></span>
+        </div>
+        <div id="scan-table" class="table-wrap"></div>
+      </div>
+      <div class="scan-actions">
+        <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 开始生成（0 项）</button>
+      </div>
     </div>
 
     <div id="pipeline" hidden>
