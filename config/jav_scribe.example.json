@@ -103,6 +103,13 @@
         "command": "",
         "output": "{stem}_restored{ext}",
         "preset": "Default"
+      },
+      "scan": {
+        "video_exts": [
+          "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"
+        ],
+        "subtitle_patterns": [".zh.srt", ".srt"],
+        "recurse": true
       }
     }
   },

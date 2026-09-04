@@ -91,6 +91,7 @@ curl http://<服务器>:8300/jobs/<id>/result # 下载该任务的 SRT
 | `emby` | 可选：Emby 地址 + API Key，完成后触发 Refresh |
 | `jasna` | 可选：修复命令模板（`{path}`/`{stem}`/`{out}` 占位）+ 输出模板 |
 | `progress` | serve 的 host/port |
+| `scan` | 文件夹扫描规则：`video_exts`（视频扩展名）、`subtitle_patterns`（已有字幕判定后缀，如 `.zh.srt`）、`recurse`（是否进子目录）；工作台「服务设置」可热调 |
 
 ## 目录结构
 
@@ -134,7 +135,7 @@ JAV_ENGINES="服务A=http://<IP_A>:8300,服务B=http://<IP_B>:8300" \
 工作台是**无状态聚合器**：任务态以服务内存为准，只持久化服务登记表（数据卷，
 含各服务的 API Key）。
 
-进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。`GET/PUT /config`（设置管理）有 `X-Api-Key` 鉴权（env `JAVSCRIBE_API_KEY`）。请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
+进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。`GET/PUT /config`（设置管理）与 `GET /scan` / `POST /scan/submit`（文件夹扫描入队）有 `X-Api-Key` 鉴权（env `JAVSCRIBE_API_KEY`）。注意 `/scan` 可列举**服务所在机器上的任意目录**并据路径入队，与 `/config` 同级敏感，切勿对外暴露。请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
 
 ## 致谢与许可
 

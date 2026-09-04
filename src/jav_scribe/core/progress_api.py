@@ -14,6 +14,10 @@ Endpoints (all JSON unless noted):
                                    (X-Api-Key required); persists to the config
                                    file (active profile section) + hot-applies
                                    to in-memory cfg for subsequent jobs.
+  GET  /scan?path=<dir>        -> video files under a local directory with
+                                   subtitle detection (X-Api-Key required)
+  POST /scan/submit            -> {"files": [abs paths]} queue local videos
+                                   (X-Api-Key required)
 
 Used for: watching progress from a browser/`curl` on the server box, and the
 remote flow (the client extracts audio with ffmpeg and PUTs it here; only
@@ -36,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..constants import APP_NAME, APP_VERSION
+from . import scan as scanlib
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -72,6 +77,9 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("emby.url", "Emby 地址", "string", None, False),
     ("emby.api_key", "Emby API Key", "secret", None, True),
     ("jasna.enabled", "启用音频修复（JASNA）", "bool", None, False),
+    ("scan.video_exts", "视频扩展名（逗号分隔）", "list", None, False),
+    ("scan.subtitle_patterns", "已有字幕判定后缀（逗号分隔）", "list", None, False),
+    ("scan.recurse", "扫描时进入子目录", "bool", None, False),
 ]
 
 CONFIG_SPEC = {path: (label, ftype, options, secret) for path, label, ftype, options, secret in CONFIG_ITEMS}
@@ -116,6 +124,16 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 需要字符串（≤512 字符）")
             if value == "":
                 continue  # empty = keep current
+        elif ftype == "list":
+            try:
+                if path == "scan.video_exts":
+                    value = scanlib.normalize_video_exts(value)
+                elif path == "scan.subtitle_patterns":
+                    value = scanlib.normalize_subtitle_patterns(value)
+                else:  # 通用 list（预留）
+                    raise scanlib.ScanError(f"{path} 暂不支持列表更新")
+            except scanlib.ScanError as ex:
+                raise ConfigError(str(ex))
         else:  # string
             if not isinstance(value, str):
                 raise ConfigError(f"{path} 需要字符串")
@@ -249,6 +267,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True, "profile": self.profile, "items": build_config_view(self.engine.cfg)})
             return
+        if len(parts) == 1 and parts[0] == "scan":
+            if not self._check_api_key():
+                return
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            raw = (q.get("path") or [""])[0]
+            try:
+                root = scanlib.validate_scan_path(raw)
+                result = scanlib.scan_dir(root, self.engine.cfg)
+            except scanlib.ScanError as ex:
+                self._send(400, {"ok": False, "error": str(ex)})
+                return
+            self._send(200, {"ok": True, **result})
+            return
         if parts[0] == "jobs":
             if len(parts) == 1:
                 self._send(200, [j.to_dict() for j in self.engine.jobs])
@@ -268,9 +299,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(404, {"ok": False, "error": "not found"})
 
-    # -- POST /jobs/<id>/retry -------------------------------------------------
+    # -- POST /jobs/<id>/retry + /scan/submit ---------------------------------
     def do_POST(self) -> None:
         parts = self.path.split("?")[0].strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "scan" and parts[1] == "submit":
+            if not self._check_api_key():
+                return
+            body = self._read_json_body()
+            if body is None:
+                return
+            try:
+                files = scanlib.validate_submit_files(body.get("files"), self.engine.cfg)
+            except scanlib.ScanError as ex:
+                self._send(400, {"ok": False, "error": str(ex)})
+                return
+            job = self.engine.submit(
+                files, source_kind="local", label=f"文件夹扫描 · {len(files)} 项"
+            )
+            self._send(201, {"ok": True, "job_id": job.id, "files": len(files)})
+            return
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
             if self.engine.job_by_id(parts[1]) is None:
                 self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})

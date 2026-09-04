@@ -69,6 +69,14 @@ DEFAULTS: dict[str, Any] = {
         "interval_s": 10,
         "process_existing": True,
     },
+    # 文件夹扫描（GET /scan）规则，可经 /config 热调（见 core/scan.py）。
+    "scan": {
+        "video_exts": ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"],
+        # 同目录存在 <主名>+<后缀> 的文件即视为「已有字幕」（扫描 UI 提示用；
+        # 引擎是否真正跳过仍由 subtitle.skip_if_exists 权威决定）。
+        "subtitle_patterns": [".zh.srt", ".srt"],
+        "recurse": True,
+    },
     "jasna": {
         "enabled": False,
         "command": "",

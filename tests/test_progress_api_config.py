@@ -131,7 +131,7 @@ def test_auth_and_masking() -> None:
             code, body = _http("GET", base + "/config", key="k1")
             assert code == 200 and body["ok"] and body["profile"] == "server", (code, body)
             items = {i["path"]: i for i in body["items"]}
-            assert len(items) == 18, len(items)
+            assert len(items) == 21, len(items)  # 18 基础项 + 3 扫描规则项
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
             # 敏感项打码：未设置 -> ""
