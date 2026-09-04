@@ -40,28 +40,6 @@
     </div>
   </section>
 
-  <section id="sec-jobs">
-    <div class="sec-head">
-      <div class="sec-title"><span class="kicker">Tasks</span><h2>字幕任务</h2></div>
-      <div id="job-stats" class="stats"></div>
-      <div id="job-filter" class="seg" role="group" aria-label="筛选任务">
-        <button type="button" data-f="all" class="on">全部</button>
-        <button type="button" data-f="running">进行中</button>
-        <button type="button" data-f="finished">已完成</button>
-      </div>
-      <span id="last-updated" class="muted small mono"></span>
-    </div>
-    <div class="job-head mono">
-      <span>服务</span><span>文件</span><span>状态</span><span>进度</span><span>位置</span><span>耗时</span><span></span>
-    </div>
-    <div id="job-list" class="table-wrap"></div>
-    <div id="jobs-empty" class="empty">
-      <div class="empty-icon">&#9636;</div>
-      <div id="jobs-empty-text">暂无任务</div>
-      <div class="muted small">把影片拖到下方「生成字幕」，或等服务监听目录自动入列</div>
-    </div>
-  </section>
-
   <section id="sec-dispatch">
     <div class="sec-head">
       <div class="sec-title"><span class="kicker">Generate</span><h2>生成字幕</h2></div>
@@ -141,6 +119,28 @@
       <div id="dispatch-progress"><div id="dispatch-fill"></div></div>
     </div>
     <div id="dispatch-status" class="dispatch-status" hidden></div>
+  </section>
+
+  <section id="sec-jobs">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Tasks</span><h2>字幕任务</h2></div>
+      <div id="job-stats" class="stats"></div>
+      <div id="job-filter" class="seg" role="group" aria-label="筛选任务">
+        <button type="button" data-f="all" class="on">全部</button>
+        <button type="button" data-f="running">进行中</button>
+        <button type="button" data-f="finished">已完成</button>
+      </div>
+      <span id="last-updated" class="muted small mono"></span>
+    </div>
+    <div class="job-head mono">
+      <span>服务</span><span>文件</span><span>状态</span><span>进度</span><span>位置</span><span>耗时</span><span></span>
+    </div>
+    <div id="job-list" class="table-wrap"></div>
+    <div id="jobs-empty" class="empty">
+      <div class="empty-icon">&#9636;</div>
+      <div id="jobs-empty-text">暂无任务</div>
+      <div class="muted small">把影片拖到上方「生成字幕」，或等服务监听目录自动入列</div>
+    </div>
   </section>
 </main>
 

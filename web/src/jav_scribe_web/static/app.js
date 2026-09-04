@@ -93,44 +93,120 @@ async function refresh() {
   } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
 }
 
-// ---------- 服务卡片 ----------
+// ---------- 服务卡片（按名称就地更新：轮询不重建 DOM，入场动画只在新卡片播放，避免闪烁） ----------
+const PLANE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+
+function engineCardHtml(e) {
+  return `
+    <div class="eng-top">
+      <span class="lamp"></span>
+      <h3>${esc(e.name)}</h3>
+      <button type="button" class="icon-btn set" data-name="${esc(e.name)}" title="服务设置">&#9881;</button>
+      <button type="button" class="icon-btn del" data-name="${esc(e.name)}" title="删除服务">&#10005;</button>
+    </div>
+    <div class="eng-url mono">
+      <a class="eng-go" href="${esc(e.url)}" target="_blank" rel="noopener" title="打开服务页面">${PLANE_SVG}</a>
+      <span class="eng-url-txt">${esc(e.url)}</span>
+    </div>
+    <div class="eng-specs">
+      <span class="tag">${esc(e.device || "—")}</span>
+      <span class="tag">v${esc(e.version || "—")}</span>
+      <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
+      ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
+    </div>`;
+}
+
 function renderEngines(list) {
   state.engines = list;
   const grid = $("engine-grid");
-  grid.innerHTML = "";
   $("engines-empty").hidden = list.length > 0;
+  const cards = new Map();
+  for (const c of grid.children) cards.set(c.dataset.name, c);
+  const wanted = new Set(list.map((e) => e.name));
+  for (const [name, c] of cards) if (!wanted.has(name)) c.remove();
   for (const e of list) {
-    const card = document.createElement("article");
-    card.className = "eng " + (e.online ? "on" : "off");
-    card.innerHTML = `
-      <div class="eng-top">
-        <span class="lamp"></span>
-        <h3>${esc(e.name)}</h3>
-        <button type="button" class="icon-btn set" data-name="${esc(e.name)}" title="服务设置">&#9881;</button>
-        <button type="button" class="icon-btn del" data-name="${esc(e.name)}" title="删除服务">&#10005;</button>
-      </div>
-      <div class="eng-url mono">${esc(e.url)}</div>
-      <div class="eng-specs">
-        <span class="tag">${esc(e.device || "—")}</span>
-        <span class="tag">v${esc(e.version || "—")}</span>
-        <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
-        ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
-      </div>`;
-    grid.appendChild(card);
+    let card = cards.get(e.name);
+    if (!card) {
+      card = document.createElement("article");
+      card.className = "eng";
+      card.dataset.name = e.name;
+      grid.appendChild(card);
+    }
+    const html = engineCardHtml(e);
+    if (card._html !== html) { card.innerHTML = html; card._html = html; }
+    card.classList.toggle("on", !!e.online);
+    card.classList.toggle("off", !e.online);
   }
-  grid.querySelectorAll(".del").forEach((b) => {
-    b.onclick = async () => {
-      if (!confirm(`删除服务「${b.dataset.name}」？`)) return;
-      await fetch("/api/engines/" + encodeURIComponent(b.dataset.name), { method: "DELETE" });
-      refresh();
-    };
-  });
-  grid.querySelectorAll(".set").forEach((b) => {
-    b.onclick = () => openSettings(b.dataset.name);
-  });
+  const order = [...grid.children].map((c) => c.dataset.name).join("\u0001");
+  if (order !== list.map((e) => e.name).join("\u0001")) {
+    for (const e of list) grid.appendChild(cards.get(e.name));
+  }
 }
 
-// ---------- 任务行 ----------
+$("engine-grid").onclick = async (ev) => {
+  const del = ev.target.closest(".del");
+  if (del) {
+    if (!confirm(`删除服务「${del.dataset.name}」？`)) return;
+    await fetch("/api/engines/" + encodeURIComponent(del.dataset.name), { method: "DELETE" });
+    refresh();
+    return;
+  }
+  const set = ev.target.closest(".set");
+  if (set) openSettings(set.dataset.name);
+};
+
+// ---------- 任务行（按任务 key 就地更新：进度/ETA/位置只改文字与条宽，不重排行节点，扫光与过渡不中断） ----------
+function jobKey(j) {
+  return j.job_id ? j.engine + "|" + j.job_id
+                  : j.engine + "|" + (j.file || "") + "|" + (j.created || "");
+}
+
+function jobRowData(j, now) {
+  const pct = Math.round((j.progress || 0) * 100);
+  const isRun = j.status === "running";
+  const pos = j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—");
+  const elapsed = j.created ? fmtDuration((j.finished || now) - j.created) : "—";
+  let eta = "";
+  if (isRun && (j.progress || 0) > 0.01 && j.created) {
+    const el = now - j.created;
+    eta = el > 5 ? fmtDuration(el * (1 - j.progress) / j.progress) : "";
+  }
+  // 跳过行优先显示 message（含已存在字幕的完整路径）
+  const sub = j.status === "skipped" && j.message ? j.message
+    : (j.label && j.label !== j.file) ? j.label : (j.message || "");
+  const dl = j.status === "done" && j.job_id
+    ? `<a class="dl-btn" href="/api/jobs/${encodeURIComponent(j.engine)}/${encodeURIComponent(j.job_id)}/result" download>&#8595; 下载 srt</a>`
+    : "";
+  const retryKey = j.engine + "|" + j.job_id;
+  const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
+    ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
+    : (j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
+  // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
+  const core = [j.status, j.engine, j.file, sub, dl, retry].join("\u0001");
+  const html = `
+      <div class="job-cell">${esc(j.engine)}</div>
+      <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
+      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span></div>
+      <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
+      <div class="job-cell mono cell-pos">${esc(pos)}</div>
+      <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
+      <div class="job-actions">${dl}${retry}</div>`;
+  return { html, core, pct, eta, pos, elapsed };
+}
+
+function patchJobRow(row, pct, eta, pos, elapsed) {
+  const bar = row.querySelector(".bar > div");
+  if (bar) bar.style.width = pct + "%";
+  const pctEl = row.querySelector(".pct");
+  if (pctEl && pctEl.textContent !== pct + "%") pctEl.textContent = pct + "%";
+  const etaEl = row.querySelector(".eta");
+  if (etaEl && etaEl.textContent !== eta) etaEl.textContent = eta;
+  const posEl = row.querySelector(".cell-pos");
+  if (posEl && posEl.textContent !== pos) posEl.textContent = pos;
+  const elEl = row.querySelector(".cell-elapsed");
+  if (elEl && elEl.textContent !== elapsed) elEl.textContent = elapsed;
+}
+
 function renderJobs(rows) {
   const running = rows.filter((r) => r.status === "running").length;
   const done = rows.filter((r) => r.status === "done").length;
@@ -147,64 +223,62 @@ function renderJobs(rows) {
     state.filter === "running" ? r.status === "running" : r.status !== "running");
 
   const list = $("job-list");
-  list.innerHTML = "";
   $("jobs-empty").hidden = filtered.length > 0;
   $("jobs-empty-text").textContent = rows.length ? "当前筛选下无任务" : "暂无任务";
   const now = Date.now() / 1000;
+  const rowMap = new Map();
+  for (const r of list.children) rowMap.set(r.dataset.jkey, r);
+  const wanted = new Set();
   for (const j of filtered) {
-    const pct = Math.round((j.progress || 0) * 100);
-    const isRun = j.status === "running";
-    const pos = j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—");
-    const elapsed = j.created ? fmtDuration((j.finished || now) - j.created) : "—";
-    let eta = "";
-    if (isRun && (j.progress || 0) > 0.01 && j.created) {
-      const el = now - j.created;
-      eta = el > 5 ? `<span class="eta">剩 ~${fmtDuration(el * (1 - j.progress) / j.progress)}</span>` : "";
+    const key = jobKey(j);
+    wanted.add(key);
+    const d = jobRowData(j, now);
+    let row = rowMap.get(key);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "job-grid job-row" + (j.status === "running" ? " running" : "");
+      row.dataset.jkey = key;
+      row._core = d.core;
+      row._html = d.html;
+      row.innerHTML = d.html;
+      list.appendChild(row);
+      rowMap.set(key, row);
+    } else if (row._core !== d.core) {
+      row._core = d.core;
+      row._html = d.html;
+      row.innerHTML = d.html;
+      row.className = "job-grid job-row" + (j.status === "running" ? " running" : "");
     }
-    // 跳过行优先显示 message（含已存在字幕的完整路径）
-    const sub = j.status === "skipped" && j.message ? j.message
-      : (j.label && j.label !== j.file) ? j.label : (j.message || "");
-    const dl = j.status === "done" && j.job_id
-      ? `<a class="dl-btn" href="/api/jobs/${encodeURIComponent(j.engine)}/${encodeURIComponent(j.job_id)}/result" download>&#8595; 下载 srt</a>`
-      : "";
-    const retryKey = j.engine + "|" + j.job_id;
-    const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
-      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
-      : (j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
-    const row = document.createElement("div");
-    row.className = "job-grid job-row" + (isRun ? " running" : "");
-    row.innerHTML = `
-      <div class="job-cell">${esc(j.engine)}</div>
-      <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span></div>
-      <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span>${eta}</div>
-      <div class="job-cell mono">${esc(pos)}</div>
-      <div class="job-cell mono">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${retry}</div>`;
-    list.appendChild(row);
+    patchJobRow(row, d.pct, d.eta, d.pos, d.elapsed);
   }
-  list.querySelectorAll(".retry").forEach((b) => {
-    b.onclick = async () => {
-      const tr = b.closest(".job-row");
-      const name = tr.querySelector(".fn")?.textContent || "";
-      const jid = b.dataset.jid, eng = b.dataset.eng;
-      state.retried.add(eng + "|" + jid);
-      b.disabled = true; b.textContent = "重新生成中…";
-      const r = await fetch(`/api/jobs/${encodeURIComponent(eng)}/${encodeURIComponent(jid)}/retry`, { method: "POST" });
-      if (r.ok) {
-        const d = await r.json();
-        toast(`「${name}」已删旧字幕并重新提交 → 任务 ${d.job_id}`, "ok");
-        refresh();
-      } else {
-        let msg;
-        try { msg = (await r.json()).detail; } catch (_e) {}
-        state.retried.delete(eng + "|" + jid);
-        toast(`重新生成失败：${msg || r.status}`, "err");
-        refresh();
-      }
-    };
-  });
+  for (const [k, r] of rowMap) if (!wanted.has(k)) r.remove();
+  const order = [...list.children].map((r) => r.dataset.jkey).join("\u0001");
+  if (order !== filtered.map(jobKey).join("\u0001")) {
+    for (const j of filtered) list.appendChild(rowMap.get(jobKey(j)));
+  }
 }
+
+$("job-list").onclick = async (ev) => {
+  const b = ev.target.closest(".retry");
+  if (!b || b.disabled) return;
+  const tr = b.closest(".job-row");
+  const name = tr.querySelector(".fn")?.textContent || "";
+  const jid = b.dataset.jid, eng = b.dataset.eng;
+  state.retried.add(eng + "|" + jid);
+  b.disabled = true; b.textContent = "重新生成中…";
+  const r = await fetch(`/api/jobs/${encodeURIComponent(eng)}/${encodeURIComponent(jid)}/retry`, { method: "POST" });
+  if (r.ok) {
+    const d = await r.json();
+    toast(`「${name}」已删旧字幕并重新提交 → 任务 ${d.job_id}`, "ok");
+    refresh();
+  } else {
+    let msg;
+    try { msg = (await r.json()).detail; } catch (_e) {}
+    state.retried.delete(eng + "|" + jid);
+    toast(`重新生成失败：${msg || r.status}`, "err");
+    refresh();
+  }
+};
 
 // ---------- 筛选 ----------
 for (const b of document.querySelectorAll("#job-filter button")) {
