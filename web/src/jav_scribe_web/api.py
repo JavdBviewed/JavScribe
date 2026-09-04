@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
@@ -113,6 +113,16 @@ class UploadTask:
 
 def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
     app = FastAPI(title="JavScribe-Web", version=__version__, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def _no_cache_frontend(request: Request, call_next):
+        # 前端页面/脚本/样式强制每次校验（no-cache=带 ETag 回源校验，304 很轻），
+        # 避免浏览器启发式缓存导致「已部署但看不到更新」
+        resp = await call_next(request)
+        p = request.url.path
+        if p == "/" or p.endswith((".html", ".js", ".css", ".png")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     _uploads: dict[str, UploadTask] = {}
     _upload_locks: dict[str, asyncio.Lock] = {}

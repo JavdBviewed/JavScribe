@@ -125,6 +125,8 @@ src/jav_scribe/
 在页面上管理服务端设置项（`/config`，API Key 鉴权）。
 纯静态前端、无构建链；接口与部署细节见 [web/README.md](web/README.md)。
 
+![字幕工作台界面预览](docs/web-ui.png)
+
 ```bash
 cd web
 JAV_ENGINES="服务A=http://<IP_A>:8300,服务B=http://<IP_B>:8300" \
