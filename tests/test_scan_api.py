@@ -120,10 +120,10 @@ def _start(td: Path, cfg: dict, file_cfg: dict | None, profile: str = "server"):
     return http, engine, cfg_path
 
 
-def _media(td: Path) -> Path:
+def _media(td: Path, name: str = "media") -> Path:
     """A fake media dir: 2 videos w/o subs, 1 with .zh.srt, 1 with .srt,
     1 empty video, 1 non-video file, 1 nested video."""
-    m = td / "media"
+    m = td / name
     (m / "sub").mkdir(parents=True)
     (m / "a.mp4").write_bytes(b"x" * 10)
     (m / "b.mkv").write_bytes(b"x" * 10)
@@ -272,12 +272,68 @@ def test_scan_submit() -> None:
             http.stop()
 
 
+
+def test_scan_host_root_mapping() -> None:
+    """Containerized layout: host fs mounted RO under a prefix (JAVSCRIBE_HOST_ROOT).
+
+    Simulates /:/hostfs:ro with td/hostfs standing in for the host root, so
+    "host path" /media lives at td/hostfs/media and is NOT visible literally.
+    """
+    import os as _os
+
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        host_root = td / "hostfs"
+        host_root.mkdir()
+        # host-side media dir (user path /hst/videos) invisible in "container"
+        media = _media(host_root / "hst", name="videos")
+        local = td / "local"       # a dir that IS visible in the "container"
+        local.mkdir()
+        (local / "x.mp4").write_bytes(b"x" * 10)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        old_env = _os.environ.get("JAVSCRIBE_HOST_ROOT")
+        _os.environ["JAVSCRIBE_HOST_ROOT"] = str(host_root)
+        try:
+            http, engine, _ = _start(td, cfg, None)
+            try:
+                base = f"http://127.0.0.1:{http.server.server_address[1]}"
+                # 字面路径不存在 → 走宿主机映射
+                code, body = _http("GET", base + "/scan?path=/hst/videos", key="k1")
+                assert code == 200 and body["ok"] and body["mapped"] is True, (code, body)
+                assert body["path"] == str(media.resolve()), body["path"]
+                assert {i["name"] for i in body["items"]} == {"a.mp4", "b.mkv", "c.ts", "d.mp4"}
+                by = {i["name"]: i for i in body["items"]}
+                assert by["b.mkv"]["has_subtitle"] is True and by["a.mp4"]["has_subtitle"] is False
+                # submit 同样跟随映射（入队的是映射后的真实路径）
+                code, body = _http("POST", base + "/scan/submit",
+                                   {"files": ["/hst/videos/a.mp4"]}, key="k1")
+                assert code == 201 and body["files"] == 1, (code, body)
+                assert engine.jobs[0].files[0] == (media / "a.mp4").resolve()
+                # 两处都不存在 → 400 且提示宿主机映射
+                code, body = _http("GET", base + "/scan?path=/no/such/dir", key="k1")
+                assert code == 400 and "宿主机映射" in body["error"], (code, body)
+                # 字面可见的路径仍优先（不映射）
+                code, body = _http("GET", base + f"/scan?path={local}", key="k1")
+                assert code == 200 and body["mapped"] is False, (code, body)
+                assert {i["name"] for i in body["items"]} == {"x.mp4"}
+                print("  test_scan_host_root_mapping PASSED")
+            finally:
+                http.stop()
+        finally:
+            if old_env is None:
+                _os.environ.pop("JAVSCRIBE_HOST_ROOT", None)
+            else:
+                _os.environ["JAVSCRIBE_HOST_ROOT"] = old_env
+
+
 def main() -> None:
     print("test_scan_api.py")
     test_scan_auth_and_listing()
     test_scan_path_errors()
     test_scan_rules_hot_update()
     test_scan_submit()
+    test_scan_host_root_mapping()
     print("ALL SCAN API TESTS PASSED")
 
 

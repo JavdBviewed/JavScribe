@@ -273,12 +273,12 @@ class _Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             raw = (q.get("path") or [""])[0]
             try:
-                root = scanlib.validate_scan_path(raw)
+                root, mapped = scanlib.resolve_scan_root(raw)
                 result = scanlib.scan_dir(root, self.engine.cfg)
             except scanlib.ScanError as ex:
                 self._send(400, {"ok": False, "error": str(ex)})
                 return
-            self._send(200, {"ok": True, **result})
+            self._send(200, {"ok": True, "mapped": mapped, **result})
             return
         if parts[0] == "jobs":
             if len(parts) == 1:

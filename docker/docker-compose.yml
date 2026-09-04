@@ -9,6 +9,10 @@
 #   JAV_MODELS_DIR    host dir for model weights (default /opt/jav-scribe/models)
 #   JAV_WATCH_DIR     host dir to watch for finished downloads (default /media/jav)
 #   JAVSCRIBE_API_KEY  auth key for the /config settings API (optional)
+#   JAVSCRIBE_HOST_ROOT container prefix of the read-only host mount (default
+#                        off). Set to /hostfs to let /scan resolve host paths
+#                        (e.g. /media/jav) that are not otherwise mounted in.
+#   JAV_HOSTFS         host root to bind RO at /hostfs (default /)
 name: jav-scribe
 
 services:
@@ -27,6 +31,9 @@ services:
       # Optional: enables /config (settings) management with X-Api-Key auth.
       # The web workbench stores the same key per service when you add it.
       JAVSCRIBE_API_KEY: "${JAVSCRIBE_API_KEY:-}"
+      # When set (e.g. /hostfs), /scan + /scan/submit fall back to
+      # <prefix>/<host path> for paths that don't exist in the container.
+      JAVSCRIBE_HOST_ROOT: "${JAVSCRIBE_HOST_ROOT:-}"
     ports:
       - "${JAV_PORT:-8300}:8300"
     volumes:
@@ -34,6 +41,9 @@ services:
       - ${JAV_MODELS_DIR:-/opt/jav-scribe/models}:/opt/chickenrice/models
       # Media directory to watch (BT/PT landing spot; .zh.srt lands next to source)
       - ${JAV_WATCH_DIR:-/media/jav}:/media/jav
+      # Read-only view of the host filesystem, only reachable via /scan when
+      # JAVSCRIBE_HOST_ROOT is set (see docs/docker.md security note).
+      - ${JAV_HOSTFS:-/}:/hostfs:ro
     deploy:
       resources:
         reservations:

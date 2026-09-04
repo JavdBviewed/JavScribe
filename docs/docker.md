@@ -86,3 +86,6 @@ docker logs -f jav-scribe
 
 - 8300 端口**无鉴权**：`PUT /upload` 会接收任意音频并提交处理，`GET /jobs` 暴露任务与文件路径。
   只暴露给 VPN/内网；必须对外时前面加一层带鉴权的反代。
+- compose 默认把宿主机根**只读**挂载在容器 `/hostfs`（`${JAV_HOSTFS:-/}:/hostfs:ro`），
+  用于 `/scan` 的宿主机路径映射（`JAVSCRIBE_HOST_ROOT=/hostfs` 时启用，需 API Key）。
+  只读、不写不执行；不需要该能力时可删掉这行卷映射。

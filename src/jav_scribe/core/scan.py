@@ -17,6 +17,7 @@ web/docs/deployment.md).
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -103,6 +104,36 @@ def _scan_cfg(cfg: dict) -> tuple[set[str], list[str], bool]:
 
 
 # ---------------------------------------------------------------------------
+# host-root mapping (containerized deployments)
+#
+# In Docker the container only sees mounted volumes; host paths like
+# /media/jav or /data/videos are invisible unless mounted. Deployments can
+# bind-mount the host filesystem read-only under a prefix (e.g. /:/hostfs:ro)
+# and set JAVSCRIBE_HOST_ROOT=/hostfs. /scan and /scan/submit then resolve
+# unknown absolute paths under that prefix, so "scan the server's paths"
+# works even though serve runs in a container.
+# ---------------------------------------------------------------------------
+def host_root_prefix() -> Optional[str]:
+    """Container-side prefix of the read-only host mount, or None."""
+    raw = os.environ.get("JAVSCRIBE_HOST_ROOT", "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if not p.is_absolute() or not p.is_dir():
+        return None
+    return str(p.resolve())
+
+
+def _host_mapped(raw: str) -> Optional[Path]:
+    """Map an absolute host path under the host-root prefix, if it exists there."""
+    prefix = host_root_prefix()
+    if prefix is None or not raw.startswith("/"):
+        return None
+    cand = (Path(prefix) / raw.lstrip("/")).resolve()
+    return cand if cand.exists() else None
+
+
+# ---------------------------------------------------------------------------
 # path validation
 # ---------------------------------------------------------------------------
 def validate_scan_path(raw: str) -> Path:
@@ -120,6 +151,29 @@ def validate_scan_path(raw: str) -> Path:
     return p
 
 
+def resolve_scan_root(raw: str) -> tuple[Path, bool]:
+    """Validate the scan directory, falling back to the host-root mapping.
+
+    Returns (resolved_dir, mapped). `mapped` is True when the literal path
+    does not exist locally and the JAVSCRIBE_HOST_ROOT prefix was used
+    (containerized deployments; see host_root_prefix).
+    """
+    try:
+        return validate_scan_path(raw), False
+    except ScanError:
+        if not raw or not raw.strip():
+            raise
+        clean = raw.strip()
+        if not clean.startswith("/"):
+            raise ScanError("需要绝对路径")
+        mapped = _host_mapped(clean)
+        if mapped is None or not mapped.is_dir():
+            prefix = host_root_prefix()
+            hint = f"（宿主机映射 {prefix} 下也不存在）" if prefix else ""
+            raise ScanError(f"路径不存在: {clean}{hint}")
+        return mapped, True
+
+
 def validate_submit_files(raw: Any, cfg: dict) -> list[Path]:
     """Validate the submit list: existing files with a known video extension."""
     if not isinstance(raw, list) or not raw:
@@ -133,7 +187,10 @@ def validate_submit_files(raw: Any, cfg: dict) -> list[Path]:
         if not p.is_absolute():
             raise ScanError(f"需要绝对路径: {item}")
         if not p.is_file():
-            raise ScanError(f"文件不存在: {p.name}")
+            mapped = _host_mapped(item.strip())
+            if mapped is None or not mapped.is_file():
+                raise ScanError(f"文件不存在: {p.name}")
+            p = mapped
         if p.suffix.lower().lstrip(".") not in exts:
             raise ScanError(f"不是受支持的视频文件: {p.name}")
         if p not in out:
