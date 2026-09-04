@@ -11,6 +11,8 @@ const state = {
   engines: [],
   cfgItems: [],
   scanItems: [],
+  scanMapped: false,
+  scanResolvedPath: "",
   scanChecked: new Set(),
 };
 const VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"];
@@ -699,6 +701,10 @@ $("scan-go").onclick = async () => {
     toast("请先在「服务设置」里为这个服务登记 API Key，才能扫描", "err");
     return;
   }
+  if (/^[a-zA-Z]:[\\/]/.test(path)) {
+    toast("这是 Windows 本地路径（如 D:\\Videos）。服务端扫描只能读服务运行机器上的目录；要批量处理本机文件夹，请用上方「选择文件夹」", "err");
+    return;
+  }
   $("scan-go").disabled = true;
   $("scan-results").hidden = false;
   $("scan-table").innerHTML = '<div class="muted small scan-loading">扫描中…</div>';
@@ -709,6 +715,8 @@ $("scan-go").onclick = async () => {
       `/api/engines/${encodeURIComponent(engine)}/scan?path=${encodeURIComponent(path)}`
     );
     state.scanItems = d.items || [];
+    state.scanMapped = d.mapped === true;
+    state.scanResolvedPath = d.path || "";
     // 默认勾选没有字幕的；有字幕的留待用户强制勾选
     state.scanChecked = new Set(
       state.scanItems.filter((i) => !i.has_subtitle).map((i) => i.path)
@@ -726,9 +734,16 @@ $("scan-go").onclick = async () => {
 
 function renderScanResults(d) {
   const items = state.scanItems;
+  if (state.scanMapped) {
+    $("scan-mapped").hidden = false;
+    $("scan-mapped").textContent =
+      "已按服务机器实际路径扫描：" + state.scanResolvedPath;
+  } else {
+    $("scan-mapped").hidden = true;
+  }
   if (!items.length) {
     $("scan-table").innerHTML =
-      '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名）</div>';
+      '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名；本机文件夹请用上方「选择文件夹」）</div>';
   } else {
     $("scan-table").innerHTML = `
       <table class="scan-table">

@@ -101,7 +101,7 @@
     <div id="scan-panel">
       <div class="scan-head">
         <span class="scan-title">扫描服务机器上的目录</span>
-        <span class="muted small">填所选服务运行机器上的目录路径（如下载落地目录）；视频范围与字幕判定规则可在「服务设置」里调整</span>
+        <span class="muted small">填所选服务运行机器（服务器）上的目录路径（如下载落地目录）；要批量处理本机（如 Windows 本地磁盘）的文件夹，请用上方「选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整</span>
       </div>
       <div class="scan-bar">
         <label class="field grow">
@@ -111,6 +111,7 @@
         <button id="scan-go" class="btn" disabled>扫描</button>
       </div>
       <div id="scan-results" hidden>
+        <div id="scan-mapped" class="muted small scan-mapped-note" hidden></div>
         <div class="scan-summary">
           <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
           <span id="scan-count" class="muted small mono"></span>

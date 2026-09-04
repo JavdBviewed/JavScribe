@@ -91,6 +91,16 @@ docker compose -f docker/docker-compose.yml up -d --build
 - 工作台代理路由：`GET /api/engines/{name}/scan?path=...`、
   `POST /api/engines/{name}/scan/submit`（Key 自动携带；错误映射与 /config 一致：
   未设 Key 403 / Key 不符 401 / 旧镜像无端点 404 均映射为 400 中文提示，路径非法 400）。
+- 容器化部署的宿主机路径映射：serve 跑在容器里时默认只能看到挂载卷内的
+  路径。compose 默认把宿主机根**只读**挂载在容器 `/hostfs`（仅 `/scan`
+  链路可达，且需 API Key）；给服务设置 `JAVSCRIBE_HOST_ROOT=/hostfs`
+  （env 或 compose environment）后，`/scan` 与 `/scan/submit` 对「容器内
+  不存在」的绝对路径会透明映射到 `/hostfs/<路径>`，前端扫描结果顶部会提示
+  实际扫描到的路径。字面可见的路径永远优先，不做映射。
+- 路径属于哪台机器：扫描面板里的路径是**服务运行机器（服务器）**上的路径
+  （Linux 路径，如 `/media/jav`）；浏览器「选择文件夹」才是**本机**
+  （Windows/macOS/Linux 均可）的目录，二者不要混填——填成 `D:\Videos`
+  这类本机盘符路径会被前端直接拦下并提示。
 - 安全定位：`/scan` 能列举服务机器上的**任意目录**（含文件名与大小）并把任意
   本地文件路径入队处理，敏感性与 `/config` 相当，**不要对外暴露**；
   浏览器端「选择文件夹」走的是用户本地电脑的 webkitdirectory，与服务端无关。
