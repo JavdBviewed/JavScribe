@@ -1,0 +1,22 @@
+{
+  "name": "jav-scribe-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JavScribe Client — 共享前端（web 形态 + Electron 桌面端）",
+  "type": "module",
+  "scripts": {
+    "build:web": "vite build",
+    "sync:static": "node scripts/sync-static.mjs",
+    "build:web:all": "pnpm build:web && pnpm sync:static",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

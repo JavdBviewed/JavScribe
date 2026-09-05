@@ -37,7 +37,12 @@ logs/
 # ---------- 媒体文件（误拖进工作区时兜底） ----------
 *.mp4
 *.mkv
+# 注意: *.ts 会误伤 TypeScript 源码，下面逐一否定回来
 *.ts
+!client/**/*.ts
+!scripts/**/*.ts
+!vite.config.ts
+!playwright.config.ts
 *.m2ts
 *.mov
 *.avi
@@ -46,6 +51,14 @@ logs/
 *.flac
 *.m4a
 *.aac
+
+# ---------- e2e 测试夹具（故意提交的媒体小文件） ----------
+!client/tests/e2e/fixtures/**
+
+# ---------- Node / 前端工具 ----------
+node_modules/
+test-results/
+playwright-report/
 
 # ---------- IDE / 系统 ----------
 .idea/
