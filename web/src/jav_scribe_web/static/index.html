@@ -75,7 +75,11 @@
         <select id="engine-select"></select>
       </label>
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
+      <label class="chk-row autosave-chk" title="任务完成后，自动把生成的 srt 写回上传影片的原目录（仅对「选择文件 / 选择文件夹」选取的影片有效）">
+        <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
+      </label>
     </div>
+    <div class="muted small autosave-note">勾选后：用「选择文件 / 选择文件夹」上传的影片，任务完成时自动把 srt 写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务器上的影片旁。</div>
 
     <div id="scan-panel">
       <div class="scan-head">

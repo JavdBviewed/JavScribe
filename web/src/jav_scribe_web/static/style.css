@@ -499,6 +499,8 @@ input:focus, select:focus {
 .field-label { font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 #engine-select { min-width: 200px; cursor: pointer; }
 #dispatch-go { font-size: 14px; padding: 10px 22px; }
+.autosave-chk { padding-bottom: 11px; user-select: none; }
+.autosave-note { margin-top: 8px; max-width: 860px; line-height: 1.55; }
 
 /* pipeline stepper（垂直时间线：圆点间用短连接线，不做全宽线，避免误看成进度条） */
 #pipeline { margin-top: 18px; display: flex; flex-direction: column; animation: rise 0.25s ease both; }

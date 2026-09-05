@@ -14,9 +14,15 @@ const state = {
   scanMapped: false,
   scanResolvedPath: "",
   scanChecked: new Set(),
+  autoSave: localStorage.getItem("javweb_autosave") === "1",
+  writeBackJobs: new Map(), // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
+  _fsFileDir: null,          // 当前单文件所选目录句柄（File System Access API，用于写回源目录）
 };
 const VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"];
 const LOCAL_SUB_PATTERNS = [".zh.srt", ".srt"]; // 与服务端默认一致，仅本地过滤用
+// File System Access API 仅在安全上下文（https/localhost）暴露；用于「完成后写回源目录」
+const HAS_FS_PICKER = typeof window.showOpenFilePicker === "function"
+  && typeof window.showDirectoryPicker === "function";
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -70,9 +76,57 @@ function notifyJobChanges(rows) {
       const kind = r.status === "done" ? "ok" : r.status === "skipped" ? "" : "err";
       const verb = { done: "完成", skipped: "已跳过（srt 已存在）", error: "失败", canceled: "已取消" }[r.status] || r.status;
       toast(`${r.engine} · ${r.file || r.label} ${verb}`, kind);
+      if (r.status === "done") maybeWriteBack(r);
     }
   }
   for (const k of [...state.knownJobs.keys()]) if (!seen.has(k)) state.knownJobs.delete(k);
+}
+
+// ---------- 完成后写回源目录（auto-save）：任务 running→done 时触发 ----------
+function maybeWriteBack(r) {
+  if (!state.autoSave || !r.job_id) return;
+  const key = r.engine + "|" + r.job_id;
+  const info = state.writeBackJobs.get(key);
+  if (!info) return;
+  state.writeBackJobs.delete(key);
+  if (info.dirHandle) doWriteBack(r, info.dirHandle, info.videoName);
+  else autoDownloadSrt(r, info.videoName);
+}
+
+async function doWriteBack(r, dirHandle, videoName) {
+  const srtName = videoName.replace(/\.[^.]+$/, "") + ".zh.srt";
+  try {
+    let data = null;
+    for (let i = 0; i < 5 && !data; i++) {
+      const resp = await fetch(`/api/jobs/${encodeURIComponent(r.engine)}/${encodeURIComponent(r.job_id)}/result`);
+      if (resp.ok) data = await resp.arrayBuffer();
+      else await new Promise((res) => setTimeout(res, 2000));
+    }
+    if (!data) { toast(`「${videoName}」字幕暂不可下载，请用手动下载`, "err"); return; }
+    const fh = await dirHandle.getFileHandle(srtName, { create: true });
+    const w = await fh.createWritable();
+    await w.write(data);
+    await w.close();
+    toast(`「${videoName}」字幕已写回源目录（${srtName}）`, "ok");
+  } catch (e) {
+    toast(`「${videoName}」写回失败（${e.name || e.message}），改为自动下载`, "err");
+    autoDownloadSrt(r, videoName);
+  }
+}
+
+function autoDownloadSrt(r, videoName) {
+  const srtName = videoName.replace(/\.[^.]+$/, "") + ".zh.srt";
+  try {
+    const a = document.createElement("a");
+    a.href = `/api/jobs/${encodeURIComponent(r.engine)}/${encodeURIComponent(r.job_id)}/result`;
+    a.download = srtName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast(`已自动下载 ${srtName}（此方式无法直接写回源目录，请放到影片同目录）`, "");
+  } catch (_e) {
+    toast(`自动下载 ${srtName} 失败，请用手动下载`, "err");
+  }
 }
 
 async function refresh() {
@@ -269,6 +323,8 @@ $("job-list").onclick = async (ev) => {
   const r = await fetch(`/api/jobs/${encodeURIComponent(eng)}/${encodeURIComponent(jid)}/retry`, { method: "POST" });
   if (r.ok) {
     const d = await r.json();
+    const oldInfo = state.writeBackJobs.get(eng + "|" + jid);
+    if (oldInfo) state.writeBackJobs.set(eng + "|" + d.job_id, oldInfo);
     toast(`「${name}」已删旧字幕并重新提交 → 任务 ${d.job_id}`, "ok");
     refresh();
   } else {
@@ -385,6 +441,7 @@ function resetPipeline() {
 function setFile(f) {
   if (!f) return;
   state.file = f;
+  state._fsFileDir = null;
   if (state.folderFiles) clearFolder();
   $("file-chip").hidden = false;
   $("chip-name").textContent = f.name;
@@ -394,9 +451,27 @@ function setFile(f) {
   updateGo();
 }
 
-$("drop").onclick = () => { if (!state.busy) $("file").click(); };
+async function pickFile() {
+  if (HAS_FS_PICKER) {
+    try {
+      const [h] = await window.showOpenFilePicker({
+        multiple: false,
+        types: [{ description: "视频文件", accept: { "video/*": VIDEO_EXTS.map((e) => "." + e) } }],
+      });
+      const f = await h.getFile();
+      setFile(f);
+      state._fsFileDir = await h.getParent();
+    } catch (e) {
+      if (e && e.name !== "AbortError") toast("选择文件失败：" + e.message, "err");
+    }
+    return;
+  }
+  $("file").click();
+}
+
+$("drop").onclick = () => { if (!state.busy) pickFile(); };
 $("drop").onkeydown = (ev) => {
-  if ((ev.key === "Enter" || ev.key === " ") && !state.busy) { ev.preventDefault(); $("file").click(); }
+  if ((ev.key === "Enter" || ev.key === " ") && !state.busy) { ev.preventDefault(); pickFile(); }
 };
 $("file").onchange = (ev) => setFile(ev.target.files[0]);
 for (const t of ["dragover", "dragenter"]) {
@@ -410,6 +485,7 @@ $("drop").addEventListener("drop", (ev) => { if (!state.busy) setFile(ev.dataTra
 $("chip-x").onclick = () => {
   if (state.busy) return;
   state.file = null;
+  state._fsFileDir = null;
   $("file").value = "";
   $("file-chip").hidden = true;
   $("drop").classList.remove("has-file");
@@ -469,9 +545,43 @@ function setFolder(files) {
   updateGo();
 }
 
-$("pick-folder").onclick = (ev) => {
+async function pickFolderFs() {
+  let root;
+  try {
+    root = await window.showDirectoryPicker({ mode: "readwrite" });
+  } catch (e) {
+    if (e && e.name !== "AbortError") toast("选择文件夹失败：" + e.message, "err");
+    return;
+  }
+  const files = [];
+  try {
+    await walkDirForFiles(root, root.name, files);
+  } catch (e) {
+    toast("读取文件夹失败：" + e.message, "err");
+    return;
+  }
+  setFolder(files);
+}
+
+async function walkDirForFiles(dir, prefix, out) {
+  for await (const entry of dir.values()) {
+    const rel = prefix ? prefix + "/" + entry.name : entry.name;
+    if (entry.kind === "file") {
+      const f = await entry.getFile();
+      Object.defineProperty(f, "webkitRelativePath", { value: rel });
+      f._dirHandle = dir; // 记录所在目录句柄，任务完成后把 srt 写回这里
+      out.push(f);
+    } else if (entry.kind === "directory") {
+      await walkDirForFiles(entry, rel, out);
+    }
+  }
+}
+
+$("pick-folder").onclick = async (ev) => {
   ev.stopPropagation();
-  if (!state.busy) $("folder").click();
+  if (state.busy) return;
+  if (HAS_FS_PICKER) { await pickFolderFs(); return; }
+  $("folder").click();
 };
 $("folder").onchange = (ev) => setFolder([...ev.target.files]);
 $("folder-x").onclick = () => { if (!state.busy) clearFolder(); };
@@ -502,6 +612,9 @@ function startSingle(engine) {
   preparePipeline();
   uploadOne(file, engine).then(([ok, d]) => {
     if (ok) {
+      state.writeBackJobs.set(engine + "|" + d.job_id, {
+        engine, videoName: file.name, dirHandle: state._fsFileDir || null,
+      });
       showStatus(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}，见上方任务表`, "ok");
       toast(`已提交到「${engine}」· ${d.name} → 任务 ${d.job_id}`, "ok");
       finishDispatch(true);
@@ -525,8 +638,15 @@ async function startBatch(engine) {
   for (let i = 0; i < queue.length; i++) {
     const prefix = `文件 ${i + 1}/${queue.length} · `;
     preparePipeline(prefix + "开始上传…");
-    const [ok] = await uploadOne(queue[i], engine, prefix);
-    if (ok) okN++;
+    const [ok, d] = await uploadOne(queue[i], engine, prefix);
+    if (ok) {
+      okN++;
+      if (d && d.job_id) {
+        state.writeBackJobs.set(engine + "|" + d.job_id, {
+          engine, videoName: queue[i].name, dirHandle: queue[i]._dirHandle || null,
+        });
+      }
+    }
   }
   showStatus(
     okN === queue.length
@@ -635,6 +755,13 @@ function pollUpload(id, engine, labelPrefix, onDone) {
   }, 1000);
 }
 
+
+// ---------- 完成后自动写回源目录（默认关） ----------
+$("autosave").checked = state.autoSave;
+$("autosave").onchange = (ev) => {
+  state.autoSave = ev.target.checked;
+  localStorage.setItem("javweb_autosave", state.autoSave ? "1" : "0");
+};
 
 // ---------- 服务设置 modal ----------
 const GROUP_ZH = { subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };

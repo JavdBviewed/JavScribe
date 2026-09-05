@@ -23,7 +23,12 @@ services:
     environment:
       TZ: Asia/Shanghai
       JAV_ENGINES: "${JAV_ENGINES:-}"
+      # HTTPS port (0 disables); cert SANs for the self-signed cert, e.g. IP:192.168.0.127
+      JAV_WEB_TLS_PORT: "${JAV_WEB_TLS_PORT:-8443}"
+      JAV_WEB_CERT_SANS: "${JAV_WEB_CERT_SANS:-IP:127.0.0.1}"
     ports:
       - "${JAV_WEB_PORT:-8400}:8400"
+      # HTTPS (self-signed; required for "write back to source directory" / FS Access API)
+      - "${JAV_WEB_TLS_PORT:-8443}:8443"
     volumes:
       - ${JAV_WEB_DATA_DIR:-/opt/jav-scribe-web/data}:/data

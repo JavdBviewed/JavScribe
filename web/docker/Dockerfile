@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ffmpeg is needed for server-side audio extraction (generate upload path)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg ca-certificates \
+        python3 python3-pip ffmpeg ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,6 +30,6 @@ RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} .
 
 # Engine registry persistence (engines added via the web page)
 VOLUME ["/data"]
-EXPOSE 8400
+EXPOSE 8400 8443
 
 ENTRYPOINT ["jav-scribe-web"]
