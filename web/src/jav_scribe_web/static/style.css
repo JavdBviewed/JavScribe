@@ -340,6 +340,34 @@ input:focus, select:focus {
 .job-row:hover { background: color-mix(in srgb, var(--accent-soft) 40%, transparent); }
 .job-row { animation: rise 0.3s ease both; }
 .job-row.running { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* 任务分页 */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+}
+.pg-info { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pg-btn {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.pg-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.pg-btn:disabled { opacity: 0.35; cursor: default; }
 .job-head {
   display: grid;
   grid-template-columns: 120px minmax(220px, 1fr) 120px 210px 130px 90px 96px;

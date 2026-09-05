@@ -14,6 +14,9 @@ const state = {
   scanMapped: false,
   scanResolvedPath: "",
   scanChecked: new Set(),
+  page: 0,              // 任务分页：当前页（0 起）
+  pageSize: 20,         // 任务分页：每页行数
+  _jobs: [],            // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
   autoSave: localStorage.getItem("javweb_autosave") === "1",
   writeBackJobs: new Map(), // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
   _fsFileDir: null,          // 当前单文件所选目录句柄（File System Access API，用于写回源目录）
@@ -139,6 +142,7 @@ async function refresh() {
     $("health").style.color = allOnline ? "" : "var(--err)";
     $("foot-ver").textContent = "v" + health.version;
     renderEngines(engines);
+    state._jobs = jobs;
     renderJobs(jobs);
     renderSelect(engines);
     $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -272,9 +276,12 @@ function renderJobs(rows) {
     `<span class="stat">跳过 <b>${skipped}</b></span>` +
     `<span class="stat">失败 <b>${failed}</b></span>`;
 
-  const filtered = rows.filter((r) =>
-    state.filter === "all" ? true :
-    state.filter === "running" ? r.status === "running" : r.status !== "running");
+  const filtered = visibleRows(rows);
+
+  // 分页：只渲染当前页；stats/空态仍基于全量 filtered。页码越界自动收回（任务完成会收缩列表）。
+  const pages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+  if (state.page >= pages) state.page = pages - 1;
+  const pageRows = filtered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
 
   const list = $("job-list");
   $("jobs-empty").hidden = filtered.length > 0;
@@ -283,7 +290,7 @@ function renderJobs(rows) {
   const rowMap = new Map();
   for (const r of list.children) rowMap.set(r.dataset.jkey, r);
   const wanted = new Set();
-  for (const j of filtered) {
+  for (const j of pageRows) {
     const key = jobKey(j);
     wanted.add(key);
     const d = jobRowData(j, now);
@@ -307,10 +314,38 @@ function renderJobs(rows) {
   }
   for (const [k, r] of rowMap) if (!wanted.has(k)) r.remove();
   const order = [...list.children].map((r) => r.dataset.jkey).join("\u0001");
-  if (order !== filtered.map(jobKey).join("\u0001")) {
-    for (const j of filtered) list.appendChild(rowMap.get(jobKey(j)));
+  if (order !== pageRows.map(jobKey).join("\u0001")) {
+    for (const j of pageRows) list.appendChild(rowMap.get(jobKey(j)));
   }
+  renderPager(filtered.length);
 }
+
+// ---------- 任务分页（基于缓存即时翻页，不请求网络；5s 轮询照常刷新数据） ----------
+function visibleRows(rows) {
+  return rows.filter((r) =>
+    state.filter === "all" ? true :
+    state.filter === "running" ? r.status === "running" : r.status !== "running");
+}
+
+function renderPager(total) {
+  const el = $("job-pager");
+  const pages = Math.max(1, Math.ceil(total / state.pageSize));
+  if (pages <= 1) { el.hidden = true; el.innerHTML = ""; return; }
+  el.hidden = false;
+  el.innerHTML =
+    `<button type="button" id="pg-prev" class="pg-btn" ${state.page === 0 ? "disabled" : ""} aria-label="上一页">&#8249;</button>` +
+    `<span class="pg-info mono">第 ${state.page + 1} / ${pages} 页 · 共 ${total} 条</span>` +
+    `<button type="button" id="pg-next" class="pg-btn" ${state.page >= pages - 1 ? "disabled" : ""} aria-label="下一页">&#8250;</button>`;
+}
+
+$("job-pager").onclick = (ev) => {
+  const pages = Math.max(1, Math.ceil(visibleRows(state._jobs).length / state.pageSize));
+  if (ev.target.closest("#pg-prev") && state.page > 0) {
+    state.page--; renderJobs(state._jobs);
+  } else if (ev.target.closest("#pg-next") && state.page < pages - 1) {
+    state.page++; renderJobs(state._jobs);
+  }
+};
 
 $("job-list").onclick = async (ev) => {
   const b = ev.target.closest(".retry");
@@ -340,8 +375,9 @@ $("job-list").onclick = async (ev) => {
 for (const b of document.querySelectorAll("#job-filter button")) {
   b.onclick = () => {
     state.filter = b.dataset.f;
+    state.page = 0;
     document.querySelectorAll("#job-filter button").forEach((x) => x.classList.toggle("on", x === b));
-    refresh();
+    renderJobs(state._jobs);
   };
 }
 
