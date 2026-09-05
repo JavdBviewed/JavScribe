@@ -17,6 +17,9 @@ const state = {
   page: 0,              // 任务分页：当前页（0 起）
   pageSize: 20,         // 任务分页：每页行数
   _jobs: [],            // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
+  extractMode: ["auto", "local", "server"].includes(localStorage.getItem("javweb_extract"))
+    ? localStorage.getItem("javweb_extract")
+    : "auto",
   autoSave: localStorage.getItem("javweb_autosave") === "1",
   writeBackJobs: new Map(), // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
   _fsFileDir: null,          // 当前单文件所选目录句柄（File System Access API，用于写回源目录）
@@ -647,7 +650,7 @@ function startSingle(engine) {
   updateGo();
   localStorage.setItem("javweb_engine", engine);
   preparePipeline();
-  uploadOne(file, engine).then(([ok, d]) => {
+  dispatchOne(file, engine).then(([ok, d]) => {
     if (ok) {
       state.writeBackJobs.set(engine + "|" + d.job_id, {
         engine, videoName: file.name, dirHandle: state._fsFileDir || null,
@@ -674,8 +677,8 @@ async function startBatch(engine) {
   let okN = 0;
   for (let i = 0; i < queue.length; i++) {
     const prefix = `文件 ${i + 1}/${queue.length} · `;
-    preparePipeline(prefix + "开始上传…");
-    const [ok, d] = await uploadOne(queue[i], engine, prefix);
+    preparePipeline(prefix + (effectiveMode(queue[i]) === "local" ? "开始本地提取…" : "开始上传…"));
+    const [ok, d] = await dispatchOne(queue[i], engine, prefix);
     if (ok) {
       okN++;
       if (d && d.job_id) {
@@ -703,7 +706,80 @@ function finishBatch() {
   updateGo();
 }
 
-function uploadOne(f, engine, labelPrefix) {
+// ---------- 音轨提取模式：auto（≤1.6GB 本地）/ local（仅本地）/ server（整片上传） ----------
+function effectiveMode(f) {
+  if (state.extractMode === "server") return "server";
+  if (state.extractMode === "local") return "local";
+  return window.JavExtract && window.JavExtract.fits(f) ? "local" : "server";
+}
+
+function labelPipeline(mode) {
+  const names = mode === "local"
+    ? ["本地提音轨", "上传音频", "提交生成"]
+    : ["上传视频", "提取音频", "提交生成"];
+  ["step-upload", "step-extract", "step-dispatch"].forEach((id, i) => {
+    $(id).querySelector(".step-name").textContent = names[i];
+  });
+}
+
+function extractLocal(f, prefix) {
+  return new Promise((resolve, reject) => {
+    let t0 = null;
+    setStep("step-upload", "active", "1", prefix + "加载提取引擎（首次 ~30MB，有缓存）…");
+    setFill("0", true);
+    window.JavExtract.extractAudio(f, (p) => {
+      const now = Date.now() / 1000;
+      if (t0 == null) t0 = now;
+      let meta = prefix + "浏览器本地提取 · " + Math.round(p * 100) + "%";
+      const el = now - t0;
+      if (el > 5 && p > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - p) / p)}`;
+      setStep("step-upload", "active", "1", meta);
+      setFill((p * 100).toFixed(1) + "%");
+    }).then(resolve, reject);
+  });
+}
+
+function uploadAudioBlob(f, engine, blob, prefix) {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("audio", blob, f.name.replace(/\.[^.]+$/, "") + ".opus");
+    fd.append("engine", engine);
+    fd.append("name", f.name);
+    fd.append("size_mb", String(mb(f.size)));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload-audio");
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      const pct = ev.loaded / ev.total * 100;
+      setStep("step-extract", "active", "2",
+        `${prefix}上传音频 ${mb(ev.loaded)} / ${mb(ev.total)} MB · ${pct.toFixed(1)}%`);
+      setFill(pct + "%");
+    };
+    xhr.onload = () => {
+      if (xhr.status === 202) {
+        const d = JSON.parse(xhr.responseText);
+        setStep("step-extract", "done", "\u2713", `${prefix}音频 ${d.size_mb} MB 已接收`);
+        $("line-2").classList.add("on");
+        setStep("step-dispatch", "active", "3", "提交中…");
+        setFill("100%");
+        pollUpload(d.upload_id, engine, prefix, resolve);
+      } else {
+        let msg = "失败: " + xhr.status;
+        try { msg = JSON.parse(xhr.responseText).detail; } catch (_e) {}
+        setStep("step-extract", "error", "\u2715", msg);
+        resolve([false, { error: msg }]);
+      }
+    };
+    xhr.onerror = () => {
+      setStep("step-extract", "error", "\u2715", "网络错误");
+      resolve([false, { error: "音频上传失败（网络错误）" }]);
+    };
+    xhr.send(fd);
+  });
+}
+
+// 整片上传（原路径）：视频 → 本服务 → 服务端提取 → 转发
+function serverUpload(f, engine, labelPrefix) {
   const prefix = labelPrefix || "";
   return new Promise((resolve) => {
     const fd = new FormData();
@@ -739,6 +815,50 @@ function uploadOne(f, engine, labelPrefix) {
     };
     xhr.send(fd);
   });
+}
+
+// 统一入口：按提取模式走 本地提音轨→传音频 或 整片上传
+function dispatchOne(f, engine, labelPrefix) {
+  const prefix = labelPrefix || "";
+  const mode = effectiveMode(f);
+  if (mode === "server" && state.extractMode === "auto" && window.JavExtract
+      && f.size > window.JavExtract.MAX_BYTES) {
+    toast(`「${f.name}」超过 1.6GB，改为整片上传本服务`);
+  }
+  if (mode === "local") {
+    labelPipeline("local");
+    return extractLocal(f, prefix)
+      .catch((e) => ({ error: e }))
+      .then((r) => {
+        if (r && r.error) {
+          const msg = r.error.message || String(r.error);
+          if (state.extractMode === "local") {
+            setStep("step-upload", "error", "\u2715", prefix + msg);
+            return [false, { error: msg }];
+          }
+          toast(`本地提取失败，改用整片上传（${msg}）`, "err");
+          labelPipeline("server");
+          return serverUpload(f, engine, prefix);
+        }
+        if (!r || r.skipped) {
+          if (state.extractMode === "local") {
+            const msg = "文件超过 1.6GB，无法在浏览器本地提取";
+            setStep("step-upload", "error", "\u2715", prefix + msg);
+            return [false, { error: msg }];
+          }
+          labelPipeline("server");
+          return serverUpload(f, engine, prefix);
+        }
+        setStep("step-upload", "done", "\u2713",
+          `${prefix}本地提取完成 · 音频 ${mb(r.size)} MB`);
+        $("line-1").classList.add("on");
+        setStep("step-extract", "active", "2", prefix + "准备上传音频…");
+        setFill("0", true);
+        return uploadAudioBlob(f, engine, r, prefix);
+      });
+  }
+  labelPipeline("server");
+  return serverUpload(f, engine, prefix);
 }
 
 function showStatus(text, cls) {
@@ -792,6 +912,13 @@ function pollUpload(id, engine, labelPrefix, onDone) {
   }, 1000);
 }
 
+
+// ---------- 音轨提取模式（默认 auto，记忆选择） ----------
+$("extract-select").value = state.extractMode;
+$("extract-select").onchange = (ev) => {
+  state.extractMode = ev.target.value;
+  localStorage.setItem("javweb_extract", state.extractMode);
+};
 
 // ---------- 完成后自动写回源目录（默认关） ----------
 $("autosave").checked = state.autoSave;

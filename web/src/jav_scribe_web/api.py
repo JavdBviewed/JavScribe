@@ -191,9 +191,27 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
 
     # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
 
-    async def _run_upload(task: UploadTask, video_tmp: Path) -> None:
+    async def _dispatch_task(task: UploadTask, audio_tmp: Path) -> None:
+        """把已提取好的 opus 转发给所选服务（两路上传共用）。"""
         entry = store.get(task.engine)
         assert entry is not None
+        task.phase = "dispatching"
+        eng = JavScribeEngine(task.engine, entry["url"])
+        try:
+            async with _lock_for(task.engine):
+                task.job_id = await eng.upload_audio(
+                    audio_tmp.read_bytes(), task.name or "remote"
+                )
+        except Exception as ex:
+            task.phase = "error"
+            task.error = f"服务拒绝任务: {ex}"
+            return
+        finally:
+            await eng.close()
+        task.phase = "done"
+        task.progress = 1.0
+
+    async def _run_upload(task: UploadTask, video_tmp: Path) -> None:
         audio_tmp = video_tmp.with_suffix(".opus")
         try:
             try:
@@ -207,24 +225,17 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
                 task.phase = "error"
                 task.error = f"提取音频失败: {ex}"
                 return
-            task.phase = "dispatching"
-            eng = JavScribeEngine(task.engine, entry["url"])
-            try:
-                async with _lock_for(task.engine):
-                    task.job_id = await eng.upload_audio(
-                        audio_tmp.read_bytes(), task.name or "remote"
-                    )
-            except Exception as ex:
-                task.phase = "error"
-                task.error = f"服务拒绝任务: {ex}"
-                return
-            finally:
-                await eng.close()
-            task.phase = "done"
-            task.progress = 1.0
+            await _dispatch_task(task, audio_tmp)
         finally:
             task.finished = time.time()
             video_tmp.unlink(missing_ok=True)
+            audio_tmp.unlink(missing_ok=True)
+
+    async def _run_audio(task: UploadTask, audio_tmp: Path) -> None:
+        try:
+            await _dispatch_task(task, audio_tmp)
+        finally:
+            task.finished = time.time()
             audio_tmp.unlink(missing_ok=True)
 
     @app.post("/api/upload", status_code=202)
@@ -265,6 +276,53 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             "name": task.name,
             "size_mb": task.size_mb,
             "duration_s": round(probe_duration(tmp), 1),
+        }
+
+    @app.post("/api/upload-audio", status_code=202)
+    async def api_upload_audio(
+        audio: UploadFile = File(...),
+        engine: str = Form(...),
+        name: str = Form("remote"),
+        size_mb: float = Form(0),
+        duration_s: float = Form(0),
+    ) -> dict:
+        """浏览器本地提音轨后只传 opus：跳过服务端提取，直接派发服务。"""
+        entry = store.get(engine)
+        if entry is None:
+            raise HTTPException(404, "engine not found")
+        _prune_uploads()
+        max_bytes = int(UPLOAD_MAX_GB * 1024**3)
+        fd, fname = tempfile.mkstemp(suffix=".opus", prefix="javweb_aud_")
+        tmp = Path(fname)
+        os.close(fd)
+        received = 0
+        try:
+            with open(tmp, "wb") as fh:
+                while chunk := await audio.read(4 * 1024 * 1024):
+                    received += len(chunk)
+                    if received > max_bytes:
+                        raise HTTPException(413, f"file too large (max {UPLOAD_MAX_GB:g}GB)")
+                    fh.write(chunk)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        task = UploadTask(
+            id=uuid.uuid4().hex[:8],
+            engine=engine,
+            name=name or "remote",
+            size_mb=size_mb or round(received / 1048576, 1),
+            phase="dispatching",
+            audio_mb=round(received / 1048576, 1),
+        )
+        _uploads[task.id] = task
+        asyncio.create_task(_run_audio(task, tmp))
+        return {
+            "ok": True,
+            "upload_id": task.id,
+            "engine": engine,
+            "name": task.name,
+            "size_mb": task.size_mb,
+            "duration_s": round(duration_s, 1),
         }
 
     @app.get("/api/uploads/{upload_id}")

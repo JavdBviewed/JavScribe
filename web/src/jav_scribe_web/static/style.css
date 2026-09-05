@@ -526,6 +526,7 @@ input:focus, select:focus {
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 #engine-select { min-width: 200px; cursor: pointer; }
+#extract-select { min-width: 210px; cursor: pointer; }
 #dispatch-go { font-size: 14px; padding: 10px 22px; }
 .autosave-chk { padding-bottom: 11px; user-select: none; }
 .autosave-note { margin-top: 8px; max-width: 860px; line-height: 1.55; }
