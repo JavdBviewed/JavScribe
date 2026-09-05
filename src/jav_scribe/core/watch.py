@@ -6,6 +6,11 @@ BT/PT specifics handled here:
   - catch-up: on the first scan, already-existing stable files can be queued
     too (config watch.process_existing) — the engine then skips any file
     that already has its .zh.srt next to it.
+
+Each path is handed over at most once per lifetime: queued paths stay
+tracked (marked queued) so a stable file is not re-queued on later scans;
+paths that disappear are forgotten, so a fresh file at the same path can
+be picked up again.
 """
 from __future__ import annotations
 
@@ -34,8 +39,8 @@ class Watcher:
         self.process_existing = process_existing
         self.log = log or (lambda _s: None)
         self.on_new_files = on_new_files
-        # path -> (size, mtime, first_seen_scan)
-        self._seen: dict[Path, tuple[int, float, int]] = {}
+        # path -> (size, mtime, first_seen_scan, queued)
+        self._seen: dict[Path, tuple[int, float, int, bool]] = {}
         self._scan_no = 0
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -62,29 +67,36 @@ class Watcher:
         current = self._collect()
         ready: list[Path] = []
 
+        # Forget paths that no longer exist (downloaded file moved/deleted),
+        # so a fresh file at the same path can be picked up again.
+        for path in list(self._seen):
+            if path not in current:
+                del self._seen[path]
+
         for path, (size, mtime) in current.items():
             if path in self._seen:
                 continue
             if self.process_existing and self._scan_no == 1:
                 # Existing file: trust it (it predates the watcher).
-                self._seen[path] = (size, mtime, self._scan_no)
+                self._seen[path] = (size, mtime, self._scan_no, True)
                 ready.append(path)
                 self.log(f"[watch] 存量文件: {path.name}")
             else:
                 # Newly appeared: track, but wait for size stability.
-                self._seen[path] = (size, mtime, self._scan_no)
+                self._seen[path] = (size, mtime, self._scan_no, False)
                 self.log(f"[watch] 新文件(待稳定): {path.name}")
 
-        for path, (size, mtime, first_scan) in list(self._seen.items()):
-            if path in ready or path not in current:
+        for path, (size, mtime, first_scan, queued) in list(self._seen.items()):
+            if queued:
                 continue
             cur_size, cur_mtime = current[path]
             if cur_size == size and cur_mtime == mtime and self._scan_no > first_scan:
-                del self._seen[path]
+                # Stable across two scans -> hand over once, keep tracking.
+                self._seen[path] = (cur_size, cur_mtime, first_scan, True)
                 ready.append(path)
                 self.log(f"[watch] 文件已稳定: {path.name}")
             else:
-                self._seen[path] = (cur_size, cur_mtime, first_scan)
+                self._seen[path] = (cur_size, cur_mtime, first_scan, False)
                 self.log(f"[watch] 大小变化中(下载未完成?): {path.name}")
 
         if ready and self.on_new_files:
