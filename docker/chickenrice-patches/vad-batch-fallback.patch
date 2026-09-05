@@ -1,8 +1,30 @@
 diff --git a/src/faster_whisper_transwithai_chickenrice/infer.py b/src/faster_whisper_transwithai_chickenrice/infer.py
-index d56e829..3f350d6 100644
+index d56e829..794584b 100644
 --- a/src/faster_whisper_transwithai_chickenrice/infer.py
 +++ b/src/faster_whisper_transwithai_chickenrice/infer.py
-@@ -679,17 +679,59 @@ class Inference:
+@@ -452,6 +452,10 @@ class Inference:
+         self.enable_batching = args.enable_batching
+         self.batch_size = args.batch_size if args.batch_size else 0
+         self.max_batch_size = args.max_batch_size
++        # [JavScribe] Per-file flag: set when no VAD found any speech, so
++        # the batched attempt (which is unreliable on continuous audio) is
++        # skipped for that file.
++        self._skip_batch_this_file = False
+ 
+         self.overwrite = args.overwrite
+         self.output_dir = args.output_dir
+@@ -663,6 +667,10 @@ class Inference:
+     def _prepare_transcription(self, audio_path: str, *, batched: bool) -> tuple[Any, dict[str, Any], float | None]:
+         config = dict(self.generation_config)
+ 
++        # [JavScribe] This method runs once per file per pipeline pass; reset
++        # the per-file batch-skip flag set by _fallback_clip_timestamps.
++        self._skip_batch_this_file = False
++
+         if not config.get("vad_filter") or "clip_timestamps" in config:
+             return audio_path, config, None
+ 
+@@ -679,17 +687,69 @@ class Inference:
          )
          duration_after_vad = sum(segment["end"] - segment["start"] for segment in vad_segments) / WHISPER_SAMPLING_RATE
  
@@ -16,10 +38,12 @@ index d56e829..3f350d6 100644
 +        if not clips:
 +            # [JavScribe] The enhanced VAD returned no speech. An empty clip
 +            # list makes BatchedInferencePipeline raise "No clip timestamps
-+            # found" and the file silently degrades to non-batched
-+            # single-stream inference (slow, GPU underused). Fall back to
-+            # the built-in Silero VAD, then to full-file coverage, so
-+            # batched inference always applies.
++            # found", so the file would silently degrade to non-batched
++            # single-stream inference. Fall back to the built-in Silero VAD,
++            # then to full-file coverage. If every VAD stays empty the file
++            # is flagged to skip the batched attempt entirely, because
++            # batched output on continuous audio (no silence boundaries) is
++            # unreliable: corrupt/negative timestamps.
 +            clips = self._fallback_clip_timestamps(audio, batched=batched)
 +            if batched:
 +                duration_after_vad = sum(c["end"] - c["start"] for c in clips)
@@ -39,6 +63,10 @@ index d56e829..3f350d6 100644
 +        Order: built-in Silero VAD -> full-file coverage (batched only;
 +        the non-batched pipeline already treats an empty list as "full
 +        audio").
++
++        When the full-file coverage branch is reached (no VAD found any
++        speech), _skip_batch_this_file is set so the caller avoids the
++        batched attempt for this file.
 +        """
 +        if not batched:
 +            return []
@@ -58,9 +86,38 @@ index d56e829..3f350d6 100644
 +                return clips
 +        except Exception as e:
 +            logger.warning(f"Silero VAD fallback failed: {e}; using full-file coverage")
-+        logger.warning("No speech detected by any VAD; transcribing the full file in batched mode")
++        logger.warning(
++            "No speech detected by any VAD; using full-file coverage and skipping "
++            "batched inference for this file (unreliable on continuous audio)"
++        )
++        self._skip_batch_this_file = True
 +        return [{"start": 0, "end": len(audio)}]
 +
      def _log_duration(self, duration: float, duration_after_vad: float) -> None:
          if duration == duration_after_vad or duration_after_vad == 0:
              logger.info(_("info.duration", duration=format_duration(duration)))
+@@ -774,7 +834,7 @@ class Inference:
+                 )
+ 
+                 # Use batched or regular inference
+-                if batched_model and batch_size_to_use > 0:
++                if batched_model and batch_size_to_use > 0 and not self._skip_batch_this_file:
+                     # Use auto-retry with batch size reduction on OOM
+                     # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
+                     try:
+@@ -800,6 +860,15 @@ class Inference:
+                             **transcription_config,
+                         )
+                 else:
++                    if self._skip_batch_this_file:
++                        # Re-prepare with the non-batched clip layout: the
++                        # batched layout (list of dicts) is not accepted by
++                        # WhisperModel.transcribe, and an empty flat list
++                        # means "full audio" in that pipeline.
++                        audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
++                            task.audio_path,
++                            batched=False,
++                        )
+                     if manual_duration_after_vad == 0:
+                         _segments = []
+                         info = SimpleNamespace(
