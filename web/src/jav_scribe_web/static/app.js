@@ -215,8 +215,9 @@ $("engine-grid").onclick = async (ev) => {
 
 // ---------- 任务行（按任务 key 就地更新：进度/ETA/位置只改文字与条宽，不重排行节点，扫光与过渡不中断） ----------
 function jobKey(j) {
-  return j.job_id ? j.engine + "|" + j.job_id
-                  : j.engine + "|" + (j.file || "") + "|" + (j.created || "");
+  // 一个 job 可含多个文件（watcher 批量），逐行展平后必须带文件名，
+  // 否则同 job 的多行会共用 key 被去重折叠（09-05 分页验收时暴露）
+  return j.engine + "|" + (j.job_id || "") + "|" + (j.file || "") + "|" + (j.created || "");
 }
 
 function jobRowData(j, now) {
