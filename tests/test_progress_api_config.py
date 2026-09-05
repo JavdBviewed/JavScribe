@@ -131,7 +131,7 @@ def test_auth_and_masking() -> None:
             code, body = _http("GET", base + "/config", key="k1")
             assert code == 200 and body["ok"] and body["profile"] == "server", (code, body)
             items = {i["path"]: i for i in body["items"]}
-            assert len(items) == 21, len(items)  # 18 基础项 + 3 扫描规则项
+            assert len(items) == 22, len(items)  # 19 基础项 + 3 扫描规则项
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
             # 敏感项打码：未设置 -> ""
@@ -270,6 +270,38 @@ def test_persist_top_level_when_no_profile_section() -> None:
             saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert "profiles" not in saved
             assert saved["subtitle"]["lang_tag"] == "ja"
+        finally:
+            http.stop()
+
+
+def test_put_vad_threshold_float() -> None:
+    """vad.threshold 是 float 项：合法值热更+落盘，越界/错类型拒绝。"""
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        file_cfg = copy.deepcopy(BASE_CFG)
+        http, engine, cfg_path = _start(td, cfg, file_cfg)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            # 默认视图里带该浮点项，值为空（未设置 = 用上游默认 0.5）
+            code, body = _http("GET", base + "/config", key="k1")
+            items = {i["path"]: i for i in body["items"]}
+            assert items["vad.threshold"]["type"] == "float"
+            assert items["vad.threshold"]["value"] in (None, "")
+            # 合法值：热更 + 落盘 + 回读
+            code, b2 = _http("PUT", base + "/config", {"values": {"vad.threshold": 0.3}}, key="k1")
+            assert code == 200 and b2["updated"] == ["vad.threshold"], (code, b2)
+            assert cfg["vad"]["threshold"] == 0.3
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            assert saved["profiles"]["server"]["vad"]["threshold"] == 0.3
+            code, b3 = _http("GET", base + "/config", key="k1")
+            items = {i["path"]: i for i in b3["items"]}
+            assert items["vad.threshold"]["value"] == 0.3
+            # 越界 / 错类型
+            for bad in (0.0, 1.5, "abc", True, -1):
+                code, b4 = _http("PUT", base + "/config", {"values": {"vad.threshold": bad}}, key="k1")
+                assert code == 400 and not b4["ok"], (bad, code, b4)
         finally:
             http.stop()
 

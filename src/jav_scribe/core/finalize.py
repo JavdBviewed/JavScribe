@@ -106,6 +106,8 @@ def finalize_one(
             if sub_cfg.get("skip_if_exists") and not sub_cfg.get("overwrite"):
                 res.skipped.append(target)
                 logf(f"[finalize] 已存在，跳过: {target.name}")
+                # 目标已存在时引擎的原始输出没有落位价值，删掉避免残留孤儿文件
+                w.unlink(missing_ok=True)
                 continue
             # overwrite: replace atomically
             tmp = target.with_suffix(target.suffix + ".tmp")

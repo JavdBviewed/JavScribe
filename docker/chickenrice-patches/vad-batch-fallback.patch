@@ -1,0 +1,66 @@
+diff --git a/src/faster_whisper_transwithai_chickenrice/infer.py b/src/faster_whisper_transwithai_chickenrice/infer.py
+index d56e829..3f350d6 100644
+--- a/src/faster_whisper_transwithai_chickenrice/infer.py
++++ b/src/faster_whisper_transwithai_chickenrice/infer.py
+@@ -679,17 +679,59 @@ class Inference:
+         )
+         duration_after_vad = sum(segment["end"] - segment["start"] for segment in vad_segments) / WHISPER_SAMPLING_RATE
+ 
+-        config["vad_filter"] = False
+-        config["clip_timestamps"] = vad_segments_to_clip_timestamps(
++        clips = vad_segments_to_clip_timestamps(
+             vad_segments,
+             WHISPER_SAMPLING_RATE,
+             batched=batched,
+         )
++        if not clips:
++            # [JavScribe] The enhanced VAD returned no speech. An empty clip
++            # list makes BatchedInferencePipeline raise "No clip timestamps
++            # found" and the file silently degrades to non-batched
++            # single-stream inference (slow, GPU underused). Fall back to
++            # the built-in Silero VAD, then to full-file coverage, so
++            # batched inference always applies.
++            clips = self._fallback_clip_timestamps(audio, batched=batched)
++            if batched:
++                duration_after_vad = sum(c["end"] - c["start"] for c in clips)
++            else:
++                duration_after_vad = len(audio) / WHISPER_SAMPLING_RATE
++
++        config["vad_filter"] = False
++        config["clip_timestamps"] = clips
+         config.setdefault("beam_size", 1)
+         config.setdefault("condition_on_previous_text", False)
+ 
+         return audio, config, duration_after_vad
+ 
++    def _fallback_clip_timestamps(self, audio: Any, *, batched: bool) -> list[Any]:
++        """Clip list for when the enhanced VAD finds no speech.
++
++        Order: built-in Silero VAD -> full-file coverage (batched only;
++        the non-batched pipeline already treats an empty list as "full
++        audio").
++        """
++        if not batched:
++            return []
++        try:
++            from faster_whisper.vad import VadOptions, get_speech_timestamps
++
++            silero_segments = get_speech_timestamps(audio, VadOptions(max_speech_duration_s=30))
++            if silero_segments:
++                clips = [
++                    {"start": float(s["start"]), "end": float(s["end"])} for s in silero_segments
++                ]
++                logger.warning(
++                    "Enhanced VAD found no speech segments; using built-in Silero VAD "
++                    f"({len(clips)} clips, {int(sum(c['end'] - c['start'] for c in clips))}s of speech). "
++                    "Check the VAD threshold in the JavScribe service settings."
++                )
++                return clips
++        except Exception as e:
++            logger.warning(f"Silero VAD fallback failed: {e}; using full-file coverage")
++        logger.warning("No speech detected by any VAD; transcribing the full file in batched mode")
++        return [{"start": 0, "end": len(audio)}]
++
+     def _log_duration(self, duration: float, duration_after_vad: float) -> None:
+         if duration == duration_after_vad or duration_after_vad == 0:
+             logger.info(_("info.duration", duration=format_duration(duration)))

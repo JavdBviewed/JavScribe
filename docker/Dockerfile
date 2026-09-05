@@ -41,6 +41,14 @@ RUN git clone --depth 1 --branch "${CHICKENRICE_REF}" \
         https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice.git \
         chickenrice
 
+# ---- JavScribe patches (applied on top of the pinned ChickenRice) ----
+# VAD empty-result fallback: without it, batched inference silently
+# degrades to single-stream when the enhanced VAD finds no speech.
+COPY docker/chickenrice-patches/ /tmp/chickenrice-patches/
+RUN for p in /tmp/chickenrice-patches/*.patch; do \
+        (cd /opt/chickenrice && git apply -p1 "$p" && echo "[build] applied ${p##*/}"); \
+    done && rm -rf /tmp/chickenrice-patches
+
 WORKDIR /opt/chickenrice
 RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
         "faster-whisper>=1.0.0" \

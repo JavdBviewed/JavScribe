@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jav_scribe.core.engine import Engine  # noqa: E402
 from jav_scribe.core.progress_api import ProgressHTTP  # noqa: E402
-from jav_scribe.core.task import TaskStatus  # noqa: E402
+from jav_scribe.core.task import Job, Task, TaskStatus, new_job_id  # noqa: E402
+from jav_scribe.core.finalize import finalize_one  # noqa: E402
 
 import json  # noqa: E402
 import urllib.error  # noqa: E402
@@ -99,6 +100,21 @@ FAKE_EN = (
     "    out = pathlib.Path(f).with_suffix('.srt')\n"
     "    out.write_text('1\\n00:00:30,000 --> 00:01:00,000\\nnihao\\n', encoding='utf-8')\n"
     '    print("Writing: %s" % out)\n'
+)
+
+
+# Fake engine #4: slow start (sleeps before writing) — for cross-job dedup
+FAKE_SLOW = (
+    "import sys, pathlib, time\n"
+    "files = [a for a in sys.argv[1:] if not a.startswith('-')]\n"
+    'print("正在加载 Whisper 模型")\n'
+    "time.sleep(0.6)\n"
+    "for i, f in enumerate(files, 1):\n"
+    '    print("正在翻译 (%d/%d)：%s" % (i, len(files), f))\n'
+    "    out = pathlib.Path(f).with_suffix('.srt')\n"
+    "    out.write_text('1\\n00:00:30,000 --> 00:01:00,000\\n你好\\n', encoding='utf-8')\n"
+    '    print("正在写入：%s" % out)\n'
+    'print("全部完成")\n'
 )
 
 
@@ -241,6 +257,73 @@ def test_run_and_finalize_english_log() -> None:
         assert zh.is_file(), f"missing {zh}"
         assert not video.with_suffix(".srt").exists()
         print("  test_run_and_finalize_english_log OK")
+
+
+# ---------------------------------------------------------------------------
+# 批量收尾 / 去重 / 孤儿清理
+# ---------------------------------------------------------------------------
+
+def test_batch_two_files_no_skip_overwrite() -> None:
+    """一个任务里多个文件随同一批次推理一次收尾后，循环回到后续文件时
+    不得把已 DONE 的任务覆写成 SKIPPED「已存在」（PENDING 守卫）。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        v1, v2 = tmp / "a.mkv", tmp / "b.mkv"
+        v1.write_bytes(b"fake")
+        v2.write_bytes(b"fake")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_OK)), log=lambda s: None, profile="test")
+        job = engine.submit([v1, v2], run_in_thread=False)
+        for t in job.files:
+            assert t.status == TaskStatus.DONE, t.to_dict()
+            assert "已存在" not in (t.message or ""), t.message
+        assert v1.with_name("a.zh.srt").is_file()
+        assert v2.with_name("b.zh.srt").is_file()
+        print("  test_batch_two_files_no_skip_overwrite OK")
+
+
+def test_cross_job_dedup() -> None:
+    """同一文件正在被任务 A 处理时，并发的任务 B 直接跳过（不重复推理），
+    A 正常完成，占位随后释放。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video = tmp / "demo.mkv"
+        video.write_bytes(b"fake")
+        engine = Engine(_base_cfg(_write_fake(tmp, FAKE_SLOW)), log=lambda s: None, profile="test")
+        job_a = engine.submit([video], run_in_thread=True)
+        time.sleep(0.3)  # A 正在跑 fake（0.6s 睡眠窗口内），文件已被 claim
+        job_b = Job(id=new_job_id(), files=[Task(path=video)], source_kind="local", label="dup")
+        engine._pipeline(job_b)  # 模拟并发管线
+        assert job_b.files[0].status == TaskStatus.SKIPPED, job_b.files[0].to_dict()
+        assert "其他任务正在处理" in job_b.files[0].message, job_b.files[0].message
+        deadline = time.time() + 30
+        while time.time() < deadline and job_a.files[0].status in (
+            TaskStatus.PENDING, TaskStatus.RUNNING
+        ):
+            time.sleep(0.05)
+        assert job_a.files[0].status == TaskStatus.DONE, job_a.files[0].to_dict()
+        assert engine._inflight_files == set(), "完成后应释放占位"
+        print("  test_cross_job_dedup OK")
+
+
+def test_finalize_skip_removes_raw() -> None:
+    """目标字幕已存在而跳过落位时，引擎原始输出要删掉，不留孤儿文件。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        src = tmp / "demo.mkv"
+        src.write_bytes(b"fake")
+        zh = tmp / "demo.zh.srt"
+        zh.write_text("旧字幕\n", encoding="utf-8")
+        raw = tmp / "demo.srt"
+        raw.write_text("1\n00:00:01,000 --> 00:00:02,000\n新\n", encoding="utf-8")
+        res = finalize_one(
+            src, [raw],
+            {"naming": "rename", "lang_tag": "zh", "skip_if_exists": True,
+             "overwrite": False, "tag_formats": ["srt"]},
+        )
+        assert [p.name for p in res.skipped] == ["demo.zh.srt"], res.skipped
+        assert not raw.exists(), "引擎原始输出应被清理"
+        assert zh.read_text(encoding="utf-8") == "旧字幕\n"
+        print("  test_finalize_skip_removes_raw OK")
 
 
 # ---------------------------------------------------------------------------
@@ -399,4 +482,7 @@ if __name__ == "__main__":
     test_sanitize_file_roundtrip()
     test_run_finalize_sanitizes_negative()
     test_watch_stability()
+    test_batch_two_files_no_skip_overwrite()
+    test_cross_job_dedup()
+    test_finalize_skip_removes_raw()
     print("ALL SMOKE TESTS PASSED")

@@ -637,7 +637,7 @@ function pollUpload(id, engine, labelPrefix, onDone) {
 
 
 // ---------- 服务设置 modal ----------
-const GROUP_ZH = { subtitle: "字幕", infer: "推理引擎", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };
+const GROUP_ZH = { subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };
 
 function showModal(title) {
   $("modal-title").textContent = title;
@@ -748,12 +748,13 @@ function configFieldHtml(it) {
       <input id="${id}" type="text" class="mono" data-path="${esc(it.path)}"
              value="${esc(val)}" placeholder="逗号分隔，如 mp4, mkv"></label>`;
   }
-  const type = it.type === "int" ? "number" : it.type === "secret" ? "password" : "text";
+  const type = it.type === "int" || it.type === "float" ? "number" : it.type === "secret" ? "password" : "text";
   const val = it.type === "secret" ? "" : (it.value == null ? "" : it.value);
-  const ph = it.type === "secret" ? (it.value === "***" ? "已设置，留空保持不变" : "") : "";
-  const min = it.type === "int" ? " min=1" : "";
+  const ph = it.type === "secret" ? (it.value === "***" ? "已设置，留空保持不变" : "")
+    : it.type === "float" ? "留空用服务端默认（0.5）" : "";
+  const numAttrs = it.type === "float" ? ' step="0.05" min="0.01" max="0.99"' : it.type === "int" ? " min=1" : "";
   return `<label class="field"><span class="field-label">${esc(it.label)}</span>
-    <input id="${id}" type="${type}"${min} class="${it.type === "secret" ? "mono" : ""}"
+    <input id="${id}" type="${type}"${numAttrs} class="${it.type === "secret" ? "mono" : ""}"
            data-path="${esc(it.path)}" value="${esc(val)}" placeholder="${esc(ph)}"></label>`;
 }
 
@@ -767,6 +768,11 @@ async function saveConfig(name) {
     } else if (it.type === "int") {
       const v = parseInt(f.value, 10);
       if (isNaN(v) || v < 1) { toast(`${it.label} 需要正整数`, "err"); return; }
+      values[it.path] = v;
+    } else if (it.type === "float") {
+      if (f.value.trim() === "") continue; // 空 = 保持服务端默认阈值
+      const v = parseFloat(f.value);
+      if (isNaN(v) || v < 0.01 || v > 0.99) { toast(`${it.label} 需在 0.01 ~ 0.99 之间`, "err"); return; }
       values[it.path] = v;
     } else if (it.type === "secret") {
       if (f.value === "") continue; // 空 = 保持

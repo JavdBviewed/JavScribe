@@ -68,6 +68,7 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("infer.log_level", "日志级别", "enum", ["DEBUG", "INFO", "WARNING", "ERROR"], False),
     ("infer.batch", "批量推理", "bool", None, False),
     ("infer.max_batch_size", "批处理大小", "int", None, False),
+    ("vad.threshold", "VAD 语音检测阈值", "float", None, False),
     ("polish.enabled", "启用 AI 润色", "bool", None, False),
     ("polish.base_url", "润色服务地址", "string", None, False),
     ("polish.model", "润色模型", "string", None, False),
@@ -116,6 +117,13 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 最大 128")
             if path == "polish.batch_lines" and value > 1000:
                 raise ConfigError(f"{path} 最大 1000")
+        elif ftype == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(f"{path} 需要数字")
+            v = float(value)
+            if not (0.01 <= v <= 0.99):
+                raise ConfigError(f"{path} 需在 0.01 ~ 0.99 之间")
+            value = v
         elif ftype == "enum":
             if not isinstance(value, str) or value not in (options or []):
                 raise ConfigError(f"{path} 需要取值为 {options} 之一")

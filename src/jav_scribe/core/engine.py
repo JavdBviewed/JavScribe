@@ -50,6 +50,9 @@ class Engine:
         self._runner: ProcRunner | None = None
         self._stop_evt = threading.Event()
         self._job_thread: threading.Thread | None = None
+        self._pending_jobs: list[Job] = []
+        self._inflight_files: set[Path] = set()
+        self._inflight_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Submission
@@ -98,7 +101,6 @@ class Engine:
             self._run_job(job)
         return job
 
-    _pending_jobs: list[Job] = []
 
     def submit_remote_files(self, files: list[Path], source_name: str) -> Job:
         return self.submit(files, source_kind="remote", label=source_name)
@@ -157,6 +159,10 @@ class Engine:
                 task.status = TaskStatus.CANCELED
                 task.message = "已取消"
                 continue
+            if task.status != TaskStatus.PENDING:
+                # 批量推理一次处理任务内全部文件：处理第一个文件时，
+                # 其余文件已随该批次统一收尾（DONE/ERROR），直接跳过
+                continue
             target = existing_lang_sub(task.path, lang)
             if target is not None and self.cfg.get("subtitle", {}).get("skip_if_exists", True):
                 task.status = TaskStatus.SKIPPED
@@ -166,7 +172,23 @@ class Engine:
                 task.finished = time.time()
                 self.log(f"[engine] 跳过（字幕已存在）: {task.path.name}")
                 continue
-            self._process_one(job, task, lang)
+            key = task.path.resolve()
+            with self._inflight_lock:
+                if key in self._inflight_files:
+                    # 同一文件正被其他任务处理（watcher 重扫/重复提交），跳过
+                    task.status = TaskStatus.SKIPPED
+                    task.phase = TaskPhase.DONE
+                    task.progress = 1.0
+                    task.message = "其他任务正在处理，已跳过"
+                    task.finished = time.time()
+                    self.log(f"[engine] 跳过（其他任务正在处理）: {task.path.name}")
+                    continue
+                self._inflight_files.add(key)
+            try:
+                self._process_one(job, task, lang)
+            finally:
+                with self._inflight_lock:
+                    self._inflight_files.discard(key)
         self._polish_job(job)
         self._emby_job(job)
 
@@ -322,6 +344,17 @@ class Engine:
                 args.append(f"--max_batch_size={inf['max_batch_size']}")
         if inf.get("log_level"):
             args.append(f"--log_level={inf['log_level']}")
+        # VAD 参数（服务设置可调；不填则用 ChickenRice 默认阈值 0.5）
+        vad = self.cfg.get("vad", {})
+        for key, flag in (
+            ("threshold", "--vad_threshold"),
+            ("min_speech_duration_ms", "--vad_min_speech_duration_ms"),
+            ("min_silence_duration_ms", "--vad_min_silence_duration_ms"),
+            ("speech_pad_ms", "--vad_speech_pad_ms"),
+        ):
+            v = vad.get(key)
+            if v is not None:
+                args.append(f"{flag}={v}")
         for a in inf.get("extra_args", []):
             args.append(a)
         # cwd: explicit wins. Otherwise, for a bare executable (e.g.
