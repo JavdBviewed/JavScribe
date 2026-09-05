@@ -23,4 +23,4 @@ jav-scribe-web = "jav_scribe_web.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-jav_scribe_web = ["static/*", "static/ffmpeg/*", "static/lib/*"]
+jav_scribe_web = ["static/*", "static/assets/*", "static/ffmpeg/*", "static/lib/*"]

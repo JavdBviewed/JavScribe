@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JavScribe 字幕工作台</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="brand-dot" id="brand-dot"></span>
+    <div class="brand-text">
+      <h1>字幕工作台</h1>
+      <span class="brand-sub">JAVSCRIBE · SUBTITLE CONSOLE</span>
+    </div>
+  </div>
+  <div class="hud">
+    <span id="health" class="hud-item">连接中…</span>
+    <span id="clock" class="hud-item mono">--:--:--</span>
+  </div>
+</header>
+
+<main>
+  <section id="sec-engines">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Services</span><h2>字幕服务</h2></div>
+      <form id="engine-form" autocomplete="off">
+        <input id="engine-name" placeholder="名称，如 公司3090" required maxlength="40">
+        <input id="engine-url" type="url" placeholder="http://地址:8300" required>
+        <input id="engine-key" type="password" placeholder="API Key（可选，用于服务设置）" maxlength="128">
+        <button type="submit" class="btn">添加服务</button>
+      </form>
+    </div>
+    <div id="engine-grid"></div>
+    <div id="engines-empty" class="empty">
+      <div class="empty-icon">&#9673;</div>
+      <div>还没有字幕服务</div>
+      <div class="muted small">用上方表单添加，或用环境变量 <span class="mono">JAV_ENGINES="名称=URL"</span> 预置</div>
+    </div>
+  </section>
+
+  <section id="sec-dispatch">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Generate</span><h2>生成字幕</h2></div>
+    </div>
+
+    <div id="drop" role="button" tabindex="0" aria-label="选择影片文件">
+      <div class="drop-icon">&#9654;</div>
+      <div class="drop-main">拖入影片，或点击选择文件</div>
+      <div class="muted small">mp4 / mkv / ts / mov … 默认在你的浏览器里本地提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片（原片只到本服务，不出本机）</div>
+      <button type="button" id="pick-folder" class="btn drop-pick">选择文件夹</button>
+      <div class="muted small drop-pick-hint">一次选中整个文件夹（浏览器本地过滤视频与字幕）</div>
+      <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
+      <input type="file" id="folder" hidden webkitdirectory>
+    </div>
+
+    <div id="file-chip" hidden>
+      <span class="chip-icon">&#9636;</span>
+      <span id="chip-name"></span>
+      <span id="chip-size" class="chip-size mono"></span>
+      <button type="button" id="chip-x" class="icon-btn" title="移除文件">&#10005;</button>
+    </div>
+
+    <div id="folder-chip" hidden>
+      <span class="chip-icon">&#9635;</span>
+      <span id="folder-chip-text"></span>
+      <button type="button" id="folder-x" class="icon-btn" title="清除文件夹">&#10005;</button>
+    </div>
+
+    <div id="dispatch-bar">
+      <label class="field">
+        <span class="field-label">选择服务</span>
+        <select id="engine-select"></select>
+      </label>
+      <label class="field">
+        <span class="field-label">音轨提取</span>
+        <select id="extract-select" title="小文件在你自己的浏览器里提取音轨，只上传音频；大文件或本地提取失败时改传整片（由本服务提取）">
+          <option value="auto">自动（推荐，≤1.6GB 本地）</option>
+          <option value="local">仅浏览器本地</option>
+          <option value="server">整片上传本服务</option>
+        </select>
+      </label>
+      <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
+      <label class="chk-row autosave-chk" title="任务完成后，自动把生成的 srt 写回上传影片的原目录（仅对「选择文件 / 选择文件夹」选取的影片有效）">
+        <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
+      </label>
+    </div>
+    <div class="muted small autosave-note">勾选后：用「选择文件 / 选择文件夹」上传的影片，任务完成时自动把 srt 写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务器上的影片旁。</div>
+    <div class="muted small autosave-note">「音轨提取」：浏览器本地 = 在你这台电脑上用网页内嵌的 ffmpeg 提 opus（首次约需下载 30MB 引擎，之后有缓存），2.5 小时影片只传 ~35MB 音频；整片上传 = 视频先传到本服务（不出本服务），在这里提完音轨再发给字幕服务。</div>
+
+    <div id="scan-panel">
+      <div class="scan-head">
+        <span class="scan-title">扫描服务机器上的目录</span>
+        <span class="muted small">路径要填「所选服务」实际运行的那台服务器（后端所在机，如下载落地目录）上的目录，不是当前访问本页面这台电脑的本地路径；要批量处理本机（如 Windows 本地磁盘）的文件夹，用上方「选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整</span>
+      </div>
+      <div class="scan-bar">
+        <label class="field grow">
+          <span class="field-label">目录路径</span>
+          <input id="scan-path" class="mono" placeholder="/media/jav" spellcheck="false" autocomplete="off">
+        </label>
+        <button id="scan-go" class="btn" disabled>扫描</button>
+      </div>
+      <div id="scan-results" hidden>
+        <div id="scan-mapped" class="muted small scan-mapped-note" hidden></div>
+        <div class="scan-summary">
+          <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
+          <span id="scan-count" class="muted small mono"></span>
+        </div>
+        <div id="scan-table" class="table-wrap"></div>
+      </div>
+      <div class="scan-actions">
+        <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 开始生成（0 项）</button>
+      </div>
+    </div>
+
+    <div id="pipeline" hidden>
+      <div class="step" id="step-upload">
+        <div class="step-dot">1</div>
+        <div class="step-body"><div class="step-name">上传视频</div><div class="step-meta" id="meta-upload"></div></div>
+      </div>
+      <div class="step-line" id="line-1"></div>
+      <div class="step" id="step-extract">
+        <div class="step-dot">2</div>
+        <div class="step-body"><div class="step-name">提取音频</div><div class="step-meta" id="meta-extract"></div></div>
+      </div>
+      <div class="step-line" id="line-2"></div>
+      <div class="step" id="step-dispatch">
+        <div class="step-dot">3</div>
+        <div class="step-body"><div class="step-name">提交生成</div><div class="step-meta" id="meta-dispatch"></div></div>
+      </div>
+      <div id="dispatch-progress"><div id="dispatch-fill"></div></div>
+    </div>
+    <div id="dispatch-status" class="dispatch-status" hidden></div>
+  </section>
+
+  <section id="sec-jobs">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Tasks</span><h2>字幕任务</h2></div>
+      <div id="job-stats" class="stats"></div>
+      <div id="job-filter" class="seg" role="group" aria-label="筛选任务">
+        <button type="button" data-f="all" class="on">全部</button>
+        <button type="button" data-f="running">进行中</button>
+        <button type="button" data-f="finished">已完成</button>
+      </div>
+      <span id="last-updated" class="muted small mono"></span>
+    </div>
+    <div class="job-head mono">
+      <span>服务</span><span>文件</span><span>状态</span><span>进度</span><span>位置</span><span>耗时</span><span></span>
+    </div>
+    <div id="job-list" class="table-wrap"></div>
+    <div id="jobs-empty" class="empty">
+      <div class="empty-icon">&#9636;</div>
+      <div id="jobs-empty-text">暂无任务</div>
+      <div class="muted small">把影片拖到上方「生成字幕」，或等服务监听目录自动入列</div>
+    </div>
+    <div id="job-pager" class="pager" hidden></div>
+  </section>
+</main>
+
+<footer>
+  <span class="mono">JAVSCRIBE-WEB</span>
+  <span id="foot-ver" class="muted mono"></span>
+  <span class="muted">看板 5s · 生成 1s</span>
+</footer>
+<div id="modal-backdrop" hidden>
+  <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 id="modal-title"></h2>
+      <button type="button" id="modal-x" class="icon-btn" title="关闭">&#10005;</button>
+    </div>
+    <div id="modal-body" class="modal-body"></div>
+  </div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<script src="/lib/ffmpeg.js"></script>
+<script type="module" src="../web-entry/main.ts"></script>
+</body>
+</html>
