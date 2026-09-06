@@ -115,6 +115,22 @@
       </div>
     </div>
 
+    <div id="watch-panel" hidden>
+      <div class="watch-head">
+        <span class="watch-title"><span id="watch-lamp" class="watch-lamp" aria-hidden="true"></span>监听本机文件夹</span>
+        <span class="muted small">监听这台电脑上的一个文件夹（含子文件夹，递归）：新写入完整的视频若同目录还没有同名字幕，自动提交到所选服务生成，完成后 srt 自动写回影片同目录；上方「音轨提取」模式同样适用于被监听的影片</span>
+      </div>
+      <div class="scan-bar">
+        <label class="field grow">
+          <span class="field-label">监听文件夹</span>
+          <input id="watch-path" class="mono" placeholder="选择本机上的文件夹" spellcheck="false" autocomplete="off">
+        </label>
+        <button id="watch-pick" type="button" class="btn">选择文件夹</button>
+        <button id="watch-toggle" type="button" class="btn btn-primary" disabled>开始监听</button>
+      </div>
+      <div id="watch-status" class="muted small watch-status" hidden></div>
+    </div>
+
     <div id="pipeline" hidden>
       <div class="step" id="step-upload">
         <div class="step-dot">1</div>

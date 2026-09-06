@@ -110,6 +110,8 @@ export async function launchApp(userData: string, extraEnv: Record<string, strin
       JAVSCRIBE_ENGINES: `mock=${MOCK}`,
       // 无框窗口：viewport 与 web 基线（1440x1000）一致
       JAVSCRIBE_CLIENT_FRAMELESS: "1",
+      // watch e2e 提速：最小轮询间隔 300ms（生产默认 5000ms；不启用 watch 的 test 无感）
+      JAVSCRIBE_WATCH_MIN_POLL_MS: "300",
       ...ffmpegEnv(),
       ...extraEnv,
     },
@@ -244,6 +246,7 @@ export async function freezeForShot(page: Page, req: APIRequestContext) {
     }
     document.querySelectorAll<HTMLElement>(".cell-elapsed").forEach((el) => (el.style.visibility = "hidden"));
     document.querySelectorAll(".eta").forEach((el) => (el.textContent = ""));
+    document.querySelectorAll<HTMLElement>("#watch-lastscan").forEach((el) => (el.style.visibility = "hidden"));
   });
 }
 

@@ -4,10 +4,10 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   ExtractResult, FileOpResult, JavDesktop, PickFileResult,
   PickFolderItem, TCallResult, TProgress, UpdateSettings, UpdateState,
-  UploadDispatchResult,
+  UploadDispatchResult, WatchCandidate, WatchSetResult, WatchState,
 } from "../core/desktop-bridge";
 
-const api: Omit<JavDesktop, "update"> = {
+const api: Omit<JavDesktop, "update" | "watch"> = {
   call: (method: string, args?: string[]) =>
     ipcRenderer.invoke("t-call", { method, args }) as Promise<TCallResult>,
 
@@ -79,4 +79,28 @@ const update: JavDesktop["update"] = {
   },
 };
 
-contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload });
+// 文件夹监控（main 进程轮询检测；renderer 排队派发）
+const watch: JavDesktop["watch"] = {
+  state: () => ipcRenderer.invoke("watch-state") as Promise<WatchState>,
+  set: (partial: { enabled?: boolean; path?: string; pollMs?: number }) =>
+    ipcRenderer.invoke("watch-set", partial) as Promise<WatchSetResult>,
+  pickDir: () => ipcRenderer.invoke("watch-pick-dir") as Promise<string | null>,
+  arm: () => ipcRenderer.invoke("watch-arm") as Promise<WatchState>,
+  markProcessed: (p: string) => ipcRenderer.invoke("watch-mark-processed", p) as Promise<void>,
+  onState: (cb: (s: WatchState) => void): (() => void) => {
+    const listener = (_e: unknown, st: WatchState) => cb(st);
+    ipcRenderer.on("watch-state", listener);
+    return () => {
+      ipcRenderer.removeListener("watch-state", listener);
+    };
+  },
+  onCandidate: (cb: (c: WatchCandidate) => void): (() => void) => {
+    const listener = (_e: unknown, c: WatchCandidate) => cb(c);
+    ipcRenderer.on("watch-candidate", listener);
+    return () => {
+      ipcRenderer.removeListener("watch-candidate", listener);
+    };
+  },
+};
+
+contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch });

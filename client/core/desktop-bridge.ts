@@ -59,6 +59,31 @@ export interface UpdateSettings {
   mirror: string;
 }
 
+// ---------- 文件夹监控（仅 desktop 形态；main 进程轮询检测，renderer 排队派发） ----------
+
+export interface WatchState {
+  enabled: boolean;
+  path: string;
+  pollMs: number;
+  /** 轮询循环是否实际在跑（enabled 且路径有效） */
+  on: boolean;
+  processed: number;
+  lastScan: number | null;
+  lastError: string | null;
+}
+
+export interface WatchCandidate {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export interface WatchSetResult {
+  ok: boolean;
+  error?: string;
+  state?: WatchState;
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -75,6 +100,23 @@ export interface JavDesktop {
   ): Promise<ExtractResult>;
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
+
+
+  /** 文件夹监控（仅 desktop 形态；preload 恒提供，web 形态无此字段） */
+  watch: {
+    state(): Promise<WatchState>;
+    set(partial: { enabled?: boolean; path?: string; pollMs?: number }): Promise<WatchSetResult>;
+    /** 原生目录选择对话框；取消返回 null */
+    pickDir(): Promise<string | null>;
+    /** renderer 就绪后调用：flush 启动期间缓冲的候选（幂等） */
+    arm(): Promise<WatchState>;
+    /** 标记某影片已处理（派发成功/失败后调用，跨重启去重） */
+    markProcessed(path: string): Promise<void>;
+    /** 订阅状态推送；返回取消订阅函数 */
+    onState(cb: (s: WatchState) => void): () => void;
+    /** 订阅候选事件（新出现且稳定的视频文件）；返回取消订阅函数 */
+    onCandidate(cb: (c: WatchCandidate) => void): () => void;
+  };
 
   /** 版本更新（仅打包形态生效；dev 形态 state 恒 disabled） */
   update: {

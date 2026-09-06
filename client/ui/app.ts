@@ -5,7 +5,7 @@
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
-import type { UpdateSettings, UpdateState } from "../core/desktop-bridge";
+import type { UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { $, esc } from "./dom";
@@ -32,6 +32,7 @@ interface AppState {
   extractMode: "auto" | "local" | "server";
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
+  watchWriteBack: Set<string>;          // watch 派发任务完成后强制写回（不受 autoSave 门控；仅 desktop 会写入）
   _fsFileDir: FileSystemDirectoryHandle | null; // 当前单文件所选目录句柄（File System Access API，用于写回源目录）
 }
 
@@ -58,6 +59,7 @@ const state: AppState = {
     : "auto",
   autoSave: localStorage.getItem("javweb_autosave") === "1",
   writeBackJobs: new Map(),
+  watchWriteBack: new Set(),
   _fsFileDir: null,
 };
 
@@ -138,11 +140,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // ---------- 完成后写回源目录（auto-save）：任务 running→done 时触发 ----------
   function maybeWriteBack(r: JobRow) {
-    if (!state.autoSave || !r.job_id) return;
+    if (!r.job_id) return;
     const key = r.engine + "|" + r.job_id;
     const info = state.writeBackJobs.get(key);
     if (!info) return;
+    // autoSave 门控：watch 派发的任务在 watchWriteBack 里登记，完成后必须写回（语义上就是「落回影片旁」）
+    if (!state.autoSave && !state.watchWriteBack.has(key)) return;
     state.writeBackJobs.delete(key);
+    state.watchWriteBack.delete(key);
     if (platform.canWriteBack(info)) doWriteBack(r, info);
     else autoDownloadSrt(r, info.videoName);
   }
@@ -193,6 +198,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       notifyJobChanges(jobs);
       updateTitle(jobs);
     } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
+    watchPump(); // watch 队列安全网：漏触发的消费在 5s 内自愈
     if (platform.kind === "web") void refreshUpdateWeb();
   }
 
@@ -214,6 +220,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function upBridge(): UpBridge | null {
     return (window as unknown as { javDesktop?: { update?: UpBridge } }).javDesktop?.update ?? null;
   }
+
+  // watch 消费泵钩子：web 形态恒空操作（#watch-panel 恒隐藏、不接线——web 100% 不变硬约束）
+  let watchPump: () => void = () => {};
 
   // ---- web 形态：GET /api/update（独立链路，失败静默，绝不拖累主刷新） ----
   let updateWeb: UpdateInfo | null = null;
@@ -717,7 +726,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       !scanPath.value.trim() || !engineSelect.value || state.busy;
   }
 
-  engineSelect.onchange = updateGo;
+  engineSelect.onchange = () => { updateGo(); watchPump(); };
   scanPath.oninput = updateScanGo;
 
   function setStep(id: string, cls: string, dot: string | null, meta: string | null) {
@@ -961,6 +970,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     folderInput.value = "";
     $("folder-chip").hidden = true;
     updateGo();
+    watchPump();
   }
 
   // ---------- 音轨提取模式：auto（≤1.6GB 本地）/ local（仅本地）/ server（整片上传） ----------
@@ -1104,6 +1114,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       drop.classList.remove("has-file");
     }
     updateGo();
+    watchPump();
   }
 
   function pollUpload(id: string, _engine: string, labelPrefix: string, onDone: (r: [boolean, UploadStatus]) => void) {
@@ -1423,6 +1434,158 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
   tick();
   setInterval(tick, 1000);
+
+  // ---------- 文件夹监控（仅 desktop 形态：main 进程轮询检测，这里排队 + 串行派发） ----------
+  // web 形态：#watch-panel 保持 hidden、不接线（web 100% 不变硬约束）
+  if (platform.kind === "desktop") {
+    interface WatchBridge {
+      state(): Promise<WatchState>;
+      set(q: { enabled?: boolean; path?: string; pollMs?: number }): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
+      pickDir(): Promise<string | null>;
+      arm(): Promise<WatchState>;
+      markProcessed(pp: string): Promise<void>;
+      onState(cb: (st: WatchState) => void): () => void;
+      onCandidate(cb: (c: WatchCandidate) => void): () => void;
+    }
+    const watchPanel = $("watch-panel");
+    const wBridge = (): WatchBridge | null =>
+      (window as unknown as { javDesktop?: { watch?: WatchBridge } }).javDesktop?.watch ?? null;
+    if (watchPanel) {
+      const b = wBridge();
+      if (b) {
+        watchPanel.hidden = false;
+        const watchPath = $("watch-path") as HTMLInputElement;
+        const watchPick = $("watch-pick");
+        const watchToggle = $("watch-toggle") as HTMLButtonElement;
+        const watchStatus = $("watch-status");
+        const watchLamp = $("watch-lamp");
+        let wState: WatchState | null = null;
+        let lastStatusHtml = "";
+        const watchQueue: WatchCandidate[] = [];
+        let watchDispatchingPath: string | null = null;
+
+        function watchRender() {
+          const st = wState;
+          watchLamp.classList.toggle("on", !!st?.on);
+          watchLamp.classList.toggle("err", !!st?.lastError);
+          if (!st) return;
+          watchToggle.textContent = st.enabled ? "停止监听" : "开始监听";
+          watchToggle.disabled = !st.path;
+          if (watchPath.value !== st.path) watchPath.value = st.path;
+          const parts: string[] = [];
+          if (st.on) {
+            parts.push(`监听中 · 每 ${Math.round(st.pollMs / 1000)}s`);
+            if (st.processed) parts.push(`已处理 ${st.processed}`);
+            if (st.lastScan) {
+              parts.push(`上次扫描 <span id="watch-lastscan">${new Date(st.lastScan).toLocaleTimeString("zh-CN", { hour12: false })}</span>`);
+            }
+          } else {
+            parts.push(st.path ? "未监听" : "未监听 · 请先选择文件夹");
+          }
+          if (st.lastError) parts.push(`监听出错：${esc(st.lastError)}`);
+          if (watchQueue.length) {
+            parts.push(`等待 ${watchQueue.length}`);
+            if (!engineSelect.value) parts.push("未选择服务");
+          }
+          if (watchDispatchingPath) {
+            parts.push(`<b>生成中：${esc(watchDispatchingPath.split("/").pop() || watchDispatchingPath)}</b>`);
+          }
+          const html = parts.join(" · ");
+          if (html !== lastStatusHtml) {
+            lastStatusHtml = html;
+            watchStatus.innerHTML = html;
+          }
+          watchStatus.hidden = false;
+          watchStatus.className = "muted small watch-status" + (st.lastError ? " err" : "");
+        }
+
+        const watchPumpImpl = (): void => {
+          if (state.busy || watchDispatchingPath) return;
+          const it = watchQueue[0];
+          if (!it) { watchRender(); return; }
+          const engine = engineSelect.value;
+          if (!engine) { watchRender(); return; } // 未选服务：留队列等（onchange / 5s 轮询会再触发）
+          watchQueue.shift();
+          watchDispatchingPath = it.path;
+          state.busy = true;
+          updateGo();
+          watchRender();
+          // 带 _localPath 的 File shim：main 进程本机 ffmpeg 提取 + 流式上传（与「选择文件夹」同通路）
+          const f = new File([new Blob()], it.name) as FolderFile;
+          Object.defineProperty(f, "size", { value: it.size, configurable: true });
+          f._localPath = it.path;
+          preparePipeline("监听");
+          dispatchOne(f, engine, "监听 · ").then(([ok, d]) => {
+            watchDispatchingPath = null;
+            state.busy = false;
+            updateGo();
+            const up = d as UploadStatus;
+            if (ok && up.job_id) {
+              const k = engine + "|" + up.job_id;
+              state.writeBackJobs.set(k, { engine, videoName: it.name, dirHandle: null, videoPath: it.path });
+              state.watchWriteBack.add(k); // 完成后强制写回影片同目录（不受 autoSave 门控）
+              void b.markProcessed(it.path).catch(() => {});
+              toast(`监听 · ${it.name} 已提交 → 任务 ${up.job_id}`, "ok");
+            } else {
+              void b.markProcessed(it.path).catch(() => {}); // 失败也标记，防无限重试
+              toast(`监听 · ${it.name}：${(d as { error?: string }).error || "提交失败"}`, "err");
+            }
+            refresh();
+            watchPumpImpl();
+          }).catch(() => {
+            watchDispatchingPath = null;
+            state.busy = false;
+            updateGo();
+            watchRender();
+            watchPumpImpl();
+          });
+        }
+        watchPump = watchPumpImpl;
+
+        watchPath.oninput = () => {
+          watchToggle.disabled = !watchPath.value.trim();
+        };
+        watchPick.onclick = async () => {
+          const p = await b.pickDir();
+          if (p) {
+            watchPath.value = p;
+            watchToggle.disabled = false;
+            watchRender();
+          }
+        };
+        watchToggle.onclick = async () => {
+          if (state.busy) return;
+          const wantOn = !wState?.enabled;
+          const r = await b.set(wantOn
+            ? { enabled: true, path: watchPath.value.trim() }
+            : { enabled: false });
+          if (!r.ok) {
+            toast(r.error || "监听设置失败", "err");
+            watchRender();
+            return;
+          }
+          if (r.state) {
+            wState = r.state;
+            watchRender();
+            watchPumpImpl();
+          }
+        };
+        b.onState((st) => {
+          wState = st;
+          watchRender();
+          watchPumpImpl(); // 路径/可用性变化可能解锁消费
+        });
+        b.onCandidate((c) => {
+          if (c.path === watchDispatchingPath) return;
+          if (!watchQueue.some((q) => q.path === c.path)) watchQueue.push(c);
+          watchRender();
+          watchPumpImpl();
+        });
+        void b.state().then((st) => { wState = st; watchRender(); }).catch(() => {});
+        void b.arm().then((st) => { wState = st; watchRender(); watchPumpImpl(); }).catch(() => {});
+      }
+    }
+  }
 
   // desktop 形态：接 main 进程更新状态机（dev 形态 state 恒 disabled → chip 恒隐藏）
   if (platform.kind === "desktop") {

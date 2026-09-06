@@ -114,6 +114,16 @@ test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）",
   expect(await tags.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["cuda", "v0.1.0", "运行 0"]);
 });
 
+test("监听面板结构（桌面形态：灯 + 文案 + 输入 + 选择/启停 + 状态行）", async ({ page }) => {
+  await expect(page.locator("#watch-panel")).toBeVisible();
+  await expect(page.locator("#watch-panel .watch-title")).toContainText("监听本机文件夹");
+  await expect(page.locator("#watch-lamp")).toBeVisible();
+  await expect(page.locator("#watch-path")).toHaveAttribute("placeholder", "选择本机上的文件夹");
+  await expect(page.locator("#watch-pick")).toHaveText("选择文件夹");
+  await expect(page.locator("#watch-toggle")).toHaveText("开始监听");
+  await expect(page.locator("#watch-toggle")).toBeDisabled(); // 初始无路径
+});
+
 test("engines-empty 文案为桌面环境变量名", async ({ page }) => {
   // env 预置 mock 时该空态隐藏，但 DOM 仍在：断言文案已是 JAVSCRIBE_ENGINES
   await expect(page.locator("#engines-empty")).toContainText("JAVSCRIBE_ENGINES");

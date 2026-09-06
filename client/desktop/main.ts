@@ -21,7 +21,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
-import { OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
+import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 
 // ---------------------------------------------------------------------------
@@ -580,6 +580,51 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
 }
 
 // ---------------------------------------------------------------------------
+// 本地磁盘递归枚举（「选择文件夹」与「文件夹监控」共用）
+//   VIDEO_EXTS 过滤、size>0、上限 5000、名称排序、rel 含根目录名（与 web webkitRelativePath 同构）；
+//   dirNames 顺带收集每个目录的小写文件名集合（「同 stem 已有字幕」判定用，与 setFolder 规则一致）
+// ---------------------------------------------------------------------------
+
+interface WalkedVideo { path: string; name: string; size: number; rel: string; }
+
+function walkVideos(root: string, dirNames?: Map<string, Set<string>>): WalkedVideo[] {
+  const videos: WalkedVideo[] = [];
+  walkTree(root, path.basename(root), videos, dirNames ?? new Map<string, Set<string>>());
+  return videos;
+}
+
+function walkTree(dir: string, rel: string, videos: WalkedVideo[], dirNames: Map<string, Set<string>>): void {
+  if (videos.length >= 5000) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // 不可读目录：跳过
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  const names = new Set<string>();
+  dirNames.set(dir, names);
+  for (const e of entries) {
+    if (videos.length >= 5000) return;
+    names.add(e.name.toLowerCase());
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      walkTree(full, rel + "/" + e.name, videos, dirNames);
+    } else if (e.isFile()) {
+      const m = /\.([a-z0-9]{1,8})$/i.exec(e.name);
+      if (!m || !VIDEO_EXTS.includes(m[1].toLowerCase())) continue;
+      try {
+        const size = fs.statSync(full).size;
+        if (size <= 0) continue;
+        videos.push({ path: full, name: e.name, size, rel: rel + "/" + e.name });
+      } catch {
+        /* 权限怪癖 / 扫描中途消失：跳过 */
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
 
@@ -877,37 +922,54 @@ function registerIpc(): void {
       properties: ["openDirectory"],
     });
     if (r.canceled || !r.filePaths.length) return null;
-    const root = r.filePaths[0];
-    const out: Array<{ path: string; name: string; size: number; rel: string }> = [];
-    const walk = (dir: string, rel: string) => {
-      if (out.length >= 5000) return;
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return; // 子目录不可读：跳过
+    return walkVideos(r.filePaths[0]);
+  });
+
+  // ---------- 文件夹监控（仅 desktop；renderer 就绪后 watch-arm flush 启动期候选） ----------
+  ipcMain.handle("watch-state", () => watchPublicState());
+  ipcMain.handle("watch-arm", () => {
+    watchArmed = true;
+    for (const c of watchCandidateBuf.splice(0)) sendToWin("watch-candidate", c);
+    return watchPublicState();
+  });
+  ipcMain.handle("watch-pick-dir", async () => {
+    const r = await dialog.showOpenDialog(win as BrowserWindow, {
+      title: "选择监听文件夹",
+      properties: ["openDirectory"],
+    });
+    if (r.canceled || !r.filePaths.length) return null;
+    return r.filePaths[0];
+  });
+  ipcMain.handle("watch-set", (_ev, p: { enabled?: unknown; path?: unknown; pollMs?: unknown }) => {
+    const cur = { ...watchSettings };
+    if (p && typeof p.path === "string") {
+      const d = p.path.trim();
+      if (d && !fs.existsSync(d)) return { ok: false, error: "目录不存在或不可访问" };
+      if (d && !fs.statSync(d).isDirectory()) return { ok: false, error: "路径不是文件夹" };
+      cur.path = d;
+    }
+    if (p && typeof p.pollMs === "number" && isFinite(p.pollMs)) {
+      cur.pollMs = Math.max(WATCH_MIN_POLL_MS, Math.min(WATCH_MAX_POLL_MS, Math.round(p.pollMs)));
+    }
+    if (p && typeof p.enabled === "boolean") {
+      if (p.enabled && !cur.path) return { ok: false, error: "请先选择要监听的文件夹" };
+      cur.enabled = p.enabled;
+    }
+    watchApplySettings(cur);
+    return { ok: true, state: watchPublicState() };
+  });
+  ipcMain.handle("watch-mark-processed", (_ev, p: unknown) => {
+    if (typeof p === "string" && p) {
+      const i = watchSettings.processed.indexOf(p);
+      if (i >= 0) watchSettings.processed.splice(i, 1);
+      watchSettings.processed.push(p);
+      if (watchSettings.processed.length > WATCH_PROCESSED_CAP) {
+        watchSettings.processed.splice(0, watchSettings.processed.length - WATCH_PROCESSED_CAP);
       }
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      for (const e of entries) {
-        if (out.length >= 5000) return;
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) {
-          walk(full, rel + "/" + e.name);
-        } else if (e.isFile()) {
-          const m = /\.([a-z0-9]{1,8})$/i.exec(e.name);
-          if (!m || !VIDEO_EXTS.includes(m[1].toLowerCase())) continue;
-          try {
-            const size = fs.statSync(full).size;
-            if (size <= 0) continue;
-            out.push({ path: full, name: e.name, size, rel: rel + "/" + e.name });
-          } catch {
-            /* 权限怪癖 / 扫描中途消失：跳过 */
-          }
-        }
-      }
-    };
-    walk(root, path.basename(root));
-    return out;
+      watchSave();
+      watchPushState();
+    }
+    return { ok: true };
   });
 }
 
@@ -1142,6 +1204,168 @@ function registerUpdateIpc(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 文件夹监控（仅 desktop 形态）：main 进程轮询检测，候选推 renderer 排队派发
+//   - 轮询而非 fs.watch：watch 事件在跨网络盘 / Windows 过滤驱动下不可靠；
+//     秒级 stat 遍历对数千文件量级的库足够轻（与引擎侧稳定性取向一致）
+//   - 候选条件：视频扩展名 + size>0 + 同目录无同 stem 字幕（LOCAL_SUB_PATTERNS，
+//     与「选择文件夹」跳过规则一致）+ (size, mtime) 连续两次轮询不变（防半下载文件）
+//     + 不在 processed（跨重启去重，派发成功/失败后由 renderer 标记）
+//   - 持久化：watch.json（userData；与 update 的 settings.json 分离，避免双模块互写互删）
+//   - renderer 就绪前产生的候选进缓冲，watch-arm 时一次性 flush
+// ---------------------------------------------------------------------------
+
+interface WatchSettings { enabled: boolean; path: string; pollMs: number; processed: string[]; }
+interface WatchCandidate { path: string; name: string; size: number; }
+
+const WATCH_FILE = "watch.json";
+const WATCH_DEFAULT_POLL_MS = 15_000;
+/** 最小轮询间隔（e2e 提速钩子：JAVSCRIBE_WATCH_MIN_POLL_MS；UI 不暴露间隔输入） */
+const WATCH_MIN_POLL_MS = Number(process.env.JAVSCRIBE_WATCH_MIN_POLL_MS || 5_000);
+const WATCH_MAX_POLL_MS = 300_000;
+const WATCH_PROCESSED_CAP = 5_000;
+const WATCH_CANDIDATE_BUF_CAP = 5_000;
+
+let watchSettings: WatchSettings = { enabled: false, path: "", pollMs: WATCH_DEFAULT_POLL_MS, processed: [] };
+let watchStorePath = "";
+let watchTimer: NodeJS.Timeout | null = null;
+let watchArmed = false;
+let watchLastScan: number | null = null;
+let watchLastError: string | null = null;
+// path -> 上一轮 (size, mtime)：本轮不变 = 稳定，下轮发候选（两次轮询确认）
+const watchSeen = new Map<string, { size: number; mtimeMs: number }>();
+const watchCandidateBuf: WatchCandidate[] = [];
+
+function watchLoad(): void {
+  try {
+    const raw = JSON.parse(fs.readFileSync(watchStorePath, "utf-8")) as Partial<WatchSettings>;
+    watchSettings = {
+      enabled: raw.enabled === true,
+      path: typeof raw.path === "string" ? raw.path : "",
+      pollMs: typeof raw.pollMs === "number" && isFinite(raw.pollMs)
+        ? Math.max(WATCH_MIN_POLL_MS, Math.min(WATCH_MAX_POLL_MS, raw.pollMs))
+        : WATCH_DEFAULT_POLL_MS,
+      processed: Array.isArray(raw.processed)
+        ? raw.processed.filter((x): x is string => typeof x === "string")
+        : [],
+    };
+  } catch {
+    /* 无配置 / 损坏：默认值起步 */
+  }
+}
+
+function watchSave(): void {
+  try {
+    fs.mkdirSync(path.dirname(watchStorePath), { recursive: true });
+    fs.writeFileSync(watchStorePath, JSON.stringify(watchSettings, null, 1));
+  } catch (e) {
+    console.error("[watch] 设置写入失败:", (e as Error).message);
+  }
+}
+
+function watchPublicState() {
+  return {
+    enabled: watchSettings.enabled,
+    path: watchSettings.path,
+    pollMs: watchSettings.pollMs,
+    on: !!watchTimer,
+    processed: watchSettings.processed.length,
+    lastScan: watchLastScan,
+    lastError: watchLastError,
+  };
+}
+
+function watchPushState(): void {
+  sendToWin("watch-state", watchPublicState());
+}
+
+function watchEmit(c: WatchCandidate): void {
+  if (watchArmed && win && !win.isDestroyed()) {
+    sendToWin("watch-candidate", c);
+  } else {
+    watchCandidateBuf.push(c);
+    if (watchCandidateBuf.length > WATCH_CANDIDATE_BUF_CAP) watchCandidateBuf.shift();
+  }
+}
+
+/** 同 stem 已有字幕（同目录、大小写不敏感；与 LOCAL_SUB_PATTERNS 一致） */
+function watchHasSub(dir: string, name: string, dirNames: Map<string, Set<string>>): boolean {
+  const names = dirNames.get(dir);
+  if (!names) return false;
+  const stem = name.replace(/\.[^.]+$/, "").toLowerCase();
+  return LOCAL_SUB_PATTERNS.some((pt) => names.has(stem + pt));
+}
+
+function watchTick(): void {
+  const root = watchSettings.path;
+  if (!root || !fs.existsSync(root)) {
+    watchLastError = "监听目录不存在或不可访问";
+    watchPushState();
+    return;
+  }
+  try {
+    const dirNames = new Map<string, Set<string>>();
+    const videos = walkVideos(root, dirNames);
+    const processed = new Set(watchSettings.processed);
+    const nowSeen = new Map<string, { size: number; mtimeMs: number }>();
+    for (const v of videos) {
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(v.path);
+      } catch {
+        continue; // 轮询中途消失（用户删除/移动）：跳过
+      }
+      nowSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
+      if (processed.has(v.path)) continue;
+      if (watchHasSub(path.dirname(v.path), v.name, dirNames)) continue;
+      const prev = watchSeen.get(v.path);
+      if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs) {
+        watchSeen.delete(v.path); // 连续两次不变 → 稳定，发候选
+        watchEmit({ path: v.path, name: v.name, size: st.size });
+      } else {
+        watchSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
+      }
+    }
+    for (const k of [...watchSeen.keys()]) if (!nowSeen.has(k)) watchSeen.delete(k);
+    watchLastError = null;
+    watchLastScan = Date.now();
+  } catch (e) {
+    watchLastError = (e as Error).message || String(e);
+  }
+  watchPushState();
+}
+
+function watchStartTimer(): void {
+  if (watchTimer) return;
+  watchTimer = setInterval(watchTick, watchSettings.pollMs);
+  watchTimer.unref?.();
+  watchTick(); // 立即首轮：建立稳定性基线 / 发现存量文件
+}
+
+function watchStopTimer(): void {
+  if (watchTimer) {
+    clearInterval(watchTimer);
+    watchTimer = null;
+  }
+}
+
+function watchApplySettings(next: WatchSettings): void {
+  const pathChanged = next.path !== watchSettings.path;
+  watchSettings = next;
+  watchSave();
+  if (next.enabled && next.path) {
+    if (pathChanged) {
+      watchSeen.clear();
+      watchCandidateBuf.length = 0;
+    }
+    watchStartTimer();
+  } else {
+    watchStopTimer();
+    watchLastError = null;
+  }
+  watchPushState();
+}
+
+// ---------------------------------------------------------------------------
 // 应用生命周期
 // ---------------------------------------------------------------------------
 
@@ -1176,6 +1400,11 @@ app.whenReady().then(() => {
   registerIpc();
   registerUpdateIpc();
   initUpdater();
+  watchStorePath = path.join(app.getPath("userData"), WATCH_FILE);
+  watchLoad();
+  if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
+    watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

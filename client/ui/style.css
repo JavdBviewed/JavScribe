@@ -797,7 +797,7 @@ footer {
   white-space: nowrap;
 }
 
-#scan-panel {
+#scan-panel, #watch-panel {
   margin-top: 18px;
   padding: 14px 16px 16px;
   background: var(--surface);
@@ -805,14 +805,31 @@ footer {
   border-radius: 12px;
   box-shadow: var(--shadow);
 }
-.scan-head { display: flex; flex-direction: column; gap: 4px; }
-.scan-title {
+.scan-head, .watch-head { display: flex; flex-direction: column; gap: 4px; }
+.scan-title, .watch-title {
   font-size: 11px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--muted);
   font-weight: 600;
 }
+.watch-lamp {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line-strong, var(--muted));
+  margin-right: 7px;
+  vertical-align: baseline;
+}
+.watch-lamp.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft), 0 0 8px var(--ok);
+  animation: lamp 1.4s ease-in-out infinite;
+}
+.watch-lamp.err { background: var(--err); animation: none; }
+.watch-status { margin-top: 10px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.watch-status.err { color: var(--err); }
 .scan-bar {
   display: flex;
   align-items: flex-end;

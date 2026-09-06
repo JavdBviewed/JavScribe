@@ -10,6 +10,10 @@ test.beforeEach(async ({ page, request }) => {
   await waitForEngineOnline(page);
 });
 
+test("监听面板在 web 形态恒隐藏（web 100% 不变契约）", async ({ page }) => {
+  await expect(page.locator("#watch-panel")).toBeHidden();
+});
+
 test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("header h1")).toHaveText("字幕工作台");
   await expect(page.locator(".brand-sub")).toHaveText("JAVSCRIBE · SUBTITLE CONSOLE");

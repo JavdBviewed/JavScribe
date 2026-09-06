@@ -172,7 +172,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
       if (sub === "version") {
         return readBody().then((b) => {
           const v = b && JSON.parse(b).version;
