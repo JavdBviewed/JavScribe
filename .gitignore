@@ -43,6 +43,8 @@ logs/
 !scripts/**/*.ts
 !vite.config.ts
 !playwright.config.ts
+!vite.desktop.config.ts
+!playwright.desktop.config.ts
 *.m2ts
 *.mov
 *.avi
@@ -58,7 +60,12 @@ logs/
 # ---------- Node / 前端工具 ----------
 node_modules/
 test-results/
+test-results-desktop/
 playwright-report/
+playwright-report-desktop/
+
+# ---------- 桌面端构建产物（pnpm build:desktop 生成） ----------
+client/dist-desktop/
 
 # ---------- IDE / 系统 ----------
 .idea/

@@ -11,12 +11,23 @@
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "test:e2e:desktop": "xvfb-run -a playwright test --config playwright.desktop.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.4.1",
+    "electron": "^44.2.0",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.63.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
   }
 }

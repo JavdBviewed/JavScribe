@@ -5,15 +5,12 @@
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UploadStatus } from "../core/types";
+import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
+import { $, esc } from "./dom";
+import { toast } from "./toast";
 
-const $ = (id: string): HTMLElement => document.getElementById(id)!;
 const DEFAULT_TITLE = "JavScribe 字幕工作台";
-
-/** 「选择文件夹」里的视频项（含所在目录句柄，用于完成后写回源目录） */
-type FolderFile = File & { _dirHandle?: FileSystemDirectoryHandle | null };
-interface FolderVideo { file: FolderFile; hasSub: boolean; }
-interface WriteBackInfo { engine: string; videoName: string; dirHandle: FileSystemDirectoryHandle | null; }
 
 interface AppState {
   file: File | null;
@@ -74,20 +71,6 @@ const STATUS_ZH: Record<string, string> = {
   skipped: "跳过", canceled: "已取消", pending: "排队",
 };
 
-// File System Access API 仅在安全上下文（https/localhost）暴露；用于「完成后写回源目录」
-const fsWin = window as Window & {
-  showOpenFilePicker?: (opts?: { multiple?: boolean; types?: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<FileSystemFileHandle[]>;
-  showDirectoryPicker?: (opts?: { mode?: "read" | "readwrite" }) => Promise<FileSystemDirectoryHandle>;
-};
-const HAS_FS_PICKER = typeof fsWin.showOpenFilePicker === "function"
-  && typeof fsWin.showDirectoryPicker === "function";
-
-function esc(s: unknown): string {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c
-  ));
-}
-
 function fmtDuration(s: number | null | undefined): string {
   if (s == null || !isFinite(s) || s < 0) return "";
   const v = Math.round(s);
@@ -98,20 +81,11 @@ function fmtDuration(s: number | null | undefined): string {
 
 function mb(b: number): number { return Math.round(b / 1048576); }
 
-function toast(msg: string, kind: "ok" | "err" | "" = "") {
-  const box = document.createElement("div");
-  box.className = "toast" + (kind ? " " + kind : "");
-  const icon = kind === "ok" ? "&#10003;" : kind === "err" ? "&#10007;" : "&#9679;";
-  box.innerHTML = `<span class="t-icon">${icon}</span><span>${esc(msg)}</span>`;
-  $("toasts").appendChild(box);
-  setTimeout(() => box.remove(), 8000);
-}
-
 function jav(): JavExtractAPI | undefined {
   return (window as { JavExtract?: JavExtractAPI }).JavExtract;
 }
 
-export function initApp(t: Transport): void {
+export function initApp(t: Transport, platform: PlatformAdapter): void {
   // ---------- 静态表单元素句柄（HTML 固定节点，轮询不重建，取一次即可） ----------
   const engineSelect = $("engine-select") as HTMLSelectElement;
   const engineName = $("engine-name") as HTMLInputElement;
@@ -140,7 +114,8 @@ export function initApp(t: Transport): void {
 
   function updateTitle(rows: JobRow[]) {
     const n = rows.filter((r) => r.status === "running").length;
-    document.title = n ? `(${n}) ${DEFAULT_TITLE}` : DEFAULT_TITLE;
+    const base = platform.kind === "desktop" ? "JavScribe Client" : DEFAULT_TITLE;
+    document.title = n ? `(${n}) ${base}` : base;
   }
 
   function notifyJobChanges(rows: JobRow[]) {
@@ -167,40 +142,33 @@ export function initApp(t: Transport): void {
     const info = state.writeBackJobs.get(key);
     if (!info) return;
     state.writeBackJobs.delete(key);
-    if (info.dirHandle) doWriteBack(r, info.dirHandle, info.videoName);
+    if (platform.canWriteBack(info)) doWriteBack(r, info);
     else autoDownloadSrt(r, info.videoName);
   }
 
-  async function doWriteBack(r: JobRow, dirHandle: FileSystemDirectoryHandle, videoName: string) {
-    const srtName = videoName.replace(/\.[^.]+$/, "") + SRT_SUFFIX;
+  async function doWriteBack(r: JobRow, info: WriteBackInfo) {
+    const srtName = info.videoName.replace(/\.[^.]+$/, "") + SRT_SUFFIX;
     try {
       let data: ArrayBuffer | null = null;
       for (let i = 0; i < 5 && !data; i++) {
         data = await t.getResultData(r.engine, r.job_id!);
         if (!data) await new Promise((res) => setTimeout(res, 2000));
       }
-      if (!data) { toast(`「${videoName}」字幕暂不可下载，请用手动下载`, "err"); return; }
-      const fh = await dirHandle.getFileHandle(srtName, { create: true });
-      const w = await fh.createWritable();
-      await w.write(data);
-      await w.close();
-      toast(`「${videoName}」字幕已写回源目录（${srtName}）`, "ok");
+      if (!data) { toast(`「${info.videoName}」字幕暂不可下载，请用手动下载`, "err"); return; }
+      const ok = await platform.writeSrt(info, srtName, data);
+      if (!ok) throw new Error("写回失败");
+      toast(`「${info.videoName}」字幕已写回源目录（${srtName}）`, "ok");
     } catch (e) {
       const err = e as { name?: string; message?: string };
-      toast(`「${videoName}」写回失败（${err.name || err.message}），改为自动下载`, "err");
-      autoDownloadSrt(r, videoName);
+      toast(`「${info.videoName}」写回失败（${err.name || err.message}），改为自动下载`, "err");
+      autoDownloadSrt(r, info.videoName);
     }
   }
 
   function autoDownloadSrt(r: JobRow, videoName: string) {
     const srtName = videoName.replace(/\.[^.]+$/, "") + SRT_SUFFIX;
     try {
-      const a = document.createElement("a");
-      a.href = t.getResultUrl(r.engine, r.job_id!);
-      a.download = srtName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      platform.downloadSrt(t.getResultUrl(r.engine, r.job_id!), srtName);
       toast(`已自动下载 ${srtName}（此方式无法直接写回源目录，请放到影片同目录）`, "");
     } catch (_e) {
       toast(`自动下载 ${srtName} 失败，请用手动下载`, "err");
@@ -570,24 +538,12 @@ export function initApp(t: Transport): void {
   }
 
   async function pickFile() {
-    if (HAS_FS_PICKER) {
-      try {
-        const [h] = await fsWin.showOpenFilePicker!({
-          multiple: false,
-          types: [{ description: "视频文件", accept: { "video/*": VIDEO_EXTS.map((e) => "." + e) } }],
-        });
-        const f = await h.getFile();
-        setFile(f);
-        state._fsFileDir = await (h as FileSystemFileHandle & {
-          getParent(): Promise<FileSystemDirectoryHandle>;
-        }).getParent();
-      } catch (e) {
-        const err = e as { name?: string; message?: string };
-        if (err.name !== "AbortError") toast("选择文件失败：" + err.message, "err");
-      }
-      return;
+    const p = await platform.pickVideoFile();
+    if (p === "fallback") { fileInput.click(); return; }
+    if (p) {
+      setFile(p.file);
+      state._fsFileDir = p.dirHandle;
     }
-    fileInput.click();
   }
 
   drop.onclick = () => { if (!state.busy) pickFile(); };
@@ -672,44 +628,12 @@ export function initApp(t: Transport): void {
     updateGo();
   }
 
-  async function pickFolderFs() {
-    let root: FileSystemDirectoryHandle;
-    try {
-      root = await fsWin.showDirectoryPicker!({ mode: "readwrite" });
-    } catch (e) {
-      const err = e as { name?: string; message?: string };
-      if (err.name !== "AbortError") toast("选择文件夹失败：" + err.message, "err");
-      return;
-    }
-    const files: FolderFile[] = [];
-    try {
-      await walkDirForFiles(root, root.name, files);
-    } catch (e) {
-      toast("读取文件夹失败：" + (e as Error).message, "err");
-      return;
-    }
-    setFolder(files);
-  }
-
-  async function walkDirForFiles(dir: FileSystemDirectoryHandle, prefix: string, out: FolderFile[]) {
-    for await (const entry of dir.values()) {
-      const rel = prefix ? prefix + "/" + entry.name : entry.name;
-      if (entry.kind === "file") {
-        const f = (await entry.getFile()) as FolderFile;
-        Object.defineProperty(f, "webkitRelativePath", { value: rel });
-        f._dirHandle = dir; // 记录所在目录句柄，任务完成后把 srt 写回这里
-        out.push(f);
-      } else if (entry.kind === "directory") {
-        await walkDirForFiles(entry, rel, out);
-      }
-    }
-  }
-
   pickFolder.onclick = async (ev) => {
     ev.stopPropagation();
     if (state.busy) return;
-    if (HAS_FS_PICKER) { await pickFolderFs(); return; }
-    folderInput.click();
+    const r = await platform.pickVideoFolder();
+    if (r === "fallback") { folderInput.click(); return; }
+    if (r) setFolder(r);
   };
   folderInput.onchange = (ev) => {
     const files = (ev.target as HTMLInputElement).files;
@@ -749,6 +673,7 @@ export function initApp(t: Transport): void {
         const up = d as UploadStatus;
         state.writeBackJobs.set(engine + "|" + up.job_id, {
           engine, videoName: file.name, dirHandle: state._fsFileDir || null,
+          videoPath: (file as FolderFile)._localPath || null,
         });
         showStatus(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}，见上方任务表`, "ok");
         toast(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
@@ -780,6 +705,7 @@ export function initApp(t: Transport): void {
         if (up.job_id) {
           state.writeBackJobs.set(engine + "|" + up.job_id, {
             engine, videoName: queue[i].name, dirHandle: queue[i]._dirHandle || null,
+            videoPath: queue[i]._localPath || null,
           });
         }
       }
@@ -821,12 +747,14 @@ export function initApp(t: Transport): void {
   function extractLocal(f: File, prefix: string): Promise<Blob | { skipped: true }> {
     return new Promise<Blob | { skipped: true }>((resolve, reject) => {
       let t0: number | null = null;
-      setStep("step-upload", "active", "1", prefix + "加载提取引擎（首次 ~30MB，有缓存）…");
+      setStep("step-upload", "active", "1", prefix + (platform.kind === "desktop"
+        ? "本地提取音轨…"
+        : "加载提取引擎（首次 ~30MB，有缓存）…"));
       setFill("0", true);
       jav()!.extractAudio(f, (p) => {
         const now = Date.now() / 1000;
         if (t0 == null) t0 = now;
-        let meta = prefix + "浏览器本地提取 · " + Math.round(p * 100) + "%";
+        let meta = prefix + (platform.kind === "desktop" ? "本机提取 · " : "浏览器本地提取 · ") + Math.round(p * 100) + "%";
         const el = now - t0;
         if (el > 5 && p > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - p) / p)}`;
         setStep("step-upload", "active", "1", meta);
@@ -1029,7 +957,7 @@ export function initApp(t: Transport): void {
         try {
           await t.putEngineKey(name, ($("key-input") as HTMLInputElement).value.trim());
           toast("API Key 已保存", "ok");
-          refresh();
+          await refresh(); // 等 has_key 落地，否则下面又按 keyless 渲染
           openSettings(name);
         } catch (e2) {
           toast((e2 as Error).message, "err");

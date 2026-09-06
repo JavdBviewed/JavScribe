@@ -52,6 +52,7 @@ const state = {
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
   apiKeyMode: "ok",     // ok | no-key
   paused: false,
+  uploadDelayMs: 0,    // 测试控速：PUT /upload 收到全部字节后延迟应答（桌面端「上传中」帧基线用）
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
   seq: 0,
@@ -170,7 +171,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.seq = 0; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; return send(200, { ok: true }); }
       if (sub === "seed") {
         return readBody().then((b) => {
           const { n = 25, status = "done", skipped = 0, progress = 0 } = b ? JSON.parse(b) : {};
@@ -202,6 +203,12 @@ const server = http.createServer((req, res) => {
           const { step = 0.25, tickMs = 100 } = b ? JSON.parse(b) : {};
           state.step = step; state.tickMs = tickMs;
           return send(200, { ok: true });
+        });
+      }
+      if (sub === "upload-delay") {
+        return readBody().then((b) => {
+          state.uploadDelayMs = (b && JSON.parse(b).ms) || 0;
+          return send(200, { ok: true, ms: state.uploadDelayMs });
         });
       }
       return sendErr(404, "not found");
@@ -255,10 +262,15 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       const buf = Buffer.concat(chunks);
       const source = req.headers["x-source-name"] || "remote";
-      state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex") });
-      const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
-      const j = jobOf([t], { source_kind: "remote", label: source });
-      return send(201, { ok: true, job_id: j.id, file: source });
+      const done = () => {
+        state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex") });
+        const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
+        const j = jobOf([t], { source_kind: "remote", label: source });
+        return send(201, { ok: true, job_id: j.id, file: source });
+      };
+      return state.uploadDelayMs > 0
+        ? new Promise((r) => setTimeout(() => r(done()), state.uploadDelayMs))
+        : done();
     });
     return;
   }
