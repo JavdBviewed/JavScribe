@@ -1,6 +1,6 @@
 """JavScribe command line.
 
-  jav_scribe gui                  # GUI (Windows; needs the gui extra)
+  jav_scribe                      # 无参数 = serve（双击 exe 零操作）
   jav_scribe run FILE|DIR [...]   # one-shot batch (headless)
   jav_scribe watch                # watch BT/PT dirs, process on arrival
   jav_scribe serve [--port 8300]  # watch + progress/remote HTTP API
@@ -253,15 +253,6 @@ JavScribe server, poll until done, save the returned SRT next to the source."""
     return 0
 
 
-def cmd_gui(_args) -> int:
-    try:
-        from .app import main
-    except ImportError as e:
-        print(f"GUI 依赖缺失（{e}）。Windows 上请先: uv sync --extra gui，然后 jav_scribe gui", file=sys.stderr)
-        return 2
-    return main()
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jav_scribe",
@@ -269,9 +260,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"{APP_VERSION}")
     sub = p.add_subparsers(dest="cmd")
-
-    s = sub.add_parser("gui", help="启动图形界面（Windows）")
-    s.set_defaults(func=cmd_gui)
 
     s = sub.add_parser("run", help="一次性批处理（文件或目录）")
     s.add_argument("files", nargs="*", help="媒体文件或目录（目录递归扫描）")
@@ -309,8 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not getattr(args, "func", None):
-        build_parser().print_help()
-        print("\n提示: 先按 config/jav_scribe.example.json 写好 ~/.jav_scribe/config.json（或 --config 指定）")
-        return 0
+    if args.cmd is None:
+        # 无参数默认 serve——双击 JavScribeServe.exe 零操作启动（日志见 ~/.jav_scribe/serve.log）
+        args = build_parser().parse_args(["serve"])
     return args.func(args)

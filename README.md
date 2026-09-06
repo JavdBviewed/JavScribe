@@ -26,9 +26,9 @@
 - **媒体库友好**：输出固定 `<影片名>.zh.srt`（可配 ja/en/none），与影片同目录；Emby/Jellyfin/Plex 自动挂载，多分卷天然按各自基名匹配
 - **下载目录监听**：大小稳定检测（下载未完成不接手）、存量文件可一次追平、已生成字幕自动跳过
 - **进度可见**：进度精确到**影片时间轴**（"已翻到 47:12 / 共 150:20"），HTTP 接口随时查询；批量一次加载模型
-- **本地 / 服务器一套代码**：一个配置两份 `profiles`（`--profile local|server`）——本地 GUI 拖拽批处理或 `watch` 常驻；服务器 `serve` 常驻 + 进度接口，Docker 一条命令起
+- **本地 / 服务器一套代码**：一个配置两份 `profiles`（`--profile local|server`）——本地 `run`/`watch`/`serve` 常驻（headless，可打 exe 双击即用，见 [docs/serve-local.md](docs/serve-local.md)）；服务器 `serve` 常驻 + 进度接口，Docker 一条命令起
 - **远端处理**：客户端 `jav-scribe upload 影片.mkv --remote http://<服务器>:8300` → ffmpeg 只抽 16kHz opus 音频上传 → 服务器跑完 → SRT 回传并落到影片同目录。**不传整片**
-- **可选增强**：LLM 润色第二遍（任何 OpenAI 兼容端点）、Emby Refresh 联动、JASNA 马赛克修复（GUI 模式）
+- **可选增强**：LLM 润色第二遍（任何 OpenAI 兼容端点）、Emby Refresh 联动、JASNA 马赛克修复（流水线内外部命令）
 
 ## 快速开始
 
@@ -41,24 +41,25 @@ JAV_WATCH_DIR=/你的影片目录 docker compose -f docker/docker-compose.yml up
 
 首启自动下载模型（~3.4G）；离线放置模型、验证、安全注意事项见 [docs/docker.md](docs/docker.md)。
 
-### 本地（Windows，GUI / headless）
+### 本地（Windows / Linux，headless）
 
 ```bat
-:: 1) 安装 uv (https://docs.astral.sh/uv/) + ffmpeg，准备 ChickenRice 发布包（docs/models.md 方案 A）
-:: 2) 配置
-copy config\jav_scribe.example.json %USERPROFILE%\.jav_scribe\config.json
-::    按需修改 local profile: infer.command / watch.dirs / emby
+:: 1) 装 ffmpeg，准备 ChickenRice 发布包（docs/models.md 方案 A）
+:: 2) 从 serve-v* Release 下载 JavScribeServe.exe，双击即 serve 常驻——零操作，
+::    无控制台窗口，日志 ~/.jav_scribe/serve.log；首启零配置也能起
+::    （引擎参数推荐用 JavScribe Client 的「服务设置」填）
+copy config\jav_scribe.example.json %USERPROFILE%\.jav_scribe\config.json   & rem 或手动配置
 
-:: GUI（拖拽批处理，带进度条/日志/修复面板）
-uv sync --extra gui && run.bat
-
-:: headless：一次性批处理 / 目录监听
-uv run jav-scribe run "D:\Videos\JAV\某番号" --profile local
-uv run jav-scribe watch --profile local
+:: 从源码 headless 运行（uv 安装见 https://docs.astral.sh/uv/）：
+uv run jav-scribe run "D:\Videos\JAV\某番号"     :: 一次性批处理
+uv run jav-scribe watch                            :: 目录监听
+uv run jav-scribe serve --port 8300                :: serve 常驻 + 进度接口
 
 :: 本地算力不够时走远端（只传音频）：
 uv run jav-scribe upload "D:\Videos\JAV\XXX-123.ts" --remote http://<服务器>:8300
 ```
+
+详见 [docs/serve-local.md](docs/serve-local.md)（exe 用法、首启零配置、与 JavScribe Client 同目录自动拉起）。
 
 ### 服务器（Linux，手动部署，非 Docker）
 
@@ -97,7 +98,7 @@ curl http://<服务器>:8300/jobs/<id>/result # 下载该任务的 SRT
 
 ```
 src/jav_scribe/
-├── cli.py               # run / watch / serve / upload / gui
+├── cli.py               # 无参=serve / run / watch / upload
 ├── config/loader.py     # 配置文件 + profiles
 ├── core/
 │   ├── engine.py        # headless 流水线（预检→[修复]→ASR→落位→[润色]→[Emby]）
@@ -108,11 +109,10 @@ src/jav_scribe/
 │   ├── polish.py        # 可选 LLM 润色
 │   ├── emby.py          # 可选 Emby Refresh
 │   ├── progress_api.py  # /health /jobs /upload（stdlib HTTP）
-│   ├── infer_runner.py  # GUI 用 ConPTY runner
-│   ├── jasna_*.py       # GUI 用 JASNA 修复集成
-│   └── task*.py         # 任务模型（headless / GUI 各一套）
-└── gui (app/main_window/widgets)  # Windows 图形界面
+│   └── task.py          # 任务模型（状态/进度/时间轴）
 ```
+
+打包：`serve_launcher.py` + `jav-scribe-serve.spec`（headless serve exe，release-serve CI 打 win/linux 包，见 [docs/serve-local.md](docs/serve-local.md)）。
 
 另见 `web/`：字幕工作台（独立 Web 服务，见 [web/README.md](web/README.md)）。
 

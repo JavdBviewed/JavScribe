@@ -1,7 +1,6 @@
-"""Plain (Qt-free) task model for the headless engine.
+"""Plain task model for the headless engine.
 
-The GUI keeps its own QAbstractTableModel (task_model.py); this module is the
-canonical state container used by core/engine.py and the progress API.
+Canonical state container used by core/engine.py and the progress API.
 """
 from __future__ import annotations
 

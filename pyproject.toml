@@ -8,12 +8,10 @@ authors = [
     { name = "maudslice (original JAVSubTool)", email = "maudslice@gmail.com" },
 ]
 requires-python = ">=3.11"
-dependencies = []
-
-[project.optional-dependencies]
-gui = [
-    "pyside6>=6.7",
-    "pywinpty>=2.2.1; sys_platform == \"win32\"",
+dependencies = [
+    # Windows headless 链路需要 ConPTY 驱动 ChickenRice infer（tqdm 进度在
+    # GBK 管道下会乱码）；Linux 纯 Popen 用不到，条件依赖避免多余安装。
+    'pywinpty>=2.2.1; sys_platform == "win32"',
 ]
 
 [dependency-groups]

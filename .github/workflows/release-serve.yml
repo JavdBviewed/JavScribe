@@ -1,0 +1,135 @@
+# JavScribe Serve — CI/CD release（headless 服务端 exe）
+# 触发：
+#   - tag `serve-v*`：完整 release（打包 + /health 冒烟 + 建 GitHub Release）
+#   - 手动 dispatch：调试构建（产物留 Actions artifacts，不建 Release）
+# 平台：windows-latest（JavScribeServe.exe，无控制台）/ ubuntu-latest（jav-scribe-serve）
+# 约定：tag 版本号必须等于 pyproject.toml 的 version（构建前校验，防打错包）。
+name: release-serve
+
+on:
+  push:
+    tags: ["serve-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-serve-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 校验 tag 版本 = pyproject.toml 版本
+        if: startsWith(github.ref, 'refs/tags/serve-v')
+        shell: bash
+        run: |
+          want="${GITHUB_REF#refs/tags/serve-v}"
+          have="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag 版本 $want 与 pyproject.toml 版本 $have 不一致"
+            exit 1
+          fi
+      - run: python -m pip install --upgrade pip && python -m pip install pyinstaller
+      - run: python -m pyinstaller --noconfirm --clean jav-scribe-serve.spec
+      - name: 冒烟：启动 exe，/health 探活（零配置首启必须能起）
+        shell: bash
+        run: |
+          ./dist/JavScribeServe.exe &
+          EXE_PID=$!
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8300/health > /tmp/health.json; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "::error::30s 内 /health 未就绪"; tail -50 "$USERPROFILE/.jav_scribe/serve.log" 2>/dev/null; exit 1; }
+          cat /tmp/health.json; echo
+          taskkill //F //T //PID $EXE_PID >/dev/null 2>&1 || true
+      - name: 打包 zip（exe + 配置模板 + 说明）
+        shell: bash
+        run: |
+          rm -rf dist-package && mkdir -p dist-package release
+          cp dist/JavScribeServe.exe dist-package/
+          cp config/jav_scribe.example.json dist-package/config.example.json
+          cp docs/serve-local.md dist-package/README.txt
+          powershell -NoProfile -Command "Compress-Archive -Path dist-package/* -DestinationPath release/JavScribeServe-win-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release
+          retention-days: 14
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 校验 tag 版本 = pyproject.toml 版本
+        if: startsWith(github.ref, 'refs/tags/serve-v')
+        run: |
+          want="${GITHUB_REF#refs/tags/serve-v}"
+          have="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag 版本 $want 与 pyproject.toml 版本 $have 不一致"
+            exit 1
+          fi
+      - run: python3 -m pip install --upgrade pip && python3 -m pip install pyinstaller
+      - run: python3 -m pyinstaller --noconfirm --clean jav-scribe-serve.spec
+      - name: 冒烟：启动 exe，/health 探活（零配置首启必须能起）
+        run: |
+          ./dist/jav-scribe-serve &
+          EXE_PID=$!
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8300/health > /tmp/health.json; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "::error::30s 内 /health 未就绪"; tail -50 "$HOME/.jav_scribe/serve.log" 2>/dev/null; exit 1; }
+          cat /tmp/health.json; echo
+          kill $EXE_PID 2>/dev/null || true
+      - name: 打包 zip（exe + 配置模板 + 说明）
+        run: |
+          rm -rf dist-package && mkdir -p dist-package release
+          cp dist/jav-scribe-serve dist-package/
+          cp config/jav_scribe.example.json dist-package/config.example.json
+          cp docs/serve-local.md dist-package/README.txt
+          cd dist-package && zip -q ../release/jav-scribe-serve-linux-x64.zip * && cd ..
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release
+          retention-days: 14
+
+  release:
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/serve-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+      - name: 建 GitHub Release（tag 同名）
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-all/release-windows/release/JavScribeServe-win-x64.zip
+            dist-all/release-linux/release/jav-scribe-serve-linux-x64.zip
+          body: |
+            JavScribe Serve（${{ github.ref_name }}）—— headless 服务端，无 GUI。
+
+            - **Windows**：`JavScribeServe.exe`，双击即 serve（无控制台窗口）
+            - **Linux**：`jav-scribe-serve` 单文件
+            - 默认端口 8300，日志 `~/.jav_scribe/serve.log`，配置 `~/.jav_scribe/config.json`
+            - 与 JavScribe Client 放同一目录时，客户端自动拉起并连接
+            - 前置要求见包内 `README.txt`（ChickenRice 引擎 + 模型 + ffmpeg；服务端本体零第三方依赖，引擎/模型体积不在本包内）

@@ -18,23 +18,23 @@ copy config\jav_scribe.example.json %USERPROFILE%\.jav_scribe\config.json
 
 按需修改 `infer.command` / `infer.model` / `watch.dirs` / `emby`。
 
-## 本地：GUI（Windows，拖拽批处理）
+## 本地：Serve exe（Windows / Linux，双击即用）
 
-```bat
-uv sync --extra gui
-run.bat
-```
+从 `serve-v*` Release 下载 `JavScribeServe.exe`（Windows，无控制台窗口）或
+`jav-scribe-serve`（Linux）——双击/直接运行即 `serve` 常驻，零操作；日志
+`~/.jav_scribe/serve.log`，端口默认 8300。首启零配置也能起，引擎参数推荐用
+JavScribe Client 的「服务设置」填。放到 JavScribe Client 同目录可被客户端
+自动拉起。详见 [docs/serve-local.md](serve-local.md)。
 
-拖入影片或目录即可，带进度条、引擎日志、JASNA 修复面板（GUI 模式可用）。
-
-## 本地：headless（任意系统）
+## 本地：headless 命令（任意系统，从源码跑）
 
 ```bash
+uv run jav-scribe                                    # 无参 = serve 常驻
 uv run jav-scribe run "D:\Videos\JAV" --profile local   # 一次性批处理（文件/目录，目录递归）
 uv run jav-scribe watch --profile local                  # 常驻监听 watch.dirs
 ```
 
-Windows 可用任务计划程序配置开机自启 `watch`（headless 无 GUI 依赖，CPU 即可跑）。
+Windows 可用任务计划程序配置开机自启 `serve`/`watch`（headless 零 GUI 依赖，CPU 即可跑）。
 
 ## 服务器：Docker（NVIDIA GPU，推荐）
 
