@@ -5,7 +5,8 @@
 //   linux: ffmpeg-master-latest-linux64-gpl.tar.xz  → ffmpeg
 //   win:   ffmpeg-master-latest-win64-gpl.zip       → bin/ffmpeg.exe
 // 解压依赖系统 tar（linux GNU tar 自动识别 xz；win10+ bsdtar 识别 zip/xz）。
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -47,10 +48,16 @@ try {
   const t = spawnSync("tar", ["-xf", archive, "-C", work], { stdio: "inherit" });
   if (t.status !== 0) process.exit(t.status ?? 1);
 
-  const found = execSync(
-    `find ${JSON.stringify(work)} -name ${JSON.stringify(BIN_NAME)} -type f`,
-    { encoding: "utf8" },
-  ).trim().split("\n").filter(Boolean);
+  // fs 遍历（不依赖系统 find——Windows 的 find 是文本搜索工具）
+  const found = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile() && e.name === BIN_NAME) found.push(full);
+    }
+  };
+  walk(work);
   if (!found.length) throw new Error(`解压产物中未找到 ${BIN_NAME}`);
   mkdirSync(STAGE, { recursive: true });
   rmSync(TARGET, { force: true });
