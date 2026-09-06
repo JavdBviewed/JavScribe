@@ -139,6 +139,20 @@ JAV_ENGINES="服务A=http://<IP_A>:8300,服务B=http://<IP_B>:8300" \
 
 进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。`GET/PUT /config`（设置管理）与 `GET /scan` / `POST /scan/submit`（文件夹扫描入队）有 `X-Api-Key` 鉴权（env `JAVSCRIBE_API_KEY`）。注意 `/scan` 可列举**服务所在机器上的任意目录**并据路径入队，与 `/config` 同级敏感，切勿对外暴露。容器化部署默认把宿主机根只读挂载在容器 `/hostfs`（仅 `/scan` 可达）；设置 `JAVSCRIBE_HOST_ROOT=/hostfs` 后，扫描/入队对「容器内不存在的路径」会自动映射到宿主机同名路径，方便直接填服务器上的目录。请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
 
+## JavScribe Client（桌面端）
+
+同一套前端的 Electron 桌面形态（web 形态不变）：**在本机提音轨，只上传 ~35MB 音频，
+无大小限制**；多字幕服务登记 + API Key 本地存储、srt 写回影片原目录（原生文件系统
+恒可用）。随包静态 ffmpeg，无需系统安装（可用环境变量 `JAVSCRIBE_FFMPEG` 覆盖）。
+
+- 获取：[GitHub Releases](https://github.com/JavdBviewed/JavScribe/releases)
+  （tag `client-v*` 触发 CI 出包：Windows NSIS/portable/zip，Linux AppImage/deb/zip；
+  当前为**未签名**构建）
+- 本地开发：`pnpm install && pnpm build:desktop && npx electron client/dist-desktop --no-sandbox`
+- 本地出包：`node scripts/fetch-ffmpeg.mjs <win|linux> && pnpm build:release:<linux|win>`
+- 桌面端 e2e（mock serve，功能/交互/样式/UI 四类）：`pnpm test:e2e:desktop`
+- CI/CD 细节：`.github/workflows/release-client.yml`（tag 触发，含 e2e 冒烟子集）
+
 ## 致谢与许可
 
 - 本仓库基于 [**JAVSubTool**](https://github.com/maudslice/JAVSubTool)（maudslice，MIT）二次开发，原作者版权保留

@@ -1,8 +1,11 @@
 {
   "name": "jav-scribe-client",
+  "desktopName": "JavScribeClient",
   "version": "0.1.0",
+  "author": "JavdBviewed",
   "private": true,
   "description": "JavScribe Client — 共享前端（web 形态 + Electron 桌面端）",
+  "repository": "https://github.com/JavdBviewed/JavScribe",
   "type": "module",
   "scripts": {
     "build:web": "vite build",
@@ -13,12 +16,16 @@
     "test:e2e:headed": "playwright test --headed",
     "typecheck": "tsc --noEmit",
     "build:desktop": "node scripts/build-desktop.mjs",
-    "test:e2e:desktop": "xvfb-run -a playwright test --config playwright.desktop.config.ts"
+    "test:e2e:desktop": "xvfb-run -a playwright test --config playwright.desktop.config.ts",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "build:release:linux": "pnpm build:desktop && electron-builder --linux",
+    "build:release:win": "pnpm build:desktop && electron-builder --win"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.4.1",
     "electron": "^44.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "playwright": "^1.63.0",
     "typescript": "^7.0.2",
@@ -29,5 +36,6 @@
       "electron",
       "esbuild"
     ]
-  }
+  },
+  "main": "client/dist-desktop/main.cjs"
 }

@@ -479,15 +479,15 @@ function configError(status: number, data: unknown): Error {
 function findFfmpeg(): string | null {
   const env = process.env.JAVSCRIBE_FFMPEG;
   if (env && fs.existsSync(env)) return env;
-  // 打包资源位（三期随包 ffmpeg；二期留空位）
-  const res = path.join(
-    path.dirname(app.getPath("exe")),
-    "resources",
-    process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
-  );
-  if (fs.existsSync(res)) return res;
-  const paths = (process.env.PATH || "").split(path.delimiter);
   const name = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  // 打包资源位：extraResources 在三种形态（NSIS/portable/AppImage+deb）下都落在
+  // process.resourcesPath；win 安装目录下 exe 旁的 resources/ 作兜底（布局等价）
+  const cands = [
+    path.join(process.resourcesPath, name),
+    path.join(path.dirname(app.getPath("exe")), "resources", name),
+  ];
+  for (const res of cands) if (fs.existsSync(res)) return res;
+  const paths = (process.env.PATH || "").split(path.delimiter);
   for (const p of paths) {
     if (!p) continue;
     const cand = path.join(p, name);

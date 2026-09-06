@@ -74,3 +74,9 @@ client/dist-desktop/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# ---------- 桌面端打包（三期） ----------
+# 随包 ffmpeg 静态构建（node scripts/fetch-ffmpeg.mjs 拉取）
+client/packaging/ffmpeg/
+# electron-builder 产物目录
+release/

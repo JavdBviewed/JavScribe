@@ -82,8 +82,10 @@ run("node", [
   "--external:electron",
   "--outfile=client/dist-desktop/preload.cjs",
 ]);
+// 版本跟随根 package.json（electron-builder 打出的安装包版本一致）
+const rootPkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
 writeFileSync(
   resolve(ROOT, "client/dist-desktop/package.json"),
-  JSON.stringify({ name: "jav-scribe-client", version: "0.1.0", main: "main.cjs" }, null, 2) + "\n",
+  JSON.stringify({ name: "jav-scribe-client", version: rootPkg.version, main: "main.cjs" }, null, 2) + "\n",
 );
 console.log("[build-desktop] 完成 → client/dist-desktop/");

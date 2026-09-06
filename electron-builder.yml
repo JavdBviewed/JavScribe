@@ -1,0 +1,48 @@
+# JavScribe Client — electron-builder 打包配置（三期 CI/CD）
+# 触发：GH Actions .github/workflows/release-client.yml（tag client-v* / 手动 dispatch）
+# 前置：pnpm build:desktop（renderer+main+preload → client/dist-desktop）、
+#       node scripts/fetch-ffmpeg.mjs <win|linux>（静态 ffmpeg → client/packaging/ffmpeg/）
+appId: com.javdbviewed.javscribe.client
+productName: JavScribe Client
+copyright: "JavdBviewed"
+directories:
+  output: release
+  buildResources: client/packaging
+# 打进 asar 的只有桌面端构建产物（main.cjs/preload.cjs/renderer/index.html）
+# 根 package.json 恒自动包含（main/version 来源）
+files:
+  - client/dist-desktop/**/*
+  - "!**/*.map"
+# 随包静态 ffmpeg（extraResources 不进 asar；运行时 process.resourcesPath/ffmpeg）
+# 优先级：JAVSCRIBE_FFMPEG 环境变量 > 随包 > 系统 PATH（client/desktop/main.ts findFfmpeg）
+extraResources:
+  - from: client/packaging/ffmpeg
+    to: .
+    filter: ["ffmpeg", "ffmpeg.exe"]
+asar: true
+compression: normal
+# 未签名（本期无证书，Release 文案注明）；签名/公证为后续议题
+# 发布不在 electron-builder 内做：release job 统一用 softprops 建 GitHub Release
+win:
+  target:
+    - nsis
+    - portable
+    - zip
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: JavScribe Client
+  deleteAppDataOnUninstall: false
+linux:
+  # WM_CLASS 关联：desktopName 在根 package.json，此处同步进 .desktop/WM_CLASS
+  syncDesktopName: true
+  target:
+    - AppImage
+    - deb
+    - zip
+  category: AudioVideo
+  maintainer: "ryen <ryen@javdbviewed.com>"
+  synopsis: JavScribe Client — 本地提音轨的字幕工作台
