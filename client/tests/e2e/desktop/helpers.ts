@@ -24,7 +24,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
 export const DIST = join(ROOT, "client", "dist-desktop");
 
 // ---------------------------------------------------------------------------
-// fixtures 自愈：本开发机的 /home/ryen/Git 被 Syncthing 与另一台机器双向同步，
+// fixtures 自愈：仓库目录若被双向同步工具（如 Syncthing）与另一台机器同步，
 // 对端 git 工作区若缺少这些文件，删除会周期性同步回来（外部进程删除，非测试所为）。
 // fixtures 已入库（commit f2cd2e0），缺了直接 git restore，保证每个 test 冷启动时齐全。
 // ---------------------------------------------------------------------------
@@ -88,7 +88,10 @@ export async function waitForMockJobFinished(
 // ---------------------------------------------------------------------------
 
 function ffmpegEnv(): Record<string, string> {
-  const ff = process.env.JAVSCRIBE_FFMPEG || "/home/ryen/.local/bin/ffmpeg";
+  // 未显式指定时用系统 PATH 的 ffmpeg（裸名不走 existsSync，由 main 的 PATH 兜底解析）
+  const bare = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const ff = process.env.JAVSCRIBE_FFMPEG || bare;
+  if (!ff.includes("/") && !ff.includes("\\")) return {};
   return existsSync(ff) ? { JAVSCRIBE_FFMPEG: ff } : {};
 }
 
