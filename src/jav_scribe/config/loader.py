@@ -87,6 +87,10 @@ DEFAULTS: dict[str, Any] = {
         "host": DEFAULT_PROGRESS_HOST,
         "port": DEFAULT_PROGRESS_PORT,
     },
+    # inbox 缓存（音轨/字幕）保留天数：交付后超过该天数自动清理，/config 热调。
+    "storage": {
+        "retention_days": 7,
+    },
     # 进度/配置管理 API 的鉴权 key。推荐 env JAVSCRIBE_API_KEY（见下方 fallback），
     # 也支持直接写在配置文件（profiles.<active>.api.key）。
     "api": {"key": ""},

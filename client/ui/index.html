@@ -33,6 +33,14 @@
         <button type="submit" class="btn">添加服务</button>
       </form>
     </div>
+    <div id="local-serve-status" hidden>
+      <span id="local-serve-lamp" class="watch-lamp" aria-hidden="true"></span>
+      <span id="local-serve-status-text"></span>
+    </div>
+    <div id="local-serve-hint" hidden>
+      <div class="ls-hint-title"><span class="watch-lamp" aria-hidden="true"></span>未检测到本地服务端</div>
+      <div class="muted small">把 <b>JavScribe Serve</b>（服务端程序，与客户端同版本，同一 Release 可下载）放进本客户端所在目录，启动时会自动拉起并登记为「本地服务端」，字幕就生成本机。已有远程字幕服务器？用上方表单填地址即可。</div>
+    </div>
     <div id="engine-grid"></div>
     <div id="engines-empty" class="empty">
       <div class="empty-icon">&#9673;</div>

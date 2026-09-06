@@ -111,16 +111,17 @@ test("retry：跳过任务 → 201 新任务；无跳过文件 → 409", async (
   expect((await req.post(`${WEB_URL}/api/jobs/mock/nojob/retry`, { data: {} })).status()).toBe(404);
 });
 
-test("config：22 项白名单 + PUT 校验全路径", async () => {
+test("config：23 项白名单 + PUT 校验全路径", async () => {
   await mockConfigMode(req, "ok");
   await addEngine(req, { name: "mock", url: "http://127.0.0.1:8301", api_key: MOCK_KEY });
 
   const g = await req.get(`${WEB_URL}/api/engines/mock/config`);
   expect(g.status()).toBe(200);
   const items = (await g.json()).items as any[];
-  expect(items).toHaveLength(22);
+  expect(items).toHaveLength(23);
   const byPath = Object.fromEntries(items.map((i) => [i.path, i]));
   expect(byPath["vad.threshold"].value).toBe(0.5);
+  expect(byPath["storage.retention_days"].value).toBe(7);
   expect(byPath["polish.api_key"].secret).toBe(true);
   expect(byPath["subtitle.naming"].options).toEqual(["rename", "keep"]);
 

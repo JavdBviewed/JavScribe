@@ -131,7 +131,7 @@ def test_auth_and_masking() -> None:
             code, body = _http("GET", base + "/config", key="k1")
             assert code == 200 and body["ok"] and body["profile"] == "server", (code, body)
             items = {i["path"]: i for i in body["items"]}
-            assert len(items) == 22, len(items)  # 19 基础项 + 3 扫描规则项
+            assert len(items) == 23, len(items)  # 19 基础项 + 3 扫描规则项 + 1 缓存保留项
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
             # 敏感项打码：未设置 -> ""
@@ -231,6 +231,9 @@ def test_put_invalid_rejected() -> None:
                 {"infer.max_batch_size": True},        # bool 冒充 int
                 {"infer.max_batch_size": 500},         # 上限
                 {"polish.batch_lines": 10000},         # 上限
+                {"storage.retention_days": 0},          # 下限
+                {"storage.retention_days": 3651},       # 上限
+                {"storage.retention_days": "7"},        # 类型
                 {"subtitle.skip_if_exists": "yes"},    # bool 类型
                 {"watch.dirs": ["/tmp"]},              # 未暴露项
             ]
@@ -252,6 +255,26 @@ def test_put_invalid_rejected() -> None:
             # 缺 values 字段
             code, _ = _http("PUT", base + "/config", {}, key="k1")
             assert code == 400, code
+        finally:
+            http.stop()
+
+
+def test_put_retention_days() -> None:
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        file_cfg = copy.deepcopy(BASE_CFG)
+        http, engine, cfg_path = _start(td, cfg, file_cfg)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            code, body = _http("PUT", base + "/config", {"values": {"storage.retention_days": 30}}, key="k1")
+            assert code == 200 and body["ok"], (code, body)
+            assert cfg["storage"]["retention_days"] == 30, "热生效"
+            items = {i["path"]: i for i in _http("GET", base + "/config", key="k1")[1]["items"]}
+            assert items["storage.retention_days"]["value"] == 30
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            assert saved["profiles"]["server"]["storage"]["retention_days"] == 30, "落盘"
         finally:
             http.stop()
 

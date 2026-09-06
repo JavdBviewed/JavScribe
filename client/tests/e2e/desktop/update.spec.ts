@@ -3,7 +3,7 @@
 //    （产物缺失时整文件 skip，CI 在 build job 之后必然存在）
 //  - 每 test 全新 userData（userData fixture：mockReset + 预置 engines.json），launchPackedApp
 //    恒带 JAVSCRIBE_UPDATE_FEED=http://127.0.0.1:8304/ 与 JAVSCRIBE_NO_UPDATE_RELUNCH=1
-//  - 打包形态启动 3s 后自动检查（main 的 UP_AUTO_CHECK_DELAY_MS）；feed 版本 9.9.9 > 应用 0.1.0
+//  - 打包形态启动 3s 后自动检查（main 的 UP_AUTO_CHECK_DELAY_MS）；feed 版本 9.9.9 > 应用 0.2.0
 //  - 安装包 1.5MB 分块 64KB/25ms ≈ 0.6s 下载完，进度事件真实推进
 import { test, expect, type APIRequestContext } from "./helpers";
 import { PACKED_BIN, relaunchPacked, freezeForShot, shot } from "./helpers";
@@ -43,7 +43,7 @@ test("自动检查发现新版本 → 下载 → 重启安装 → 进程退出",
 
     await chip.click();
     await expect(page.locator("#modal-title")).toHaveText("检查更新");
-    await expect(page.locator(".set-note")).toContainText("当前 v0.1.0 → 最新 v9.9.9");
+    await expect(page.locator(".set-note")).toContainText("当前 v0.2.0 → 最新 v9.9.9");
     await expect(page.locator(".up-changelog")).toContainText("e2e 测试内容");
     await expect(page.locator("#up-dl")).toBeVisible();
     await expect(page.locator("#up-later")).toBeVisible();

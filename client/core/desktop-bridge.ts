@@ -84,6 +84,21 @@ export interface WatchSetResult {
   state?: WatchState;
 }
 
+// ---------- 本地服务端集成（仅 desktop 形态：客户端同目录服务程序自动拉起） ----------
+
+export interface LocalServeState {
+  /** 客户端同目录（或 env 覆盖）是否找到服务程序 */
+  detected: boolean;
+  cmd: string;
+  port: number;
+  url: string;
+  /** /health 已就绪 */
+  running: boolean;
+  /** 正在拉起（spawn 已发出、health 未就绪） */
+  starting: boolean;
+  error: string | null;
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -129,6 +144,13 @@ export interface JavDesktop {
     putSettings(s: UpdateSettings): Promise<UpdateSettings>;
     /** 订阅状态推送；返回取消订阅函数 */
     onState(cb: (s: UpdateState) => void): () => void;
+    };
+
+  /** 本地服务端（仅 desktop 形态：自动拉起同目录服务程序并登记「本地服务端」） */
+  localServe: {
+    state(): Promise<LocalServeState>;
+    /** 订阅状态推送；返回取消订阅函数 */
+    onState(cb: (s: LocalServeState) => void): () => void;
   };
 }
 

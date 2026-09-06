@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-9g-hnwQJ.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-DJD2aptS.css">
+  <script type="module" crossorigin src="/assets/index-mgKk5E5Q.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-b42Bypjc.css">
 </head>
 <body>
 <header>
@@ -34,6 +34,14 @@
         <input id="engine-key" type="password" placeholder="API Key（可选，用于服务设置）" maxlength="128">
         <button type="submit" class="btn">添加服务</button>
       </form>
+    </div>
+    <div id="local-serve-status" hidden>
+      <span id="local-serve-lamp" class="watch-lamp" aria-hidden="true"></span>
+      <span id="local-serve-status-text"></span>
+    </div>
+    <div id="local-serve-hint" hidden>
+      <div class="ls-hint-title"><span class="watch-lamp" aria-hidden="true"></span>未检测到本地服务端</div>
+      <div class="muted small">把 <b>JavScribe Serve</b>（服务端程序，与客户端同版本，同一 Release 可下载）放进本客户端所在目录，启动时会自动拉起并登记为「本地服务端」，字幕就生成本机。已有远程字幕服务器？用上方表单填地址即可。</div>
     </div>
     <div id="engine-grid"></div>
     <div id="engines-empty" class="empty">

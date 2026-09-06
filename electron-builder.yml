@@ -3,6 +3,8 @@
 # 前置：pnpm build:desktop（renderer+main+preload → client/dist-desktop）、
 #       node scripts/fetch-ffmpeg.mjs <win|linux>（静态 ffmpeg → client/packaging/ffmpeg/）
 appId: com.javdbviewed.javscribe.client
+# 无原生依赖（纯 JS 主进程 + 随包 ffmpeg）：跳过依赖 rebuild，避免无网络环境拉 Electron headers 失败
+npmRebuild: false
 productName: JavScribe Client
 copyright: "JavdBviewed"
 directories:

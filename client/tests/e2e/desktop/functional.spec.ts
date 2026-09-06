@@ -21,7 +21,7 @@ const icall = (page: any, method: string, ...args: string[]) =>
 test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   const r = await icall(page, "getHealth");
   expect(r.ok).toBe(true);
-  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.1.0", engines: 1, online: 1 });
+  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.0", engines: 1, online: 1 });
 });
 
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {
@@ -164,13 +164,14 @@ test("retryJob IPC：201 新任务 / 409 无可重试 / 404 不存在（文案�
   expect(r3.error).toBe("任务不存在（已过期）");
 });
 
-test("config IPC：getConfig 22 项 + putConfig 成功/校验/坏 JSON", async ({ page }) => {
+test("config IPC：getConfig 23 项 + putConfig 成功/校验/坏 JSON", async ({ page }) => {
   const g = await icall(page, "getConfig", "mock");
   expect(g.ok).toBe(true);
   const items = g.data as Array<{ path: string; value: unknown; secret?: boolean }>;
-  expect(items).toHaveLength(22);
+  expect(items).toHaveLength(23);
   const byPath = Object.fromEntries(items.map((i) => [i.path, i]));
   expect(byPath["vad.threshold"].value).toBe(0.5);
+  expect(byPath["storage.retention_days"].value).toBe(7);
   expect(byPath["polish.api_key"].secret).toBe(true);
 
   expect((await icall(page, "putConfig", "mock", JSON.stringify({ "vad.threshold": 0.7 }))).ok).toBe(true);

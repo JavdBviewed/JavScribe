@@ -830,6 +830,22 @@ footer {
 .watch-lamp.err { background: var(--err); animation: none; }
 .watch-status { margin-top: 10px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .watch-status.err { color: var(--err); }
+
+/* ---------- 本地服务端（仅 desktop 形态：web 形态恒 hidden 不接线） ---------- */
+#local-serve-status { margin-top: 10px; font-size: 12.5px; }
+#local-serve-status.show { display: flex; align-items: center; gap: 7px; }
+#local-serve-status.err { color: var(--err); }
+#local-serve-hint {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.ls-hint-title {
+  display: flex; align-items: center; gap: 2px;
+  font-weight: 600; font-size: 13px; margin-bottom: 4px;
+}
 .scan-bar {
   display: flex;
   align-items: flex-end;

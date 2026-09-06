@@ -51,6 +51,9 @@
         "command": "",
         "output": "{stem}_restored{ext}",
         "preset": "Default"
+      },
+      "storage": {
+        "retention_days": 7
       }
     },
     "server": {
@@ -106,10 +109,26 @@
       },
       "scan": {
         "video_exts": [
-          "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"
+          "mp4",
+          "mkv",
+          "avi",
+          "mov",
+          "webm",
+          "flv",
+          "wmv",
+          "ts",
+          "m2ts",
+          "mpg",
+          "mpeg"
         ],
-        "subtitle_patterns": [".zh.srt", ".srt"],
+        "subtitle_patterns": [
+          ".zh.srt",
+          ".srt"
+        ],
         "recurse": true
+      },
+      "storage": {
+        "retention_days": 7
       }
     }
   },

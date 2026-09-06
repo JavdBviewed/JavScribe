@@ -4,7 +4,16 @@
 // 用法: node mock-serve.mjs [port]   默认 8301，仅监听 127.0.0.1
 import http from "node:http";
 
-const PORT = Number(process.argv[2] || 8301);
+// 端口：位置参数或 --port N（本地服务端集成 e2e 用客户端同款 --port 调用约定）
+const _lsArgv = process.argv.slice(2);
+const _lsPortFlag = _lsArgv.indexOf("--port");
+const _lsPortVal = _lsPortFlag >= 0 ? _lsArgv[_lsPortFlag + 1] : _lsArgv.find((a) => /^\d+$/.test(a));
+const PORT = Number(_lsPortVal || 8301);
+// 测试钩子：记录启动 pid（断言客户端未重复拉起）
+if (process.env.MOCK_COUNT_FILE) {
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(process.env.MOCK_COUNT_FILE, String(process.pid) + "\n");
+}
 const VERSION = "0.1.0";
 const GOOD_KEY = "mock-key-123";
 
@@ -32,6 +41,7 @@ const CONFIG_ITEMS = [
   ["scan.video_exts", "视频扩展名（逗号分隔）", "list", null, false, ["mp4", "mkv", "ts", "m2ts", "avi", "mov"]],
   ["scan.subtitle_patterns", "已有字幕判定后缀（逗号分隔）", "list", null, false, [".zh.srt", ".srt"]],
   ["scan.recurse", "扫描时进入子目录", "bool", null, false, true],
+  ["storage.retention_days", "缓存保留天数（音轨/字幕）", "int", null, false, 7],
 ];
 const SPEC = Object.fromEntries(CONFIG_ITEMS.map(([p, l, t, o, s]) => [p, { label: l, type: t, options: o, secret: s }]));
 

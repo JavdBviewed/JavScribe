@@ -2,12 +2,12 @@
 // 只暴露白名单方法，不暴露 ipcRenderer 本体；Node/Buffer 不进入 renderer。
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
-  ExtractResult, FileOpResult, JavDesktop, PickFileResult,
+  ExtractResult, FileOpResult, JavDesktop, LocalServeState, PickFileResult,
   PickFolderItem, TCallResult, TProgress, UpdateSettings, UpdateState,
   UploadDispatchResult, WatchCandidate, WatchSetResult, WatchState,
 } from "../core/desktop-bridge";
 
-const api: Omit<JavDesktop, "update" | "watch"> = {
+const api: Omit<JavDesktop, "update" | "watch" | "localServe"> = {
   call: (method: string, args?: string[]) =>
     ipcRenderer.invoke("t-call", { method, args }) as Promise<TCallResult>,
 
@@ -103,4 +103,16 @@ const watch: JavDesktop["watch"] = {
   },
 };
 
-contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch });
+// 本地服务端集成（main 进程 whenReady 时 fire-and-forget 拉起）
+const localServe: JavDesktop["localServe"] = {
+  state: () => ipcRenderer.invoke("local-serve-state") as Promise<LocalServeState>,
+  onState: (cb: (s: LocalServeState) => void): (() => void) => {
+    const listener = (_e: unknown, st: LocalServeState) => cb(st);
+    ipcRenderer.on("local-serve-state", listener);
+    return () => {
+      ipcRenderer.removeListener("local-serve-state", listener);
+    };
+  },
+};
+
+contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch, localServe });

@@ -5,7 +5,7 @@
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
-import type { UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
+import type { LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { $, esc } from "./dom";
@@ -1602,6 +1602,58 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
       void b.state().then((s2) => { upState = s2; renderUpChip(); }).catch(() => {});
       void b.getSettings().then((s2) => { upSettings = s2; }).catch(() => {});
+    }
+  }
+
+  // desktop 形态：本地服务端集成（同目录服务程序自动拉起 + 登记「本地服务端」）
+  // web 形态：#local-serve-* 恒 hidden、不接线（web 100% 不变硬约束）
+  if (platform.kind === "desktop") {
+    const lsStatus = $("local-serve-status");
+    const lsHint = $("local-serve-hint");
+    if (lsStatus && lsHint) {
+      const b = (window as unknown as {
+        javDesktop?: { localServe?: { state(): Promise<LocalServeState>; onState(cb: (s: LocalServeState) => void): () => void } };
+      }).javDesktop?.localServe ?? null;
+      if (b) {
+        const lsLamp = $("local-serve-lamp");
+        const lsText = $("local-serve-status-text");
+        let ls: LocalServeState | null = null;
+        let lastHtml = "";
+        function lsRender() {
+          const st = ls;
+          if (!st || !st.detected) {
+            lsStatus.classList.remove("show");
+            lsStatus.hidden = true;
+            lsHint.hidden = false;
+            lastHtml = "";
+            return;
+          }
+          lsHint.hidden = true;
+          lsStatus.hidden = false;
+          lsStatus.classList.add("show");
+          if (lsLamp) {
+            lsLamp.classList.toggle("on", st.running);
+            lsLamp.classList.toggle("err", !st.running && !!st.error);
+          }
+          const txt = st.running
+            ? `本地服务端运行中 · <span class="mono">${esc(st.url)}</span> · 已登记为「本地服务端」`
+            : st.starting
+              ? `本地服务端启动中…（${esc(st.url)}）`
+              : `本地服务端未运行 · ${esc(st.url)}${st.error ? ` · ${esc(st.error)}` : ""}`;
+          if (lsText && txt !== lastHtml) {
+            lastHtml = txt;
+            lsText.innerHTML = txt;
+          }
+          lsStatus.classList.toggle("err", !st.running && !!st.error);
+        }
+        b.onState((st) => {
+          const wasRunning = ls?.running === true;
+          ls = st;
+          lsRender();
+          if (st.running && !wasRunning) refresh(); // 「本地服务端」卡片出现后刷一次引擎列表
+        });
+        void b.state().then((st) => { ls = st; lsRender(); }).catch(() => {});
+      }
     }
   }
 

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..constants import APP_NAME, APP_VERSION
+from . import retention as retentionlib
 from . import scan as scanlib
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("scan.video_exts", "视频扩展名（逗号分隔）", "list", None, False),
     ("scan.subtitle_patterns", "已有字幕判定后缀（逗号分隔）", "list", None, False),
     ("scan.recurse", "扫描时进入子目录", "bool", None, False),
+    ("storage.retention_days", "缓存保留天数（音轨/字幕）", "int", None, False),
 ]
 
 CONFIG_SPEC = {path: (label, ftype, options, secret) for path, label, ftype, options, secret in CONFIG_ITEMS}
@@ -117,6 +119,8 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 最大 128")
             if path == "polish.batch_lines" and value > 1000:
                 raise ConfigError(f"{path} 最大 1000")
+            if path == "storage.retention_days" and value > 3650:
+                raise ConfigError(f"{path} 最大 3650")
         elif ftype == "float":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError(f"{path} 需要数字")
@@ -422,6 +426,13 @@ class ProgressHTTP:
         )
         self.thread.start()
         self.engine.log(f"[progress] HTTP 服务已启动 http://{self.host}:{self.port} (health/jobs/upload/config)")
+        # inbox 缓存清理（音轨/字幕，storage.retention_days 热调；见 core/retention.py）
+        self.retention_thread = threading.Thread(
+            target=retentionlib.retention_loop,
+            args=(self.engine, self.inbox_dir),
+            daemon=True,
+        )
+        self.retention_thread.start()
 
     def stop(self) -> None:
         self.server.shutdown()

@@ -15,7 +15,7 @@
 
 import { app, BrowserWindow, Menu, dialog, ipcMain, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -117,6 +117,14 @@ class EngineStore {
     e.api_key = (key || "").trim();
     this._save();
     return e;
+  }
+
+  /** 幂等登记（本地服务端集成用）：不存在才创建，存在（用户改过 URL/Key）一律保留 */
+  ensure(name: string, url: string): void {
+    if (!this._engines.has(name) && isUrl(url)) {
+      this._upsert(name, url, "");
+      this._save();
+    }
   }
 
   /** 幂等：不存在也正常返回 */
@@ -926,6 +934,7 @@ function registerIpc(): void {
   });
 
   // ---------- 文件夹监控（仅 desktop；renderer 就绪后 watch-arm flush 启动期候选） ----------
+  ipcMain.handle("local-serve-state", () => lsState);
   ipcMain.handle("watch-state", () => watchPublicState());
   ipcMain.handle("watch-arm", () => {
     watchArmed = true;
@@ -1366,6 +1375,176 @@ function watchApplySettings(next: WatchSettings): void {
 }
 
 // ---------------------------------------------------------------------------
+// 本地服务端集成（仅 desktop 形态）：客户端同目录的服务程序自动拉起
+//   - 检测：打包态 → exe 同目录找 JavScribeServe.exe (win) / jav-scribe-serve (linux)；
+//     dev/测试态 → env JAVSCRIBE_LOCAL_SERVE_CMD 覆盖为可执行文件路径
+//   - 端口：env JAVSCRIBE_LOCAL_SERVE_PORT（默认 8300）
+//   - 流程：GET /health 探活（1.5s）→ 在线则直接登记；
+//     离线则 spawn detached 拉起 → 轮询 /health（~20s 上限）
+//   - 引擎登记固定名「本地服务端」：已存在同名条目（用户改过 URL/Key）一律保留
+//   - 生命周期：客户端拉起的实例随客户端退出而终止（杀进程树，覆盖 PyInstaller
+//     onefile 父子结构）；用户手动启动的实例（启动前已在线）不受影响，重启探活复用
+// ---------------------------------------------------------------------------
+
+const LS_ENGINE_NAME = "本地服务端";
+const LS_HEALTH_TIMEOUT_MS = 1500;
+const LS_START_TIMEOUT_MS = 20_000;
+const LS_POLL_MS = 500;
+const lsPort = Number(process.env.JAVSCRIBE_LOCAL_SERVE_PORT) > 0
+  ? Number(process.env.JAVSCRIBE_LOCAL_SERVE_PORT)
+  : 8300;
+
+interface LocalServeState {
+  /** 客户端同目录（或 env 覆盖）是否找到服务程序 */
+  detected: boolean;
+  /** 找到的可执行文件路径（未找到为空串；UI 用于展示） */
+  cmd: string;
+  port: number;
+  url: string;
+  /** /health 已就绪 */
+  running: boolean;
+  /** 正在拉起（spawn 已发出、health 未就绪） */
+  starting: boolean;
+  error: string | null;
+}
+
+let lsState: LocalServeState = {
+  detected: false, cmd: "", port: lsPort,
+  url: `http://127.0.0.1:${lsPort}`, running: false, starting: false, error: null,
+};
+let lsEnsuring = false;
+let lsChild: ChildProcess | null = null;
+let lsSpawnedByUs = false;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** 服务程序路径：env 覆盖（e2e/dev）> 打包态 exe 同目录探测 */
+function localServeExePath(): string {
+  const envCmd = (process.env.JAVSCRIBE_LOCAL_SERVE_CMD || "").trim();
+  if (envCmd) return envCmd;
+  const exe = process.platform === "win32" ? "JavScribeServe.exe" : "jav-scribe-serve";
+  const p = path.join(path.dirname(process.execPath), exe);
+  return fs.existsSync(p) ? p : "";
+}
+
+async function lsHealth(): Promise<boolean> {
+  try {
+    const { status, data } = await httpJson<{ ok?: boolean }>(
+      `http://127.0.0.1:${lsPort}/health`,
+      { timeoutMs: LS_HEALTH_TIMEOUT_MS },
+    );
+    return status === 200 && (data as { ok?: boolean } | null)?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function lsPushState(): void {
+  sendToWin("local-serve-state", lsState);
+}
+
+/** 杀 serve 进程树：win 用 taskkill /T（同 CI 约定）；POSIX 杀整个进程组（detached ⇒ 子为组长，覆盖 PyInstaller 父/子进程） */
+function lsKillTree(pid: number, force: boolean): void {
+  if (process.platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+    } catch { /* 已退出 */ }
+    return;
+  }
+  const sig = force ? "SIGKILL" : "SIGTERM";
+  try {
+    process.kill(-pid, sig);
+  } catch {
+    try { process.kill(pid, sig); } catch { /* 已退出 */ }
+  }
+}
+
+function lsSpawn(): void {
+  try {
+    // serve_launcher 约定：首参是 flag 时自动补 serve 子命令
+    const args = ["--port", String(lsPort)];
+    let child: ChildProcess;
+    if (process.platform === "win32") {
+      // 窗口态 exe 无控制台：日志由 serve_launcher 重定向到 ~/.jav_scribe/serve.log
+      child = spawn(lsState.cmd, args, { detached: true, stdio: "ignore", windowsHide: true });
+    } else {
+      // 冻结态 exe 自带日志重定向；dev/脚本形态落 userData/local-serve.log
+      const log = fs.openSync(path.join(app.getPath("userData"), "local-serve.log"), "a");
+      child = spawn(lsState.cmd, args, { detached: true, stdio: ["ignore", log, log] });
+      // 父进程必须立刻 close：子进程已 dup 该 fd；留着会占住 libuv 句柄表，主进程事件循环永不排空
+      fs.closeSync(log);
+    }
+    // 注意：子进程会继承父进程 fd3+（e2e 下可能是 Playwright 的 stdio pipe），若其存活期
+    // 超过父进程（detached），会一直占住这些 pipe 的写端，父进程 stdio 'close' 永不触发
+    // （app.close() 永久挂死）。因此 before-quit 必须同步杀掉本进程树释放 pipe。
+    lsChild = child;
+    lsSpawnedByUs = true;
+    child.on("error", (e) => {
+      lsState.error = "启动失败：" + e.message;
+      lsPushState();
+    });
+    child.on("exit", () => {
+      if (lsChild === child) lsChild = null;
+      if (lsState.running) {
+        lsState.running = false;
+        lsState.starting = false;
+        lsPushState();
+      }
+    });
+    child.unref();
+  } catch (e) {
+    lsState.error = "启动失败：" + (e as Error).message;
+    lsPushState();
+  }
+}
+
+/** whenReady 时 fire-and-forget：不阻塞窗口创建 */
+async function ensureLocalServe(): Promise<void> {
+  if (lsEnsuring) return;
+  lsEnsuring = true;
+  try {
+    const cmd = localServeExePath();
+    lsState = {
+      detected: !!cmd,
+      cmd,
+      port: lsPort,
+      url: `http://127.0.0.1:${lsPort}`,
+      running: false,
+      starting: false,
+      error: null,
+    };
+    lsPushState();
+    if (!cmd) return;
+    if (await lsHealth()) {
+      // 已有实例在线（用户手动起过 / 上次客户端拉起后仍在跑）：直接复用，
+      // 客户端退出时不 kill（lsSpawnedByUs 保持 false）
+      lsState.running = true;
+    } else {
+      lsState.starting = true;
+      lsPushState();
+      lsSpawn();
+      const deadline = Date.now() + LS_START_TIMEOUT_MS;
+      for (;;) {
+        await sleep(LS_POLL_MS);
+        if (await lsHealth()) {
+          lsState.running = true;
+          break;
+        }
+        if (Date.now() > deadline) {
+          lsState.error = "拉起后 20s 仍未就绪——请查看日志或手动运行服务程序";
+          break;
+        }
+      }
+    }
+    lsState.starting = false;
+    if (lsState.running) store.ensure(LS_ENGINE_NAME, lsState.url);
+    lsPushState();
+  } finally {
+    lsEnsuring = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 应用生命周期
 // ---------------------------------------------------------------------------
 
@@ -1402,6 +1581,7 @@ app.whenReady().then(() => {
   initUpdater();
   watchStorePath = path.join(app.getPath("userData"), WATCH_FILE);
   watchLoad();
+  void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
   }
@@ -1413,4 +1593,18 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   app.quit();
+});
+
+// 客户端拉起的 serve 随客户端退出（杀进程树）；用户手动启动的实例不受影响。
+// 必须在 before-quit 同步杀：子进程继承的额外 stdio pipe 只有随其消亡才 EOF，
+// 否则 e2e（Playwright）的 app.close() 永不 resolve。
+app.on("before-quit", () => {
+  if (!lsSpawnedByUs) return;
+  const c = lsChild;
+  lsChild = null;
+  lsSpawnedByUs = false;
+  if (!c || c.pid === undefined) return;
+  const pid = c.pid;
+  lsKillTree(pid, false);
+  setTimeout(() => lsKillTree(pid, true), 500).unref(); // 兜底：500ms 未退出则强杀
 });
