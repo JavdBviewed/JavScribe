@@ -2,6 +2,7 @@
   "name": "jav-scribe-client",
   "desktopName": "JavScribeClient",
   "version": "0.1.0",
+  "packageManager": "pnpm@10.17.0",
   "author": "JavdBviewed",
   "private": true,
   "description": "JavScribe Client — 共享前端（web 形态 + Electron 桌面端）",
