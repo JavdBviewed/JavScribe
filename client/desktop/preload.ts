@@ -3,10 +3,11 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   ExtractResult, FileOpResult, JavDesktop, PickFileResult,
-  PickFolderItem, TCallResult, TProgress, UploadDispatchResult,
+  PickFolderItem, TCallResult, TProgress, UpdateSettings, UpdateState,
+  UploadDispatchResult,
 } from "../core/desktop-bridge";
 
-const api: JavDesktop = {
+const api: Omit<JavDesktop, "update"> = {
   call: (method: string, args?: string[]) =>
     ipcRenderer.invoke("t-call", { method, args }) as Promise<TCallResult>,
 
@@ -60,4 +61,22 @@ const upload = {
     ipcRenderer.invoke("upload-file", args) as Promise<UploadDispatchResult>,
 };
 
-contextBridge.exposeInMainWorld("javDesktop", { ...api, upload });
+// 版本更新（仅打包形态生效；dev 形态 main 恒推 disabled，chip 恒隐藏）
+const update: JavDesktop["update"] = {
+  state: () => ipcRenderer.invoke("update-state") as Promise<UpdateState>,
+  check: () => ipcRenderer.invoke("update-check") as Promise<UpdateState>,
+  download: () => ipcRenderer.invoke("update-download") as Promise<UpdateState>,
+  restart: () => ipcRenderer.invoke("update-restart") as Promise<UpdateState>,
+  ignore: (version: string) => ipcRenderer.invoke("update-ignore", version) as Promise<UpdateState>,
+  getSettings: () => ipcRenderer.invoke("update-settings-get") as Promise<UpdateSettings>,
+  putSettings: (s: UpdateSettings) => ipcRenderer.invoke("update-settings-put", s) as Promise<UpdateSettings>,
+  onState: (cb: (s: UpdateState) => void): (() => void) => {
+    const listener = (_e: unknown, st: UpdateState) => cb(st);
+    ipcRenderer.on("update-state", listener);
+    return () => {
+      ipcRenderer.removeListener("update-state", listener);
+    };
+  },
+};
+
+contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload });

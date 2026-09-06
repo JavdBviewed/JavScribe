@@ -6,7 +6,7 @@
 // （服务端 detail 优先，否则 "HTTP <status>" / "网络错误"）；e.network === true 表示网络层失败。
 
 import type {
-  ConfigItem, Engine, Health, JobRow, ScanResult, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, ScanResult, UpdateInfo, UploadStatus,
 } from "./types";
 
 export type UploadProgress = (loadedBytes: number, totalBytes: number, pct: number) => void;
@@ -54,6 +54,8 @@ export interface Transport {
   uploadAudio(file: File, engine: string, audio: Blob, onProgress: UploadProgress): Promise<UploadDispatch>;
   /** 上传任务阶段轮询（extracting → dispatching → done/error） */
   getUpload(id: string): Promise<UploadStatus>;
+  /** 版本对比（GitHub 最新 Release vs 当前版本）；失败 throw(detail) */
+  getUpdate(): Promise<UpdateInfo>;
   /** 扫描服务机器目录；失败 throw(detail) */
   scan(name: string, path: string): Promise<ScanResult>;
   /** 扫描结果入队；失败 throw(detail 或 "网络错误") */

@@ -43,6 +43,22 @@ export interface FileOpResult {
   network?: boolean;
 }
 
+// ---------- 版本更新（electron-updater，main 进程自持状态机） ----------
+
+export interface UpdateState {
+  /** idle=未检查/无新版（chip=「检查更新」）；disabled=dev 形态或未启用 */
+  status: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error" | "disabled";
+  version?: string;
+  notes?: string;
+  pct?: number;
+  error?: string;
+}
+
+export interface UpdateSettings {
+  enabled: boolean;
+  mirror: string;
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -59,6 +75,19 @@ export interface JavDesktop {
   ): Promise<ExtractResult>;
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
+
+  /** 版本更新（仅打包形态生效；dev 形态 state 恒 disabled） */
+  update: {
+    state(): Promise<UpdateState>;
+    check(): Promise<UpdateState>;
+    download(): Promise<UpdateState>;
+    restart(): Promise<UpdateState>;
+    ignore(version: string): Promise<UpdateState>;
+    getSettings(): Promise<UpdateSettings>;
+    putSettings(s: UpdateSettings): Promise<UpdateSettings>;
+    /** 订阅状态推送；返回取消订阅函数 */
+    onState(cb: (s: UpdateState) => void): () => void;
+  };
 }
 
 /** upload-audio / upload-file 受理结果（serve 201 → job_id） */

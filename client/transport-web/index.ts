@@ -3,7 +3,7 @@
 
 import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, ScanResult, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, ScanResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
 async function jget<T>(url: string): Promise<T> {
@@ -83,6 +83,8 @@ export const webTransport: Transport = {
     jput("/api/engines/" + encodeURIComponent(name), { api_key: apiKey }),
 
   listJobs: () => jget<JobRow[]>("/api/jobs"),
+
+  getUpdate: () => jget<UpdateInfo>("/api/update"),
 
   getResultUrl: (engine, jobId) =>
     `/api/jobs/${encodeURIComponent(engine)}/${encodeURIComponent(jobId)}/result`,

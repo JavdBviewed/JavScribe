@@ -13,7 +13,8 @@
 //   - 错误文案等价 _map_config_error / api_retry
 // 平台能力（原生对话框 / 递归枚举 / ffmpeg 提取 / fs 写回 / 保存下载）走 IPC。
 
-import { app, BrowserWindow, Menu, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, type MenuItemConstructorOptions } from "electron";
+import { autoUpdater } from "electron-updater";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -910,6 +911,236 @@ function registerIpc(): void {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// 版本更新（electron-updater；仅打包形态生效）
+//   - feed：默认 app-update.yml（三期 CI 产出的 github provider，owner/repo 已固化）；
+//     设置「镜像源」后切 generic provider：mirror + "https://github.com/JavdBviewed/JavScribe/releases/download/"
+//     （generic 按平台取清单：win=latest.yml，linux x64=latest-linux.yml——与 electron-builder 产物一致）
+//   - 测试钩子：JAVSCRIBE_UPDATE_FEED 直接覆盖 feed base（e2e 指向本地 mock-update-feed）；
+//     JAVSCRIBE_NO_UPDATE_RELUNCH=1 时「重启安装」只退出不重启（e2e 断言进程退出用）
+//   - dev 形态（!app.isPackaged）：upState 恒 disabled，UI 角标恒隐藏（既有桌面基线零变化）
+// ---------------------------------------------------------------------------
+
+interface UpState {
+  status: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error" | "disabled";
+  version?: string;
+  notes?: string;
+  pct?: number;
+  error?: string;
+}
+
+interface UpSettings {
+  update_check: { enabled: boolean; mirror: string };
+  ignored_versions: string[];
+}
+
+const UP_SETTINGS_FILE = "settings.json";
+const UP_AUTO_CHECK_DELAY_MS = 3000;
+
+let upState: UpState = { status: app.isPackaged ? "idle" : "disabled" };
+let upIgnored: string[] = [];
+let upSettingsPath = "";
+
+function upLoadSettings(): UpSettings {
+  const def: UpSettings = { update_check: { enabled: true, mirror: "" }, ignored_versions: [] };
+  try {
+    const raw = JSON.parse(fs.readFileSync(upSettingsPath, "utf-8")) as Partial<UpSettings>;
+    return {
+      update_check: {
+        enabled: raw.update_check?.enabled !== false,
+        mirror: typeof raw.update_check?.mirror === "string" ? raw.update_check.mirror : "",
+      },
+      ignored_versions: Array.isArray(raw.ignored_versions)
+        ? raw.ignored_versions.filter((v): v is string => typeof v === "string")
+        : [],
+    };
+  } catch {
+    return def; // 无配置/损坏：默认值起步
+  }
+}
+
+function upSaveSettings(s: UpSettings): void {
+  try {
+    fs.mkdirSync(path.dirname(upSettingsPath), { recursive: true });
+    fs.writeFileSync(upSettingsPath, JSON.stringify(s, null, 1));
+  } catch (e) {
+    console.error("[update] 设置写入失败:", (e as Error).message);
+  }
+}
+
+function upSet(patch: Partial<UpState>): void {
+  upState = { ...upState, ...patch };
+  sendToWin("update-state", upState);
+}
+
+/** feed base：测试钩子 > 镜像源(generic) > 空(app-update.yml 的 github provider) */
+function upFeedBase(): string {
+  const hook = process.env.JAVSCRIBE_UPDATE_FEED || "";
+  if (hook) return hook.replace(/\/+$/, "");
+  const mirror = upLoadSettings().update_check.mirror.replace(/\/+$/, "");
+  if (mirror) {
+    return mirror + "/https://github.com/JavdBviewed/JavScribe/releases/download/";
+  }
+  return "";
+}
+
+function upNotesOf(info: { releaseNotes?: unknown }): string {
+  const n = info?.releaseNotes;
+  if (typeof n === "string") return n;
+  if (Array.isArray(n)) {
+    return n
+      .map((x) => (x && typeof x === "object" ? String((x as { note?: unknown }).note ?? "") : String(x)))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function doUpdateCheck(): void {
+  if (!app.isPackaged) {
+    upSet({ status: "disabled" });
+    return;
+  }
+  if (upState.status === "checking") return;
+  upSet({ status: "checking" });
+  autoUpdater
+    .checkForUpdates()
+    .catch((e: Error) => upSet({ status: "error", error: e?.message || String(e) }));
+}
+
+function initUpdater(): void {
+  upSettingsPath = path.join(app.getPath("userData"), UP_SETTINGS_FILE);
+  if (!app.isPackaged) {
+    upState = { status: "disabled" };
+    return; // dev 形态：不接 electron-updater（无 app-update.yml，避免噪声日志）
+  }
+  upIgnored = upLoadSettings().ignored_versions;
+  const base = upFeedBase();
+  if (base) {
+    autoUpdater.setFeedURL({ provider: "generic", url: base });
+  }
+  autoUpdater.autoDownload = false; // 用户点「下载并安装」才下载
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on("checking-for-update", () => upSet({ status: "checking" }));
+  autoUpdater.on("update-available", (info) => {
+    const v = String(info.version || "");
+    if (upIgnored.includes(v)) {
+      upSet({ status: "idle" }); // 忽略列表命中：静默
+      return;
+    }
+    upSet({ status: "available", version: v, notes: upNotesOf(info) });
+  });
+  autoUpdater.on("update-not-available", () => upSet({ status: "idle" }));
+  autoUpdater.on("download-progress", (p) => upSet({ status: "downloading", pct: p.percent }));
+  autoUpdater.on("update-downloaded", (info) =>
+    upSet({ status: "downloaded", version: String(info?.version || upState.version || "") }),
+  );
+  autoUpdater.on("error", (err: Error) => upSet({ status: "error", error: err?.message || String(err) }));
+  if (upLoadSettings().update_check.enabled) {
+    setTimeout(() => doUpdateCheck(), UP_AUTO_CHECK_DELAY_MS); // 启动延迟检查：不抢首屏
+  } else {
+    upSet({ status: "idle" });
+  }
+}
+
+function buildMenu(): void {
+  if (!app.isPackaged) {
+    Menu.setApplicationMenu(null); // dev 形态保持无菜单（既有行为）
+    return;
+  }
+  const isMac = process.platform === "darwin";
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac ? ([{ role: "appMenu" }] as MenuItemConstructorOptions[]) : []),
+    {
+      label: "文件",
+      submenu: [{ role: "quit" }],
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "视图",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "窗口",
+      submenu: isMac
+        ? [{ role: "minimize" }, { role: "zoom" }]
+        : [{ role: "minimize" }, { role: "close" }],
+    },
+    {
+      label: "帮助",
+      submenu: [{ label: "检查更新…", click: () => doUpdateCheck() }],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function registerUpdateIpc(): void {
+  ipcMain.handle("update-state", () => upState);
+  ipcMain.handle("update-check", () => {
+    doUpdateCheck();
+    return upState;
+  });
+  ipcMain.handle("update-download", () => {
+    if (upState.status === "available") {
+      autoUpdater.downloadUpdate().catch((e: Error) =>
+        upSet({ status: "error", error: e?.message || String(e) }),
+      );
+    }
+    return upState;
+  });
+  ipcMain.handle("update-restart", () => {
+    if (upState.status === "downloaded") {
+      if (process.env.JAVSCRIBE_NO_UPDATE_RELUNCH === "1") {
+        app.quit(); // e2e：只断言退出，不真重启
+      } else {
+        autoUpdater.quitAndInstall();
+      }
+    }
+    return upState;
+  });
+  ipcMain.handle("update-ignore", (_ev, version: string) => {
+    if (typeof version === "string" && version) {
+      upIgnored = [...new Set([...upIgnored, version])];
+      const cur = upLoadSettings();
+      cur.ignored_versions = upIgnored;
+      upSaveSettings(cur);
+    }
+    upSet({ status: "idle" });
+    return upState;
+  });
+  ipcMain.handle("update-settings-get", () => upLoadSettings().update_check);
+  ipcMain.handle("update-settings-put", (_ev, s: { enabled?: unknown; mirror?: unknown }) => {
+    const cur = upLoadSettings();
+    cur.update_check = {
+      enabled: s?.enabled !== false,
+      mirror: typeof s?.mirror === "string" ? s.mirror.trim() : "",
+    };
+    upSaveSettings(cur);
+    return cur.update_check;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 应用生命周期
 // ---------------------------------------------------------------------------
@@ -941,8 +1172,10 @@ app.whenReady().then(() => {
     app.setPath("userData", process.env.JAVSCRIBE_CLIENT_USERDATA);
   }
   store = new EngineStore(app.getPath("userData"));
-  Menu.setApplicationMenu(null);
+  buildMenu();
   registerIpc();
+  registerUpdateIpc();
+  initUpdater();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

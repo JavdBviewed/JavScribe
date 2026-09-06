@@ -20,6 +20,7 @@ from . import __version__
 from .api import build_app
 from .config import EngineStore
 from .poller import Poller
+from .update_check import UpdateChecker
 
 log = logging.getLogger("jav-scribe-web")
 
@@ -60,6 +61,7 @@ def main() -> None:
 
     store = EngineStore(data_dir)
     poller = Poller(store, interval_s=interval_s, log=lambda s: log.info(s))
+    updater = UpdateChecker(__version__, log_fn=lambda s: log.info(s))
 
     _started = False
 
@@ -73,10 +75,12 @@ def main() -> None:
             return
         _started = True
         task = asyncio.get_running_loop().create_task(poller.run())
+        update_task = asyncio.get_running_loop().create_task(updater.run())
         log.info(
-            "JavScribe-Web v%s 启动 | 服务 %d 个 | http://0.0.0.0:%d%s",
+            "JavScribe-Web v%s 启动 | 服务 %d 个 | 更新检查 %s | http://0.0.0.0:%d%s",
             __version__,
             len(store.engines),
+            "开" if updater.snapshot([])["enabled"] else "关",
             port,
             f" + https://0.0.0.0:{tls_port}" if tls_port > 0 else "",
         )
@@ -84,9 +88,10 @@ def main() -> None:
             yield
         finally:
             poller.stop()
-            await task
+            update_task.cancel()
+            await asyncio.gather(task, update_task, return_exceptions=True)
 
-    app = build_app(store, poller, lifespan=lifespan)
+    app = build_app(store, poller, updater=updater, lifespan=lifespan)
     servers = [uvicorn.Server(uvicorn.Config(
         app, host="0.0.0.0", port=port, log_level="warning"))]
     if tls_port > 0:

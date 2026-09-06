@@ -9,7 +9,7 @@
 
 import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, ScanResult, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, ScanResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -98,6 +98,15 @@ export const desktopTransport: Transport = {
   deleteEngine: (name) => call("deleteEngine", name),
   putEngineKey: (name, apiKey) => call("putEngineKey", name, apiKey),
   listJobs: () => call<JobRow[]>("listJobs"),
+
+  // 桌面端更新走 main 进程 electron-updater（window.javDesktop.update.*），
+  // 此占位恒 disabled，UI 桌面分支不会调用
+  getUpdate: () =>
+    Promise.resolve({
+      enabled: false, current: "", latest_app: null, latest_client: null,
+      has_update: false, commands: { docker: "", source: "" },
+      last_error: null, last_checked: null,
+    }),
 
   getResultUrl(engine, jobId) {
     const e = urlCache.get(engine);

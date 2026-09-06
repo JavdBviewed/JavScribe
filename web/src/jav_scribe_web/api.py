@@ -21,6 +21,7 @@ from .config import EngineStore
 from .engines.javscribe import JavScribeEngine
 from .poller import Poller
 from .srt_sanitizer import sanitize_srt_bytes
+from .update_check import UpdateChecker
 
 STATIC_DIR = Path(__file__).parent / "static"
 _log = logging.getLogger("jav-scribe-web")
@@ -111,7 +112,7 @@ class UploadTask:
         }
 
 
-def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
+def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None = None, lifespan=None) -> FastAPI:
     app = FastAPI(title="JavScribe-Web", version=__version__, lifespan=lifespan)
 
     @app.middleware("http")
@@ -146,6 +147,14 @@ def build_app(store: EngineStore, poller: Poller, lifespan=None) -> FastAPI:
             "engines": len(infos),
             "online": sum(1 for i in infos if i.online),
         }
+
+    @app.get("/api/update")
+    async def api_update() -> dict:
+        # 版本对比 + 更新引导（桌面端另有 electron-updater 真自动更新，见 client/desktop/main.ts）
+        if updater is None:
+            return {"enabled": False, "current": __version__, "has_update": False}
+        versions = [i.version for i in poller.engines.values() if i.version]
+        return updater.snapshot(versions)
 
     @app.get("/api/engines")
     async def api_list_engines() -> list[dict]:

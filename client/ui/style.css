@@ -625,6 +625,70 @@ input:focus, select:focus {
   to { opacity: 1; transform: none; }
 }
 
+/* ---------- 更新角标（footer chip，web/desktop 共享；hidden 时零占位） ---------- */
+.up-chip {
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--fg);
+  background: transparent;
+  align-self: center;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.up-chip:hover { border-color: var(--fg); }
+.up-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.up-chip.on:hover { background: var(--accent); color: var(--surface-2); }
+
+/* ---------- 更新弹窗内容 ---------- */
+.up-sec-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 14px 0 6px;
+}
+.up-changelog {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+.up-cmds { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.up-cmd-opt {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.up-cmd-opt input { accent-color: var(--accent); }
+.up-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.up-cmd-text {
+  flex: 1 1 320px;
+  display: block;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  word-break: break-all;
+}
+.up-link { color: var(--accent); text-decoration: none; }
+.up-link:hover { text-decoration: underline; }
+
 /* ---------- footer ---------- */
 footer {
   position: relative;

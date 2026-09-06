@@ -28,5 +28,12 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
     },
+    {
+      // electron-updater generic feed（更新链路 e2e；8304）
+      command: "node client/tests/e2e/mock-update-feed.mjs 8304",
+      url: "http://127.0.0.1:8304/latest-linux.yml",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
   ],
 });

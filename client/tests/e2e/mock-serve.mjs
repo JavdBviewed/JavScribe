@@ -47,6 +47,7 @@ const SCAN_DIRS = Object.keys(SCAN_TREE);
 
 // ---- 状态 ----
 const state = {
+  version: VERSION,     // 可经 /_mock/version 切换（更新检查 e2e：模拟服务落后于最新镜像）
   jobs: new Map(),      // id -> job
   uploads: [],          // PUT /upload 收到的载荷（测试断言：只传 opus）
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
@@ -171,7 +172,14 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; return send(200, { ok: true }); }
+      if (sub === "version") {
+        return readBody().then((b) => {
+          const v = b && JSON.parse(b).version;
+          if (typeof v === "string" && /^\d+\.\d+/.test(v)) state.version = v;
+          return send(200, { ok: true, version: state.version });
+        });
+      }
       if (sub === "seed") {
         return readBody().then((b) => {
           const { n = 25, status = "done", skipped = 0, progress = 0 } = b ? JSON.parse(b) : {};
@@ -220,7 +228,7 @@ const server = http.createServer((req, res) => {
   // ---- GET ----
   if (req.method === "GET") {
     if (!parts.length || parts[0] === "health") {
-      return send(200, { ok: true, app: "JavScribe", version: VERSION, profile: "default", device: "cuda", jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
     }
     if (parts[0] === "config") {
       if (!checkKey()) return;

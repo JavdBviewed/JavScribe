@@ -113,6 +113,45 @@ export async function launchApp(userData: string, extraEnv: Record<string, strin
   });
 }
 
+// ---------------------------------------------------------------------------
+// 打包形态（release/linux-unpacked）——更新链路 e2e 专用
+//  - JAVSCRIBE_UPDATE_FEED：electron-updater generic feed 指向本地 mock-update-feed(8304)
+//  - JAVSCRIBE_NO_UPDATE_RELUNCH=1：「重启并安装」只 app.quit()，e2e 断言进程退出
+//  - ffmpeg 随包 resources（extraResources），无需 JAVSCRIBE_FFMPEG
+// ---------------------------------------------------------------------------
+
+export const PACKED = join(ROOT, "release", "linux-unpacked");
+export const PACKED_BIN = join(PACKED, "jav-scribe-client");
+
+export async function launchPackedApp(userData: string, extraEnv: Record<string, string> = {}) {
+  return electron.launch({
+    executablePath: PACKED_BIN,
+    args: ["--no-sandbox"],
+    env: {
+      ...process.env,
+      JAVSCRIBE_CLIENT_USERDATA: userData,
+      JAVSCRIBE_ENGINES: `mock=${MOCK}`,
+      JAVSCRIBE_CLIENT_FRAMELESS: "1",
+      JAVSCRIBE_UPDATE_FEED: "http://127.0.0.1:8304/",
+      JAVSCRIBE_NO_UPDATE_RELUNCH: "1",
+      // e2e 跑的是 linux-unpacked（非 AppImage 运行时）：electron-updater 的 Linux 实现
+      // （AppImageUpdater）默认只在 APPIMAGE 环境变量存在时启用检查/下载链路。
+      // 真实 AppImage 运行时由内核 magic 自动设置该变量，这里仿真之（值=当前二进制路径，
+      // 仅用于差分下载的「旧文件」探测，mock 无 blockmap → 自动落回全量下载）。
+      APPIMAGE: PACKED_BIN,
+      ...extraEnv,
+    },
+  });
+}
+
+/** 打包形态冷启动 + 等引擎在线 */
+export async function relaunchPacked(userData: string, extraEnv: Record<string, string> = {}) {
+  const app = await launchPackedApp(userData, extraEnv);
+  const page = await app.firstWindow();
+  await waitForReady(page);
+  return { app, page };
+}
+
 /** 冷启动 + 等引擎在线（health 文案 v0.1.0 · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });

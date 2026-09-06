@@ -4,7 +4,8 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UploadStatus } from "../core/types";
+import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
+import type { UpdateSettings, UpdateState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { $, esc } from "./dom";
@@ -192,7 +193,241 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       notifyJobChanges(jobs);
       updateTitle(jobs);
     } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
+    if (platform.kind === "web") void refreshUpdateWeb();
   }
+
+  // ---------- 更新检查（footer chip 共享节点：web=工作台 /api/update 版本对比；desktop=main 进程 electron-updater） ----------
+  const upChip = $("up-chip") as HTMLSpanElement;
+  let upModalOpen = false;
+
+  interface UpBridge {
+    state(): Promise<UpdateState>;
+    check(): Promise<UpdateState>;
+    download(): Promise<UpdateState>;
+    restart(): Promise<UpdateState>;
+    ignore(v: string): Promise<UpdateState>;
+    getSettings(): Promise<UpdateSettings>;
+    putSettings(s: UpdateSettings): Promise<UpdateSettings>;
+    onState(cb: (s: UpdateState) => void): () => void;
+  }
+
+  function upBridge(): UpBridge | null {
+    return (window as unknown as { javDesktop?: { update?: UpBridge } }).javDesktop?.update ?? null;
+  }
+
+  // ---- web 形态：GET /api/update（独立链路，失败静默，绝不拖累主刷新） ----
+  let updateWeb: UpdateInfo | null = null;
+  async function refreshUpdateWeb() {
+    try {
+      const u = await t.getUpdate();
+      updateWeb = u.enabled && u.has_update && u.latest_app ? u : null;
+    } catch (_e) {
+      updateWeb = null; // 更新检查失败静默降级，不打扰看板
+    }
+    renderUpChip();
+  }
+
+  // ---- desktop 形态：main 进程状态机（IPC 推送，订阅在 initApp 尾部接线） ----
+  let upState: UpdateState = { status: "disabled" };
+  let upSettings: UpdateSettings | null = null;
+  let upManualCheck = false;
+
+  function renderUpChip() {
+    if (platform.kind === "web") {
+      if (updateWeb && updateWeb.latest_app) {
+        upChip.hidden = false;
+        upChip.classList.add("on");
+        upChip.textContent = "新版本 " + updateWeb.latest_app.version;
+      } else {
+        upChip.hidden = true;
+        upChip.classList.remove("on");
+      }
+      return;
+    }
+    if (!upBridge()) { upChip.hidden = true; return; }
+    const s = upState;
+    let text = "";
+    let on = false;
+    switch (s.status) {
+      case "idle": text = "检查更新"; break;
+      case "checking": text = "检查更新中…"; break;
+      case "available": text = "新版本 " + (s.version || ""); on = true; break;
+      case "downloading": text = "下载中 " + Math.round(s.pct ?? 0) + "%"; on = true; break;
+      case "downloaded": text = "重启安装 v" + (s.version || ""); on = true; break;
+      default: upChip.hidden = true; return; // error/disabled：静默降级，菜单仍可手动检查
+    }
+    upChip.hidden = false;
+    upChip.classList.toggle("on", on);
+    upChip.textContent = text;
+  }
+
+  function upCheckDesktop(manual: boolean) {
+    const b = upBridge();
+    if (!b) return;
+    upManualCheck = manual;
+    void b.check().catch(() => { /* 错误经 onState 状态机统一处理 */ });
+  }
+
+  function upChipDesktopClick() {
+    const s = upState;
+    if (s.status === "idle" || s.status === "checking") {
+      upCheckDesktop(true);
+      return;
+    }
+    if (s.status === "available" || s.status === "downloading" || s.status === "downloaded") {
+      openUpdateDesktop();
+    }
+  }
+
+  // ---- web 弹窗：changelog + 一键复制更新命令（部署形态选择记忆） ----
+  function openUpdateWeb() {
+    const u = updateWeb;
+    if (!u || !u.latest_app) return;
+    const rel = u.latest_app;
+    upModalOpen = true;
+    showModal("新版本 " + rel.version);
+    const body = $("modal-body");
+    const savedCmd = localStorage.getItem("javweb_update_cmd") === "source" ? "source" : "docker";
+    body.innerHTML = `
+    <div class="set-note">当前工作台 v${esc(u.current)} → 最新 ${esc(rel.version)}${
+      u.latest_client ? `<br>桌面端 JavScribe Client 已有 ${esc(u.latest_client.version)}（应用内自动检查更新，见 GitHub Releases）` : ""
+    }。</div>
+    <div class="up-sec-label">更新说明</div>
+    <pre class="up-changelog">${esc(rel.body || "（无发布说明）")}</pre>
+    <div class="up-sec-label">更新命令（选择你的部署形态）</div>
+    <div class="up-cmds">
+      <label class="up-cmd-opt"><input type="radio" name="up-cmd" value="docker"${savedCmd === "docker" ? " checked" : ""}><span>Docker 镜像部署（compose pull）</span></label>
+      <label class="up-cmd-opt"><input type="radio" name="up-cmd" value="source"${savedCmd === "source" ? " checked" : ""}><span>源码部署（compose build）</span></label>
+    </div>
+    <div class="up-row">
+      <code id="up-cmd-text" class="mono up-cmd-text"></code>
+      <button type="button" class="btn" id="up-cmd-copy">复制命令</button>
+    </div>
+    <div class="up-row">
+      <a class="up-link mono" href="${esc(rel.url)}" target="_blank" rel="noopener">查看 Release 详情 ↗</a>
+    </div>`;
+    const textEl = $("up-cmd-text") as HTMLElement;
+    const syncCmd = () => {
+      const v = (body.querySelector<HTMLInputElement>('input[name="up-cmd"]:checked') || null)?.value || "docker";
+      localStorage.setItem("javweb_update_cmd", v);
+      textEl.textContent = v === "docker" ? u.commands.docker : u.commands.source;
+    };
+    for (const el of body.querySelectorAll<HTMLInputElement>('input[name="up-cmd"]')) {
+      el.addEventListener("change", syncCmd);
+    }
+    syncCmd();
+    ($("up-cmd-copy") as HTMLButtonElement).onclick = async () => {
+      const ok = await copyText(textEl.textContent || "");
+      toast(ok ? "命令已复制" : "复制失败，请手动选择复制", ok ? "ok" : "err");
+    };
+  }
+
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_e) { /* 落到 execCommand 兜底 */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  // ---- desktop 弹窗：版本对比 + 下载/稍后/忽略 + 高级设置（自动检查/镜像源） ----
+  function openUpdateDesktop() {
+    const s = upState;
+    if (s.status !== "available" && s.status !== "downloading" && s.status !== "downloaded" && s.status !== "error") return;
+    upModalOpen = true;
+    showModal("检查更新");
+    const body = $("modal-body");
+    const curVer = ($("foot-ver").textContent || "").replace(/^v/, "");
+    if (s.status === "available") {
+      body.innerHTML = `
+      <div class="set-note">当前 v${esc(curVer || "?")} → 最新 v${esc(s.version || "?")}。下载完成后需重启应用完成安装。</div>
+      <div class="up-sec-label">更新说明</div>
+      <pre class="up-changelog">${esc(s.notes || "（无发布说明）")}</pre>
+      <div class="up-row">
+        <button type="button" class="btn btn-primary" id="up-dl">下载并安装</button>
+        <button type="button" class="btn" id="up-later">稍后提醒</button>
+        <button type="button" class="btn" id="up-ignore">忽略此版本</button>
+      </div>
+      <div class="up-sec-label">高级</div>
+      <label class="chk-row"><input type="checkbox" id="up-enabled"${upSettings?.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label>
+      <label class="field"><span class="field-label">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
+      <input id="up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upSettings?.mirror || "")}"></label>
+      <div class="up-row">
+        <button type="button" class="btn" id="up-save-set">保存设置</button>
+        <span class="muted small">镜像源下次启动应用时生效。</span>
+      </div>`;
+      ($("up-dl") as HTMLButtonElement).onclick = () => {
+        void upBridge()?.download().catch(() => {});
+        toast("开始下载新版本…");
+      };
+      ($("up-later") as HTMLButtonElement).onclick = () => hideModal();
+      ($("up-ignore") as HTMLButtonElement).onclick = () => {
+        if (s.version) void upBridge()?.ignore(s.version).catch(() => {});
+        hideModal();
+      };
+      ($("up-save-set") as HTMLButtonElement).onclick = async () => {
+        const b = upBridge();
+        if (!b) return;
+        const next = {
+          enabled: ($("up-enabled") as HTMLInputElement).checked,
+          mirror: (($("up-mirror") as HTMLInputElement).value || "").trim(),
+        };
+        try {
+          upSettings = await b.putSettings(next);
+          toast("设置已保存", "ok");
+        } catch (e2) {
+          toast((e2 as Error).message, "err");
+        }
+      };
+      return;
+    }
+    if (s.status === "downloading") {
+      const pct = Math.round(s.pct ?? 0);
+      body.innerHTML = `
+      <div class="set-note">正在下载 v${esc(s.version || "")}… ${pct}%（全量安装包，请勿关闭应用）</div>
+      <div class="bar live"><div style="width:${pct}%"></div></div>`;
+      return;
+    }
+    if (s.status === "downloaded") {
+      body.innerHTML = `
+      <div class="set-note">v${esc(s.version || "")} 已下载完成。点击按钮重启并完成安装。</div>
+      <div class="up-row">
+        <button type="button" class="btn btn-primary" id="up-restart">重启并安装</button>
+        <button type="button" class="btn" id="up-later">暂不</button>
+      </div>`;
+      ($("up-restart") as HTMLButtonElement).onclick = () => { void upBridge()?.restart().catch(() => {}); };
+      ($("up-later") as HTMLButtonElement).onclick = () => hideModal();
+      return;
+    }
+    body.innerHTML = `
+    <div class="set-note err">${esc(s.error || "检查更新失败")}</div>
+    <div class="muted small">若网络无法直连 GitHub，可设置镜像源后重试。</div>`;
+  }
+
+  upChip.onclick = () => {
+    if (platform.kind === "web") openUpdateWeb();
+    else upChipDesktopClick();
+  };
+  upChip.onkeydown = (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      upChip.click();
+    }
+  };
 
   // ---------- 服务卡片（按名称就地更新：轮询不重建 DOM，入场动画只在新卡片播放，避免闪烁） ----------
   interface EngCardEl extends HTMLElement { _html?: string; }
@@ -931,6 +1166,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function hideModal() {
     modalBackdrop.hidden = true;
     $("modal-body").innerHTML = "";
+    upModalOpen = false;
   }
 
   modalX.onclick = hideModal;
@@ -1187,6 +1423,24 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
   tick();
   setInterval(tick, 1000);
+
+  // desktop 形态：接 main 进程更新状态机（dev 形态 state 恒 disabled → chip 恒隐藏）
+  if (platform.kind === "desktop") {
+    const b = upBridge();
+    if (b) {
+      b.onState((s2) => {
+        upState = s2;
+        renderUpChip();
+        if (upModalOpen) openUpdateDesktop(); // 状态推进（下载进度等）时重建弹窗内容
+        if (s2.status === "error" && upManualCheck) {
+          upManualCheck = false;
+          toast(s2.error || "检查更新失败", "err");
+        }
+      });
+      void b.state().then((s2) => { upState = s2; renderUpChip(); }).catch(() => {});
+      void b.getSettings().then((s2) => { upSettings = s2; }).catch(() => {});
+    }
+  }
 
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);

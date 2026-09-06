@@ -37,10 +37,17 @@ export default defineConfig({
         "D=$(mktemp -d /tmp/javweb-e2e-data.XXXXXX) && cd web && " +
         "JAV_WEB_PORT=8901 JAV_WEB_TLS_PORT=0 JAV_DATA_DIR=$D " +
         "JAV_ENGINES='mock=http://127.0.0.1:8301' JAV_POLL_INTERVAL_S=1 " +
+        "JAV_UPDATE_CHECK=on JAV_UPDATE_GITHUB_BASE=http://127.0.0.1:8303 JAV_UPDATE_INTERVAL_S=3 " +
         "uv run jav-scribe-web",
       url: "http://127.0.0.1:8901/api/health",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
+    },
+    {
+      command: "node client/tests/e2e/mock-github.mjs 8303",
+      url: "http://127.0.0.1:8303/repos/JavdBviewed/JavScribe/releases",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
     },
   ],
 });

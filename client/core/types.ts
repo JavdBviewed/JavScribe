@@ -83,3 +83,29 @@ export interface ScanResult {
   path?: string;
   truncated?: boolean;
 }
+
+/** GitHub Release 条目（/api/update 版本对比用） */
+export interface UpdateRelease {
+  version: string;
+  name: string;
+  body: string;
+  url: string;
+  published_at: string | null;
+}
+
+/** GET /api/update：工作台版本对比快照 */
+export interface UpdateInfo {
+  enabled: boolean;
+  /** 当前工作台版本 */
+  current: string;
+  /** 最新 serve/web 镜像 Release（tag v*） */
+  latest_app: UpdateRelease | null;
+  /** 最新桌面端 Release（tag client-v*） */
+  latest_client: UpdateRelease | null;
+  /** 工作台或任一已登记服务落后于最新镜像 */
+  has_update: boolean;
+  /** 一键复制的更新命令（两种部署形态） */
+  commands: { docker: string; source: string };
+  last_error: string | null;
+  last_checked: number | null;
+}
