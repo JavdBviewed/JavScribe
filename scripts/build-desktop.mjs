@@ -45,7 +45,9 @@ const REWRITES = [
 ];
 
 function rewriteHtml() {
-  let html = readFileSync(SRC_HTML, "utf8");
+  // Windows runner checkout 可能展开 CRLF（text=auto + git 自动检测）；
+  // 统一归一化 LF 再做精确匹配，产物恒为 LF
+  let html = readFileSync(SRC_HTML, "utf8").replace(/\r\n/g, "\n");
   for (const [from, to] of REWRITES) {
     const n = html.split(from).length - 1;
     if (n !== 1) throw new Error(`HTML 替换失败：命中 ${n} 次（应为 1）：${from.slice(0, 60)}…`);
@@ -61,9 +63,12 @@ function run(cmd, args) {
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
 
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 rewriteHtml();
-run(pnpm, ["vite", "build", "--config", "vite.desktop.config.ts"]);
+// vite JS 入口直跑（等价 `pnpm vite build`，但绕开 Windows .cmd shim 的 spawn 问题）
+run(process.execPath, [
+  resolve(ROOT, "node_modules/vite/bin/vite.js"),
+  "build", "--config", "vite.desktop.config.ts",
+]);
 // vite 按输入文件名产出 index-desktop.html；main 进程 loadFile 固定找 index.html
 import { existsSync, renameSync, rmSync } from "node:fs";
 const emitted = resolve(ROOT, "client/dist-desktop/index-desktop.html");

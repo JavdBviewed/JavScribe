@@ -120,7 +120,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build:desktop
       - name: e2e 系统依赖（Electron 运行库）
-        run: sudo -E pnpm exec playwright install-deps
+        # sudo 会重置 PATH 到 secure_path，pnpm 在 toolcache 里会丢；用 env 在 sudo 内重建 PATH
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps
       - name: e2e 冒烟（桌面子集：functional + ui-structure，mock serve，xvfb）
         env:
           JAVSCRIBE_FFMPEG: client/packaging/ffmpeg/ffmpeg

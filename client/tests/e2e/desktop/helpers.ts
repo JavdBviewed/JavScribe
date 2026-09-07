@@ -157,7 +157,7 @@ export async function relaunchPacked(userData: string, extraEnv: Record<string, 
   return { app, page };
 }
 
-/** 冷启动 + 等引擎在线（health 文案 v0.2.1 · 服务 1/1 在线） */
+/** 冷启动 + 等引擎在线（health 文案 v0.2.2 · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });
 }
