@@ -120,12 +120,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist-all
+      - name: 断言产物齐全（防空 release 静默成功）
+        run: |
+          ls -lh dist-all/release-windows/JavScribeServe-win-x64.zip \
+                 dist-all/release-linux/jav-scribe-serve-linux-x64.zip
       - name: 建 GitHub Release（tag 同名）
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist-all/release-windows/release/JavScribeServe-win-x64.zip
-            dist-all/release-linux/release/jav-scribe-serve-linux-x64.zip
+            dist-all/release-windows/JavScribeServe-win-x64.zip
+            dist-all/release-linux/jav-scribe-serve-linux-x64.zip
           body: |
             JavScribe Serve（${{ github.ref_name }}）—— headless 服务端，无 GUI。
 
