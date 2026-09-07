@@ -6,6 +6,7 @@
 //   ④ 写 dist-desktop/package.json（app.getVersion() 依赖）
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import esbuild from "esbuild";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -68,20 +69,21 @@ import { existsSync, renameSync, rmSync } from "node:fs";
 const emitted = resolve(ROOT, "client/dist-desktop/index-desktop.html");
 if (existsSync(emitted)) renameSync(emitted, resolve(ROOT, "client/dist-desktop/index.html"));
 rmSync(OUT_HTML, { force: true });
-run("node", [
-  resolve(ROOT, "node_modules/esbuild/bin/esbuild"),
-  "client/desktop/main.ts",
-  "--bundle", "--platform=node", "--format=cjs", "--target=node20",
-  "--external:electron",
-  "--outfile=client/dist-desktop/main.cjs",
-]);
-run("node", [
-  resolve(ROOT, "node_modules/esbuild/bin/esbuild"),
-  "client/desktop/preload.ts",
-  "--bundle", "--platform=node", "--format=cjs", "--target=node20",
-  "--external:electron",
-  "--outfile=client/dist-desktop/preload.cjs",
-]);
+for (const [entry, out] of [
+  ["client/desktop/main.ts", "client/dist-desktop/main.cjs"],
+  ["client/desktop/preload.ts", "client/dist-desktop/preload.cjs"],
+]) {
+  console.log(`[build-desktop] $ esbuild ${entry} → ${out}`);
+  await esbuild.build({
+    entryPoints: [resolve(ROOT, entry)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    external: ["electron"],
+    outfile: resolve(ROOT, out),
+  });
+}
 // 版本跟随根 package.json（electron-builder 打出的安装包版本一致）
 const rootPkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
 writeFileSync(

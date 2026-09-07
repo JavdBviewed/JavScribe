@@ -39,8 +39,9 @@ jobs:
             echo "::error::tag 版本 $want 与 pyproject.toml 版本 $have 不一致"
             exit 1
           fi
-      - run: python -m pip install --upgrade pip && python -m pip install pyinstaller
-      - run: python -m pyinstaller --noconfirm --clean jav-scribe-serve.spec
+      - name: 安装 pyinstaller + pywinpty（spec 内 collect_all("winpty") 依赖构建环境有 winpty）
+        run: python -m pip install --upgrade pip && python -m pip install pyinstaller pywinpty
+      - run: python -m PyInstaller --noconfirm --clean jav-scribe-serve.spec
       - name: 冒烟：启动 exe，/health 探活（零配置首启必须能起）
         shell: bash
         run: |
@@ -85,7 +86,7 @@ jobs:
             exit 1
           fi
       - run: python3 -m pip install --upgrade pip && python3 -m pip install pyinstaller
-      - run: python3 -m pyinstaller --noconfirm --clean jav-scribe-serve.spec
+      - run: python3 -m PyInstaller --noconfirm --clean jav-scribe-serve.spec
       - name: 冒烟：启动 exe，/health 探活（零配置首启必须能起）
         run: |
           ./dist/jav-scribe-serve &

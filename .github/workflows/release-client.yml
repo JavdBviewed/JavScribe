@@ -119,6 +119,8 @@ jobs:
       - run: node scripts/fetch-ffmpeg.mjs linux
       - run: pnpm typecheck
       - run: pnpm build:desktop
+      - name: e2e 系统依赖（Electron 运行库）
+        run: sudo -E pnpm exec playwright install-deps
       - name: e2e 冒烟（桌面子集：functional + ui-structure，mock serve，xvfb）
         env:
           JAVSCRIBE_FFMPEG: client/packaging/ffmpeg/ffmpeg

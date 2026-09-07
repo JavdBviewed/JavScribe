@@ -4,7 +4,7 @@ import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   // 页面已随 fixture 冷启动完成（引擎 mock 在线、Key 预置）
-  await expect(page.locator("#health")).toHaveText(/v0\.2\.0 · 服务 1\/1 在线/);
+  await expect(page.locator("#health")).toHaveText(/v0\.2\.1 · 服务 1\/1 在线/);
 });
 
 test("页头与板块顺序", async ({ page }) => {
@@ -87,7 +87,7 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
 
 test("页脚与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
   await expect(page.locator("footer .mono").first()).toHaveText("JAVSCRIBE-CLIENT");
-  await expect(page.locator("footer #foot-ver")).toHaveText("v0.2.0");
+  await expect(page.locator("footer #foot-ver")).toHaveText("v0.2.1");
   await expect(page.getByText("看板 5s · 生成 1s")).toBeVisible();
   await expect(page.locator("#modal-backdrop")).toBeHidden();
   await expect(page.locator("#modal")).toHaveAttribute("role", "dialog");
