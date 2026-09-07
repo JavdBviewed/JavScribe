@@ -70,8 +70,10 @@ jobs:
         shell: bash
         env:
           JAVSCRIBE_FFMPEG: client/packaging/ffmpeg/ffmpeg.exe
+        # --reporter=list,github：失败断言以 annotation 写入 job（API/UI 可见，免翻全量日志）
         run: |
           pnpm exec playwright test --config playwright.desktop.config.ts \
+            --reporter=list,github \
             client/tests/e2e/desktop/functional.spec.ts \
             client/tests/e2e/desktop/ui-structure.spec.ts
       - name: 打包（NSIS + portable + zip）
@@ -125,8 +127,10 @@ jobs:
       - name: e2e 冒烟（桌面子集：functional + ui-structure，mock serve，xvfb）
         env:
           JAVSCRIBE_FFMPEG: client/packaging/ffmpeg/ffmpeg
+        # --reporter=list,github：失败断言以 annotation 写入 job（API/UI 可见，免翻全量日志）
         run: |
           xvfb-run -a pnpm exec playwright test --config playwright.desktop.config.ts \
+            --reporter=list,github \
             client/tests/e2e/desktop/functional.spec.ts \
             client/tests/e2e/desktop/ui-structure.spec.ts
       - name: 打包（AppImage + deb + zip）

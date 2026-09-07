@@ -9,10 +9,10 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DIST, MOCK, MOCK_KEY, assertDistBuilt, ensureFixtures, mockReset } from "./helpers";
 
-const MOCK_SERVE = new URL("../mock-serve.mjs", import.meta.url).pathname;
+const MOCK_SERVE = fileURLToPath(new URL("../mock-serve.mjs", import.meta.url));
 const PORT_A = 8395; // A：由客户端拉起
 const PORT_B = 8396; // B：未检测（端口应无监听）
 const PORT_C = 8397; // C：预启动实例，验证不重复拉起

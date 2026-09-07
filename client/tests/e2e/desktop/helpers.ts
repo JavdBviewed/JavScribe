@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 export const MOCK = "http://127.0.0.1:8302";
 export const MOCK_KEY = "mock-key-123";
-export const FIXTURES = new URL("../fixtures", import.meta.url).pathname;
+export const FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
 export const DIST = join(ROOT, "client", "dist-desktop");
