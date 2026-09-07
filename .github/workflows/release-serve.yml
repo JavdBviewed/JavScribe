@@ -124,30 +124,28 @@ jobs:
         run: |
           ls -lh dist-all/release-windows/JavScribeServe-win-x64.zip \
                  dist-all/release-linux/jav-scribe-serve-linux-x64.zip
-      - name: 建 GitHub Release（tag 同名；幂等，失败可单独重跑本 job）
+      - name: 建 GitHub Release（tag 同名；幂等，可单独重跑）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
+          # POSIX 安全（bash/dash 均可）：不用 pipefail / ERR trap，显式 if ! 检查
+          set -u
+          echo "diag: shell=$0 bash=${BASH_VERSION:-N/A} gh=$(command -v gh || echo MISSING) tag=${GITHUB_REF#refs/tags/} cwd=$(pwd)"
           TAG="${GITHUB_REF#refs/tags/}"
-          cat > release-body.md <<'EOF'
-          JavScribe Serve —— headless 服务端，无 GUI。
-
-          - **Windows**：`JavScribeServe.exe`，双击即 serve（无控制台窗口）
-          - **Linux**：`jav-scribe-serve` 单文件
-          - 默认端口 8300，日志 `~/.jav_scribe/serve.log`，配置 `~/.jav_scribe/config.json`
-          - 与 JavScribe Client 放同一目录时，客户端自动拉起并连接
-          - 前置要求见包内 `README.txt`（ChickenRice 引擎 + 模型 + ffmpeg；服务端本体零第三方依赖，引擎/模型体积不在本包内）
-          EOF
-          # 失败时把报错尾部写成 annotation（job 日志 API 需 admin，annotation 匿名可读）
-          if ! out="$(
-            {
-              gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes-file release-body.md
-              gh release upload "$TAG" \
-                dist-all/release-windows/JavScribeServe-win-x64.zip \
-                dist-all/release-linux/jav-scribe-serve-linux-x64.zip --clobber
-            } 2>&1)"; then
-            echo "::error title=release-failed::$(echo "$out" | tail -n 5 | tr '\n' ' ')"
-            echo "$out" | tail -n 20
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在 → 仅覆盖上传"
+          else
+            echo "创建 release $TAG"
+            if ! gh release create "$TAG" --title "$TAG" --notes "JavScribe Serve — headless 服务端（无 GUI）"; then
+              echo "::error title=release-create-failed::gh release create 失败（报错见上方日志）"
+              exit 1
+            fi
+          fi
+          if ! gh release upload "$TAG" \
+            dist-all/release-windows/JavScribeServe-win-x64.zip \
+            dist-all/release-linux/jav-scribe-serve-linux-x64.zip --clobber; then
+            echo "::error title=release-upload-failed::gh release upload 失败（报错见上方日志）"
             exit 1
           fi
+          echo "release 资产："
+          gh release view "$TAG" --json assets --jq '.assets[].name' || true

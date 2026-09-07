@@ -154,29 +154,26 @@ jobs:
           ls -lh dist-all/release-windows/ dist-all/release-linux/
           test -n "$(ls -A dist-all/release-windows)" || { echo "::error title=release::windows 产物为空"; exit 1; }
           test -n "$(ls -A dist-all/release-linux)" || { echo "::error title=release::linux 产物为空"; exit 1; }
-      - name: 建 GitHub Release（tag 同名；幂等，失败可单独重跑本 job）
+      - name: 建 GitHub Release（tag 同名；幂等，可单独重跑）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
+          # POSIX 安全（bash/dash 均可）：不用 pipefail / ERR trap，显式 if ! 检查
+          set -u
+          echo "diag: shell=$0 bash=${BASH_VERSION:-N/A} gh=$(command -v gh || echo MISSING) tag=${GITHUB_REF#refs/tags/} cwd=$(pwd)"
           TAG="${GITHUB_REF#refs/tags/}"
-          cat > release-body.md <<'EOF'
-          JavScribe Client —— 未签名构建（签名/公证为后续议题）。
-
-          **Windows**：NSIS 安装包 / portable 单文件 / zip
-          **Linux**：AppImage / deb / zip
-
-          - 随包静态 ffmpeg：首次启动即可本地提音轨，无需系统安装
-            （可用环境变量 `JAVSCRIBE_FFMPEG` 覆盖）
-          - 多字幕服务登记、API Key 本地存储、srt 写回原目录均为原生能力
-          EOF
-          # 失败时把报错尾部写成 annotation（job 日志 API 需 admin，annotation 匿名可读）
-          if ! out="$(
-            {
-              gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes-file release-body.md
-              gh release upload "$TAG" dist-all/release-windows/* dist-all/release-linux/* --clobber
-            } 2>&1)"; then
-            echo "::error title=release-failed::$(echo "$out" | tail -n 5 | tr '\n' ' ')"
-            echo "$out" | tail -n 20
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在 → 仅覆盖上传"
+          else
+            echo "创建 release $TAG"
+            if ! gh release create "$TAG" --title "$TAG" --notes "JavScribe Client — 未签名构建（签名/公证为后续议题）"; then
+              echo "::error title=release-create-failed::gh release create 失败（报错见上方日志）"
+              exit 1
+            fi
+          fi
+          if ! gh release upload "$TAG" dist-all/release-windows/* dist-all/release-linux/* --clobber; then
+            echo "::error title=release-upload-failed::gh release upload 失败（报错见上方日志）"
             exit 1
           fi
+          echo "release 资产："
+          gh release view "$TAG" --json assets --jq '.assets[].name' || true
