@@ -54,9 +54,10 @@ jobs:
         id: ff
         shell: bash
         run: |
-          loc="$(curl -sIL "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" \
-            | grep -i '^location:' | tail -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
-          tag="$(printf '%s' "$loc" | sed 's|.*releases/download/||; s|/.*||')"
+          # BtbN 2026-09 资产更名，旧 download URL 已 404，改走 API 取 tag_name
+          tag="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
+            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
           echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
       - name: ffmpeg 静态构建缓存
         uses: actions/cache@v4
@@ -108,10 +109,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: 解析 BtbN latest 标签（ffmpeg 缓存键）
         id: ff
+        shell: bash
         run: |
-          loc="$(curl -sIL "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linux64-gpl.tar.xz" \
-            | grep -i '^location:' | tail -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
-          tag="$(printf '%s' "$loc" | sed 's|.*releases/download/||; s|/.*||')"
+          # BtbN 2026-09 资产更名，旧 download URL 已 404，改走 API 取 tag_name
+          tag="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
+            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
           echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
       - name: ffmpeg 静态构建缓存
         uses: actions/cache@v4
