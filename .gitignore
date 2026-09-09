@@ -66,6 +66,9 @@ playwright-report-desktop/
 
 # ---------- 桌面端构建产物（pnpm build:desktop 生成） ----------
 client/dist-desktop/
+# build-desktop.mjs 的临时输入（titlebar 注入前的 brand mark 资产 + 临时 html）
+client/favicon.png
+client/index-desktop.html
 
 # ---------- IDE / 系统 ----------
 .idea/

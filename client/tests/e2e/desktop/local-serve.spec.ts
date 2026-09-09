@@ -10,7 +10,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { DIST, MOCK, MOCK_KEY, assertDistBuilt, ensureFixtures, mockReset } from "./helpers";
+import { DIST, MOCK, MOCK_KEY, assertDistBuilt, ensureFixtures, goView, mockReset } from "./helpers";
 
 const MOCK_SERVE = fileURLToPath(new URL("../mock-serve.mjs", import.meta.url));
 const PORT_A = 8395; // A：由客户端拉起
@@ -99,6 +99,8 @@ test("A 检测 + 自动拉起：本地服务端运行中 + 引擎卡在线", asy
   });
   try {
     const page = await app.firstWindow();
+    // 状态行 + 引擎卡都在 engines 视图（桌面壳默认 dispatch）
+    await goView(page, "engines");
     // 状态行：detected → starting → running（客户端 spawn → mock 启动 → health 就绪）
     await page.locator("#local-serve-status.show").waitFor({ timeout: 30_000 });
     await expect(page.locator("#local-serve-status-text")).toContainText("运行中");
@@ -126,6 +128,7 @@ test("B 未检测：提示文案可见、不拉起、端口无监听", async ({ 
   });
   try {
     const page = await app.firstWindow();
+    await goView(page, "engines");
     await expect(page.locator("#local-serve-hint")).toBeVisible();
     await expect(page.locator("#local-serve-hint")).toContainText("未检测到本地服务端");
     await expect(page.locator("#local-serve-hint")).toContainText("JavScribe Serve");
@@ -165,6 +168,7 @@ test("C 已在线：复用既有实例、不重复拉起", async ({ userData }, 
   });
   try {
     const page = await app.firstWindow();
+    await goView(page, "engines");
     await page.locator("#local-serve-status.show").waitFor({ timeout: 30_000 });
     await expect(page.locator("#local-serve-status-text")).toContainText("运行中");
     await waitForLocalEngine(page);

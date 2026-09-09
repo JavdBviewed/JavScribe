@@ -5,7 +5,7 @@
 //   样式 —— 卡片 off / on 截图基线（style-14/15）
 // 节奏说明：JAVSCRIBE_WATCH_MIN_POLL_MS=300（helpers launchApp 注入）允许短轮询；
 //           候选需 (size, mtime) 连续两次轮询不变（稳定性基线），故 pollMs=800 时首个候选 ≈2s。
-import { test, expect, mockJobs, mockSpeed, relaunch, freezeForShot, shot, MOCK, MOCK_KEY, FIXTURES } from "./helpers";
+import { test, expect, goView, mockJobs, mockSpeed, relaunch, freezeForShot, shot, MOCK, MOCK_KEY, FIXTURES } from "./helpers";
 import type { APIRequestContext } from "./helpers";
 import {
   copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync,
@@ -74,6 +74,7 @@ test("watch 全链路：新视频 → 候选 → 自动派发 → done → srt �
   await expect(page.locator("#watch-status", { hasText: "监听中" })).toBeVisible({ timeout: 10_000 });
   // 派发（本机 ffmpeg 提取 + 上传 + mock 秒级完成）
   await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 60_000 });
+  await goView(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
 
@@ -102,6 +103,7 @@ test("同 stem 已有字幕：永不派发；删除字幕后变为候选并派�
 
   // 删字幕 → 下两个轮询确认稳定 → 派发
   rmSync(join(dir, "video-c.zh.srt"));
+  await goView(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-c.mp4" }) });
   await expect(row).toBeVisible({ timeout: 30_000 });
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
@@ -122,6 +124,7 @@ test("稳定性：轮询中途改写文件 → 稳定后仅派发一次（无重
   expect((await mockJobs(request)).filter((j) => String(j.label ?? "").startsWith("video-b.mkv"))).toHaveLength(0);
 
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-b.mkv" }) });
+  await goView(page, "jobs");
   await expect(row).toBeVisible({ timeout: 60_000 });
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
   await sleep(2_500); // 留足窗口：若稳定性失效会看到重复任务
@@ -137,7 +140,9 @@ test("重启：watch 自动恢复 + 已处理视频不重复派发（processed �
   await watchSet(page, { enabled: true, path: dir, pollMs: 800 });
 
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
+  await goView(page, "jobs");
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 60_000 });
+  await goView(page, "dispatch");
   await expect(page.locator("#watch-status", { hasText: /已处理 1/ })).toBeVisible({ timeout: 15_000 });
 
   // 移除写回产物：此时若重复派发，唯一能拦住的就是 processed 去重
@@ -171,9 +176,11 @@ test("未选择服务：候选留队列显示「未选择服务」；补选服�
     return r;
   });
   expect(del.ok).toBe(true);
+  await goView(page, "engines");
   await expect(page.locator("#engines-empty")).toBeVisible({ timeout: 15_000 });
 
   await watchSet(page, { enabled: true, path: dir, pollMs: 800 });
+  await goView(page, "dispatch");
   await expect(page.locator("#watch-status", { hasText: "未选择服务" })).toBeVisible({ timeout: 15_000 });
   await sleep(1_500);
   expect(await mockJobs(request)).toHaveLength(0); // 排队中，不派发
@@ -187,6 +194,7 @@ test("未选择服务：候选留队列显示「未选择服务」；补选服�
   await page.selectOption("#engine-select", "mock"); // onchange → 消费泵
 
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
+  await goView(page, "jobs");
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 60_000 });
 });
 

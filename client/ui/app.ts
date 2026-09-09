@@ -197,6 +197,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
       notifyJobChanges(jobs);
       updateTitle(jobs);
+      viewBadge(jobs.filter((r) => r.status === "running").length);
     } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
     watchPump(); // watch 队列安全网：漏触发的消费在 5s 内自愈
     if (platform.kind === "web") void refreshUpdateWeb();
@@ -223,6 +224,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // watch 消费泵钩子：web 形态恒空操作（#watch-panel 恒隐藏、不接线——web 100% 不变硬约束）
   let watchPump: () => void = () => {};
+
+  // 桌面壳导航徽标钩子：web 形态恒空操作（无 .nav-badge 节点）
+  let viewBadge: (n: number) => void = () => {};
 
   // ---- web 形态：GET /api/update（独立链路，失败静默，绝不拖累主刷新） ----
   let updateWeb: UpdateInfo | null = null;
@@ -1683,6 +1687,63 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         });
         void b.state().then((st) => { ls = st; lsRender(); }).catch(() => {});
       }
+    }
+  }
+
+  // ---------- 桌面壳：侧边栏视图切换 + 任务数徽标 + 窗控按钮（frameless 自定义标题栏） ----------
+  // web 形态无 body.desktop / #nav / #titlebar 节点，整块不执行（web 100% 不变硬约束）
+  if (platform.kind === "desktop") {
+    const VIEWS = ["engines", "dispatch", "jobs"] as const;
+    type ViewName = (typeof VIEWS)[number];
+    const secs: Record<ViewName, HTMLElement> = {
+      engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"),
+    };
+    const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item[data-view]"));
+    const badge = $("nav-badge") as HTMLElement | null;
+    let saved = "dispatch";
+    try { saved = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
+    const initial: ViewName = VIEWS.includes(saved as ViewName) ? (saved as ViewName) : "dispatch";
+    const showView = (view: ViewName) => {
+      for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
+      for (const it of items) it.classList.toggle("on", it.dataset.view === view);
+      try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
+    };
+    showView(initial);
+    for (const it of items) it.addEventListener("click", () => showView(it.dataset.view as ViewName));
+    viewBadge = (n: number) => {
+      if (!badge) return;
+      badge.hidden = n <= 0;
+      if (n > 0) badge.textContent = String(n);
+    };
+
+    const d = (window as unknown as {
+      javDesktop?: {
+        win?: {
+          minimize(): void; toggleMax(): void; close(): void;
+          onMaxState(cb: (m: boolean) => void): () => void;
+        };
+      };
+    }).javDesktop?.win;
+    if (d) {
+      const min = $("win-min");
+      const max = $("win-max");
+      const close = $("win-close");
+      if (min) min.onclick = () => d.minimize();
+      if (close) close.onclick = () => d.close();
+      if (max) {
+        max.onclick = () => d.toggleMax();
+        d.onMaxState((m) => {
+          max.classList.toggle("maxed", m);
+          max.title = m ? "还原" : "最大化";
+          max.setAttribute("aria-label", m ? "还原" : "最大化");
+        });
+      }
+      // 双击标题栏 = 最大化/还原（窗控按钮与更新角标区域除外）
+      const tb = $("titlebar");
+      if (tb) tb.addEventListener("dblclick", (e) => {
+        if ((e.target as HTMLElement).closest(".tb-btn, #up-chip")) return;
+        d.toggleMax();
+      });
     }
   }
 

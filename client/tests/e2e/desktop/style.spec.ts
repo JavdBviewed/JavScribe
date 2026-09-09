@@ -1,7 +1,7 @@
 // 桌面端样式类：整页 + 关键区块截图基线（像素 diff）
 // 动态元素（时钟/更新时间/耗时/ETA/动画）由 freezeForShot 统一冻结
 // 帧 05「上传音频中」：本机 ffmpeg 提取仅 ~57ms 抓不到，用 mock 的 upload-delay（3s）稳定保持上传帧
-import { test, expect, type APIRequestContext } from "./helpers";
+import { test, expect, goView, type APIRequestContext } from "./helpers";
 import {
   mockPause, mockSeed, mockUploadDelay, freezeForShot, shot, triggerToast,
   MOCK, FIXTURES,
@@ -22,6 +22,7 @@ test("整页空态（服务在线，无任务）", async ({ page }) => {
 });
 
 test("服务卡片区块", async ({ page }) => {
+  await goView(page, "engines");
   await freezeForShot(page, req);
   await shot(page, "style-02-engine-card", { element: "#sec-engines" });
 });
@@ -71,6 +72,7 @@ test("流水线：三步完成态", async ({ page }) => {
 test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
   await mockPause(req); // 先停：running 行不会在页面刷新前进成 done
   await mockSeed(req, { n: 1, status: "running", progress: 0.37 });
+  await goView(page, "jobs");
   await page.locator(".job-row.running").waitFor({ timeout: 15_000 });
   await page.waitForTimeout(400);
   await freezeForShot(page, req);
@@ -79,6 +81,7 @@ test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
 
 test("任务看板：已完成 + 分页器", async ({ page }) => {
   await mockSeed(req, { n: 25, status: "done" });
+  await goView(page, "jobs");
   await page.click('#job-filter [data-f="finished"]');
   await expect(page.locator("#job-pager")).toBeVisible();
   await page.locator("#pg-next").click();
@@ -94,6 +97,7 @@ test("设置弹窗：未登记 Key 表单", async ({ page }) => {
     return res;
   }, MOCK);
   expect(r.ok).toBe(true);
+  await goView(page, "engines");
   await page.locator('article.eng[data-name="nokey"] .icon-btn.set').waitFor({ timeout: 15_000 });
   await page.click('article.eng[data-name="nokey"] .icon-btn.set');
   await expect(page.locator("#key-input")).toBeVisible({ timeout: 5_000 });
@@ -102,6 +106,7 @@ test("设置弹窗：未登记 Key 表单", async ({ page }) => {
 });
 
 test("设置弹窗：配置表单（白名单全组）", async ({ page }) => {
+  await goView(page, "engines");
   await page.click('article.eng[data-name="mock"] .icon-btn.set');
   await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
   // 展开弹窗内部滚动，整表单入帧
@@ -137,6 +142,7 @@ test("离线服务卡片（eng-err）", async ({ page }) => {
     return res;
   }, "http://127.0.0.1:9999");
   expect(r.ok).toBe(true);
+  await goView(page, "engines");
   await page.locator('article.eng[data-name="offline-svc"] .eng-err').waitFor({ timeout: 15_000 });
   await page.waitForTimeout(200);
   await freezeForShot(page, req);

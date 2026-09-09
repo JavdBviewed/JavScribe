@@ -157,6 +157,16 @@ export async function relaunchPacked(userData: string, extraEnv: Record<string, 
   return { app, page };
 }
 
+/**
+ * 桌面壳：切换侧边栏视图。默认视图 = dispatch；
+ * 隐藏视图的元素 toBeVisible/click/元素截图都会失败，断言前先切过去。
+ * 点击 nav 按钮并等对应 section 挂上 .view-on。
+ */
+export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") {
+  await page.locator(`.nav-item[data-view="${view}"]`).click();
+  await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
+}
+
 /** 冷启动 + 等引擎在线（health 文案 v0.2.2 · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });

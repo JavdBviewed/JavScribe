@@ -656,6 +656,14 @@ function uploadAccept(
 }
 
 function registerIpc(): void {
+  // 窗控（frameless 自定义标题栏）：send 语义，fire-and-forget
+  ipcMain.on("win-min", () => win?.minimize());
+  ipcMain.on("win-max", () => {
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+  ipcMain.on("win-close", () => win?.close());
   ipcMain.handle("t-call", async (_ev, args: { method: string; args?: unknown[] }) => {
     const [a0, a1, a2] = (args?.args || []) as string[];
     try {
@@ -1556,8 +1564,8 @@ function createWindow(): void {
     minHeight: 700,
     backgroundColor: "#f2efe9",
     title: "JavScribe Client",
-    // e2e 无框（JAVSCRIBE_CLIENT_FRAMELESS=1）：viewport 与 web 基线（1440x1000）完全一致
-    frame: process.env.JAVSCRIBE_CLIENT_FRAMELESS !== "1",
+    // frameless：自绘标题栏 + 窗控按钮（JavdBviewed 风格；不再用 Win 默认标题栏/组件）
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -1565,6 +1573,12 @@ function createWindow(): void {
     },
   });
   win.loadFile(path.join(__dirname, "index.html"));
+  // 最大化状态回推 renderer（标题栏按钮图标切换）
+  const pushMaxState = (): void => {
+    if (win && !win.isDestroyed()) win.webContents.send("win-max-state", win.isMaximized());
+  };
+  win.on("maximize", pushMaxState);
+  win.on("unmaximize", pushMaxState);
   win.on("closed", () => {
     win = null;
   });

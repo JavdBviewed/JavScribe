@@ -173,7 +173,7 @@ test("样式：更新角标与更新弹窗（打包形态）", async ({ userData
     const chip = page.locator(CHIP);
     await expect(chip).toHaveText("新版本 9.9.9", { timeout: 30_000 });
     await freezeForShot(page, request);
-    await shot(page, "update-01-chip", { element: "footer" });
+    await shot(page, "update-01-chip", { element: "#titlebar" });
     await chip.click();
     await expect(page.locator("#modal-title")).toHaveText("检查更新");
     await freezeForShot(page, request);

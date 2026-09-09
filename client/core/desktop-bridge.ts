@@ -43,6 +43,15 @@ export interface FileOpResult {
   network?: boolean;
 }
 
+// ---------- 窗口控制（frameless 自定义标题栏：min/max/close + 最大化状态回推） ----------
+export interface WinCtl {
+  minimize(): void;
+  toggleMax(): void;
+  close(): void;
+  /** 订阅最大化状态（main 侧 maximize/unmaximize 事件）；返回取消订阅函数 */
+  onMaxState(cb: (maximized: boolean) => void): () => void;
+}
+
 // ---------- 版本更新（electron-updater，main 进程自持状态机） ----------
 
 export interface UpdateState {
@@ -152,6 +161,9 @@ export interface JavDesktop {
     /** 订阅状态推送；返回取消订阅函数 */
     onState(cb: (s: LocalServeState) => void): () => void;
   };
+  /** 窗口控制（frameless 自定义标题栏；web 形态无此字段） */
+  win: WinCtl;
+
 }
 
 /** upload-audio / upload-file 受理结果（serve 201 → job_id） */

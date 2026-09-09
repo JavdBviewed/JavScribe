@@ -1,5 +1,5 @@
 // 桌面端 UI 结构类：关键 DOM 断言（id/class/aria、桌面措辞、列序、chip 文案）
-import { test, expect } from "./helpers";
+import { test, expect, goView } from "./helpers";
 import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -7,10 +7,22 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator("#health")).toHaveText(/v0\.2\.2 · 服务 1\/1 在线/);
 });
 
-test("页头与板块顺序", async ({ page }) => {
-  await expect(page.locator("header h1")).toHaveText("字幕工作台");
-  // 桌面版品牌副标（构建期 REWRITES）
-  await expect(page.locator(".brand-sub")).toHaveText("JAVSCRIBE CLIENT · DESKTOP");
+test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dispatch + 三 section 顺序）", async ({ page }) => {
+  // 自绘标题栏（无 Windows 默认 chrome）：logo + 应用名 + 三窗控
+  await expect(page.locator("#titlebar")).toBeVisible();
+  await expect(page.locator(".tb-logo")).toBeVisible();
+  await expect(page.locator(".tb-app")).toHaveText("JavScribe Client");
+  for (const id of ["win-min", "win-max", "win-close"]) await expect(page.locator(`#${id}`)).toBeVisible();
+  // 侧边栏三视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务）
+  await expect(page.locator("#nav")).toBeVisible();
+  const navLabels = page.locator("#nav .nav-item > span:not(.nav-badge)");
+  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务"]);
+  expect(await page.locator("#nav .nav-item").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs"]);
+  // 默认视图 = dispatch（新 userData，localStorage 空）
+  await expect(page.locator(".nav-item[data-view=dispatch]")).toHaveClass(/on/);
+  await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
+  await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
+  await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
   const sections = await page.locator("main > section").evaluateAll((els) => els.map((e) => e.id));
   expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs"]);
   await expect(page.locator("#sec-engines h2")).toHaveText("字幕服务");
@@ -19,6 +31,17 @@ test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("#sec-engines .kicker")).toHaveText("Services");
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
+});
+
+test("视图切换：nav 点击切视图 + localStorage 持久化", async ({ page }) => {
+  await goView(page, "jobs");
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await expect(page.locator("#sec-dispatch")).not.toHaveClass(/view-on/);
+  await expect(page.locator(".nav-item[data-view=jobs]")).toHaveClass(/on/);
+  expect(await page.evaluate(() => localStorage.getItem("javview_view"))).toBe("jobs");
+  await goView(page, "dispatch");
+  await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
+  expect(await page.evaluate(() => localStorage.getItem("javview_view"))).toBe("dispatch");
 });
 
 test("拖放区结构（桌面措辞：本机提取、无大小限制）", async ({ page }) => {
@@ -66,6 +89,7 @@ test("扫描面板结构（服务端目录语义文案不变）", async ({ page 
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
+  await goView(page, "jobs");
   const head = page.locator(".job-head > span");
   await expect(head).toHaveCount(7);
   expect(await head.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
@@ -85,10 +109,11 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
   await expect(page.locator("#jobs-empty-text")).toHaveText("暂无任务");
 });
 
-test("页脚与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
-  await expect(page.locator("footer .mono").first()).toHaveText("JAVSCRIBE-CLIENT");
-  await expect(page.locator("footer #foot-ver")).toHaveText("v0.2.2");
-  await expect(page.getByText("看板 5s · 生成 1s")).toBeVisible();
+test("侧边栏脚注与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
+  await expect(page.locator("#nav .nav-id")).toHaveText("JAVSCRIBE-CLIENT");
+  await expect(page.locator("#foot-ver")).toHaveText("v0.2.2");
+  await expect(page.locator(".nav-tick")).toHaveText("看板 5s · 生成 1s");
+  await expect(page.locator("#up-chip")).toBeHidden();
   await expect(page.locator("#modal-backdrop")).toBeHidden();
   await expect(page.locator("#modal")).toHaveAttribute("role", "dialog");
   await expect(page.locator("#modal")).toHaveAttribute("aria-modal", "true");
@@ -96,6 +121,7 @@ test("页脚与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
 });
 
 test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）", async ({ page }) => {
+  await goView(page, "engines");
   const card = page.locator('article.eng[data-name="mock"]');
   await expect(card).toHaveClass(/on/);
   await expect(card.locator(".lamp")).toHaveCount(1);

@@ -5,9 +5,10 @@ import type {
   ExtractResult, FileOpResult, JavDesktop, LocalServeState, PickFileResult,
   PickFolderItem, TCallResult, TProgress, UpdateSettings, UpdateState,
   UploadDispatchResult, WatchCandidate, WatchSetResult, WatchState,
+WinCtl,
 } from "../core/desktop-bridge";
 
-const api: Omit<JavDesktop, "update" | "watch" | "localServe"> = {
+const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win"> = {
   call: (method: string, args?: string[]) =>
     ipcRenderer.invoke("t-call", { method, args }) as Promise<TCallResult>,
 
@@ -115,4 +116,18 @@ const localServe: JavDesktop["localServe"] = {
   },
 };
 
-contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch, localServe });
+// 窗口控制（frameless 自定义标题栏；send 即可，无需回包）
+const win: WinCtl = {
+  minimize: () => { ipcRenderer.send("win-min"); },
+  toggleMax: () => { ipcRenderer.send("win-max"); },
+  close: () => { ipcRenderer.send("win-close"); },
+  onMaxState: (cb: (maximized: boolean) => void): (() => void) => {
+    const listener = (_e: unknown, m: boolean) => cb(m);
+    ipcRenderer.on("win-max-state", listener);
+    return () => {
+      ipcRenderer.removeListener("win-max-state", listener);
+    };
+  },
+};
+
+contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch, localServe, win });

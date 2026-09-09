@@ -2,7 +2,7 @@
 // Key 登记 UI、localStorage 持久化、retry、筛选×分页、扫描全流程、Windows 拦截、删除服务、小飞机二窗口）
 // 注意：autosave 的「自动下载」兜底走原生保存对话框，e2e 无法驱动，不覆盖；
 //       写回链路由 writeSrt IPC 用例在进程级覆盖（同一条 IPC 通路）。
-import { test, expect, mockSpeed, mockSeed, mockReset, launchApp, relaunch, waitForReady, waitForEngineKey,
+import { test, expect, goView, mockSpeed, mockSeed, mockReset, launchApp, relaunch, waitForReady, waitForEngineKey,
   waitForMockJobFinished, MOCK, MOCK_KEY, FIXTURES } from "./helpers";
 import type { APIRequestContext } from "./helpers";
 import { join } from "node:path";
@@ -32,6 +32,7 @@ test("单文件全流程（auto→本机提取）：chip → 三步动画 → �
   await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 
+  await goView(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
   await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
   await expect(page).toHaveTitle(/\(1\) JavScribe Client/);
@@ -88,6 +89,7 @@ test("文件夹批量：chip →（2 项）→ 批量完成 toast → 两行看�
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");
   await expect(page.locator("#dispatch-status.ok", { hasText: /批量完成：已提交 2\/2 项/ })).toBeVisible({ timeout: 30_000 });
+  await goView(page, "jobs");
   for (const name of ["video-a.mp4", "video-b.mkv"]) {
     const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: name }) });
     await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
@@ -101,6 +103,7 @@ test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engi
   try {
     const page = await app.firstWindow();
     await waitForReady(page);
+    await goView(page, "engines");
     await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
     await expect(page.locator(".set-note")).toHaveText(/还没有登记 API Key/, { timeout: 10_000 });
     await expect(page.locator("#key-input")).toBeVisible();
@@ -145,6 +148,7 @@ test("localStorage 持久化：autosave + 提取模式 + 所选服务重启保�
 test("retry：跳过行 → 重新提交 → 新任务入列 running", async ({ page, request }) => {
   await slowJobs(request);
   await mockSeed(request, { n: 1, status: "skipped", skipped: 1 });
+  await goView(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".retry") });
   await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.locator(".pill")).toHaveText("跳过");
@@ -159,6 +163,7 @@ test("retry：跳过行 → 重新提交 → 新任务入列 running", async ({ 
 
 test("筛选 × 分页：25 条已完成 → 2 页 → 翻页边界", async ({ page, request }) => {
   await mockSeed(request, { n: 25, status: "done" });
+  await goView(page, "jobs");
   // created 降序（最新在前）：第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
   await page.locator(".job-row .fn", { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
   await page.click('#job-filter [data-f="finished"]');
@@ -212,6 +217,7 @@ test("删除服务：confirm → 卡片移除", async ({ page }) => {
     return res;
   }, MOCK);
   expect(r.ok).toBe(true);
+  await goView(page, "engines");
   await page.locator('article.eng[data-name="del-me"] h3', { hasText: "del-me" }).waitFor({ timeout: 10_000 });
   page.on("dialog", (d) => d.accept());
   await page.click('article.eng[data-name="del-me"] .del');
@@ -231,6 +237,7 @@ test("小飞机跳转：第二窗口打开服务地址（地址本身非超链�
       await new Promise((r) => setTimeout(r, 100));
     }
   };
+  await goView(page, "engines");
   const [np] = await Promise.all([
     secondWindow(),
     page.locator('.eng[data-name="mock"] .eng-go').click(),
