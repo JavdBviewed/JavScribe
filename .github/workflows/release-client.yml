@@ -151,6 +151,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/client-v')
     runs-on: ubuntu-latest
     steps:
+      # gh release create 需在本地 git 仓库解析 tag → 必须 checkout（本 job 不构建代码）
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist-all
