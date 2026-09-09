@@ -178,7 +178,20 @@ jobs:
               exit 1
             fi
           fi
-          if ! gh release upload "$TAG" dist-all/release-windows/* dist-all/release-linux/* --clobber; then
+          # gh release upload 对目录参数会递归上传 → 只取顶层真实产物：
+          # 排除子目录（win-unpacked/linux-unpacked）与 junk（*.blockmap / latest*.yml / builder-debug.yml）
+          assets=()
+          while IFS= read -r -d '' f; do assets+=("$f"); done < <(
+            find dist-all/release-windows dist-all/release-linux -maxdepth 1 -type f \
+                 ! -name '*.blockmap' ! -name 'latest*.yml' ! -name 'builder-debug.yml' -print0
+          )
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error title=release-upload-failed::未找到真实产物（检查产物结构）"
+            exit 1
+          fi
+          echo "上传 ${#assets[@]} 个产物："
+          printf '  %s\n' "${assets[@]}"
+          if ! gh release upload "$TAG" "${assets[@]}" --clobber; then
             echo "::error title=release-upload-failed::gh release upload 失败（报错见上方日志）"
             exit 1
           fi
