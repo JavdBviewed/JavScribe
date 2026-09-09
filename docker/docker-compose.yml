@@ -1,8 +1,11 @@
 # JavScribe — company GPU server deployment (one container = engine + service)
 #
-#   cd /opt/JavScribe
+#   推荐（CI 预构建镜像，tag 触发发布到 ghcr.io）：
 #   JAV_WATCH_DIR=/path/to/your/media \
-#   docker compose -f docker/docker-compose.yml up -d --build
+#   docker compose -f docker/docker-compose.yml pull && \
+#   docker compose -f docker/docker-compose.yml up -d
+#
+#   离线/改引擎版本时本地构建：加 --build（build 段仍保留）
 #
 # Env overrides:
 #   JAV_PORT          host port for the progress/upload API (default 8300)
@@ -22,7 +25,8 @@ services:
       dockerfile: docker/Dockerfile
       args:
         CHICKENRICE_REF: v1.9
-    image: javscribe:latest
+    # CI 预构建镜像（serve-v* tag → ghcr.io）；离线场景 up -d --build 回退本地构建
+    image: ghcr.io/javdbviewed/jav-scribe-serve:latest
     container_name: jav-scribe
     restart: unless-stopped
     shm_size: "4g"

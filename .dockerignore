@@ -18,3 +18,20 @@ config/*.local.json
 .env
 *.log
 web/
+# 大目录/前端产物（镜像只装 Python 服务，CI context 瘦身）
+node_modules/
+client/
+web/
+release/
+build/
+dist/
+client/dist/
+client/dist-desktop/
+test-results/
+test-results-desktop/
+playwright-report/
+playwright-report-desktop/
+.trellis/
+.trellis
+*.png
+docs/ui-qa/

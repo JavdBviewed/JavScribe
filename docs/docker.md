@@ -38,13 +38,23 @@ models/
 
 ## 部署步骤
 
+镜像由 CI 发布到 GitHub Container Registry（`serve-v*` tag 触发，见
+`.github/workflows/docker-image.yml`），服务器只拉镜像，不用本地构建。
+
 ```bash
-# 1. 代码
+# 1. 代码（compose 文件所在；镜像走 ghcr 拉取）
 git clone https://github.com/JavdBviewed/JavScribe.git /opt/JavScribe && cd /opt/JavScribe
 
-# 2. 构建并启动（JAV_WATCH_DIR 改成你的影片落盘目录）
-JAV_WATCH_DIR=/your/media/dir docker compose -f docker/docker-compose.yml up -d --build
+# 2. 拉镜像并启动（JAV_WATCH_DIR 改成你的影片落盘目录）
+export JAV_WATCH_DIR=/your/media/dir
+docker compose -f docker/docker-compose.yml pull
+docker compose -f docker/docker-compose.yml up -d
 ```
+
+指定版本：把 compose 里 `image:` 的 `latest` 改成 `v0.1.2` 这类具体 tag
+（`ghcr.io/javdbviewed/jav-scribe-serve:v0.1.2`），升级 = 改 tag → `pull` → `up -d`。
+
+本地构建（离线 / 需要改引擎版本 CHICKENRICE_REF 时）：`up -d --build`。
 
 可选环境变量：
 
@@ -72,8 +82,10 @@ nvidia-smi                       # 处理任务时显存约 4–6G
 ## 常用操作
 
 ```bash
-# 更新代码后重建
-cd /opt/JavScribe && git pull && JAV_WATCH_DIR=/your/media/dir docker compose -f docker/docker-compose.yml up -d --build
+# 升级到新版 CI 镜像
+cd /opt/JavScribe && git pull
+docker compose -f docker/docker-compose.yml pull
+docker compose -f docker/docker-compose.yml up -d
 
 # 手动跑单个文件（不走监听）
 docker exec -it jav-scribe jav-scribe run /media/jav/xxx.mp4 --config /etc/jav-scribe/config.server.json

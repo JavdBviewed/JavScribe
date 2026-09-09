@@ -1,0 +1,84 @@
+# JavScribe Serve — Docker 镜像 CI/CD（ghcr.io）
+# 触发：
+#   - tag `serve-v*`：构建并推送 v{ver} + latest（构建前校验 tag 版本 = pyproject 版本）
+#   - 手动 dispatch：调试/补发（serve_version 留空 = 取 pyproject.toml 当前版本）
+# 部署：GPU 服务器 `docker compose -f docker/docker-compose.yml pull && up -d`
+# 平台：仅 linux/amd64（127 为 x86_64）
+name: docker-image
+
+on:
+  push:
+    tags: ["serve-v*"]
+  workflow_dispatch:
+    inputs:
+      serve_version:
+        description: "镜像版本号（留空 = pyproject.toml 当前版本）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: true
+  IMAGE: ghcr.io/javdbviewed/jav-scribe-serve
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 推导镜像版本
+        id: ver
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            case "$TAG" in
+              serve-v*) VER="${TAG#serve-v}" ;;
+              *) echo "::error::tag $TAG 不以 serve-v 开头"; exit 1 ;;
+            esac
+          else
+            VER="${{ inputs.serve_version }}"
+            [ -z "$VER" ] && VER="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          fi
+          # tag 触发：版本必须与 pyproject 一致（防打错包）
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            HAVE="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+            if [ "$VER" != "$HAVE" ]; then
+              echo "::error::tag 版本 $VER 与 pyproject.toml 版本 $HAVE 不一致"
+              exit 1
+            fi
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "镜像版本：$VER"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像（v{ver} + latest）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            PIP_INDEX=https://pypi.org/simple
+          tags: |
+            ${{ env.IMAGE }}:v${{ steps.ver.outputs.ver }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
