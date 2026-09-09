@@ -691,20 +691,44 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   // ---------- 生成字幕 ----------
+  function engineHostHint(e: Engine): string {
+    try {
+      const u = new URL(e.url);
+      return u.host ? `（${u.host}）` : "";
+    } catch {
+      return "";
+    }
+  }
+
   function renderSelect(engines: Engine[]) {
     const sel = engineSelect;
     if (!engines.length) {
-      sel.innerHTML = '<option value="">（先添加服务）</option>';
+      if (sel.dataset.sig !== "empty") {
+        sel.dataset.sig = "empty";
+        sel.innerHTML = '<option value="">（先添加服务）</option>';
+      }
       updateGo();
       return;
     }
     const online = engines.filter((e) => e.online);
     const pool = online.length ? online : engines;
+    // 选项集（名称+在线态）无变化不重建：避免 5s 轮询周期性重绘把用户手选静默打回第一项
+    const sig = pool.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
+    if (sel.dataset.sig === sig) {
+      updateGo();
+      return;
+    }
+    const prev = sel.value;
+    sel.dataset.sig = sig;
     sel.innerHTML = pool
-      .map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${e.online ? "" : "（离线）"}</option>`)
+      .map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${engineHostHint(e)}${e.online ? "" : "（离线）"}</option>`)
       .join("");
-    const saved = localStorage.getItem("javweb_engine");
-    if (saved && pool.some((e) => e.name === saved)) sel.value = saved;
+    // 现存选中（用户手选）> 持久化值 > 第一项
+    if (pool.some((e) => e.name === prev)) sel.value = prev;
+    else {
+      const saved = localStorage.getItem("javweb_engine");
+      if (saved && pool.some((e) => e.name === saved)) sel.value = saved;
+    }
     updateGo();
   }
 
@@ -726,7 +750,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       !scanPath.value.trim() || !engineSelect.value || state.busy;
   }
 
-  engineSelect.onchange = () => { updateGo(); watchPump(); };
+  engineSelect.onchange = () => {
+    // 即时持久化：手选即生效，轮询刷新/重启后保留（修复「选了远程却提交到本地服务端」）
+    if (engineSelect.value) localStorage.setItem("javweb_engine", engineSelect.value);
+    updateGo();
+    watchPump();
+  };
   scanPath.oninput = updateScanGo;
 
   function setStep(id: string, cls: string, dot: string | null, meta: string | null) {
