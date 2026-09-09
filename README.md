@@ -4,6 +4,16 @@
 
 > **本仓库只做「功能」，不内置任何模型权重。** 需要什么模型、去哪下、放哪、怎么配，见 [docs/models.md](docs/models.md)；部署方式（本地 / Docker）见 [docs/deployment.md](docs/deployment.md) 与 [docs/docker.md](docs/docker.md)。
 
+## 最新版下载
+
+<!-- release-latest:client -->
+🖥️ **JavScribe Client**（桌面客户端）v0.2.2：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.2/JavScribe.Client.Setup.0.2.2.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.2/JavScribe.Client.0.2.2.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.2/JavScribe.Client-0.2.2.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.2/jav-scribe-client_0.2.2_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.2)
+
+<!-- release-latest:serve -->
+⚙️ **JavScribe Serve**（headless 服务端）v0.1.1：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.1/JavScribeServe-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.1/jav-scribe-serve-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.1.1)
+
+[全部 Release →](https://github.com/JavdBviewed/JavScribe/releases)（发布后本区自动钉到最新 tag）
+
 ```
  下载落盘目录 (mkv/ts/...)
       │  目录监听（文件大小稳定才接手，避免半截下载）

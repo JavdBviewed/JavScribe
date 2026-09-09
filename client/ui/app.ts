@@ -244,6 +244,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   let upState: UpdateState = { status: "disabled" };
   let upSettings: UpdateSettings | null = null;
   let upManualCheck = false;
+  // 侧边栏「检查更新」手动检查的未决标记：结果出来时 toast 最新 / 开弹窗
+  let asideCheckPending = false;
 
   function renderUpChip() {
     if (platform.kind === "web") {
@@ -272,6 +274,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     upChip.hidden = false;
     upChip.classList.toggle("on", on);
     upChip.textContent = text;
+  }
+
+  // 侧边栏「检查更新」按钮：跟随状态机（仅桌面壳存在 #nav-up 节点；dev 态 disabled → 整块隐藏）
+  function renderUpSidebar() {
+    const wrap = $("nav-up") as HTMLElement | null;
+    if (!wrap || platform.kind !== "desktop") return;
+    if (!upBridge() || upState.status === "disabled") {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    const btn = $("up-check") as HTMLButtonElement | null;
+    if (!btn) return;
+    const st = upState;
+    let text = "检查更新";
+    let on = false;
+    let dis = false;
+    switch (st.status) {
+      case "idle": break;
+      case "checking": text = "检查中…"; dis = true; break;
+      case "available": text = "新版本 " + (st.version || ""); on = true; break;
+      case "downloading": text = "下载中 " + Math.round(st.pct ?? 0) + "%"; dis = true; break;
+      case "downloaded": text = "重启安装 v" + (st.version || ""); on = true; break;
+      case "error": text = "重试检查"; break;
+    }
+    if (btn.textContent !== text) btn.textContent = text;
+    btn.classList.toggle("on", on);
+    btn.disabled = dis;
   }
 
   function upCheckDesktop(manual: boolean) {
@@ -1627,10 +1657,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       b.onState((s2) => {
         upState = s2;
         renderUpChip();
+        renderUpSidebar();
         if (upModalOpen) openUpdateDesktop(); // 状态推进（下载进度等）时重建弹窗内容
         if (s2.status === "error" && upManualCheck) {
           upManualCheck = false;
           toast(s2.error || "检查更新失败", "err");
+        }
+        // 侧边栏手动检查出结果：有新版本 → 开弹窗；已是最新 → toast；error 由上方统一 toast（不重复）
+        if (asideCheckPending && s2.status !== "checking") {
+          asideCheckPending = false;
+          if (s2.status === "available" || s2.status === "downloading" || s2.status === "downloaded") {
+            openUpdateDesktop();
+          } else if (s2.status === "idle") {
+            const cur = (($("foot-ver").textContent || "").trim());
+            toast("已是最新版 " + (cur || ""), "ok");
+          }
         }
       });
       void b.state().then((s2) => { upState = s2; renderUpChip(); }).catch(() => {});
@@ -1688,6 +1729,51 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         void b.state().then((st) => { ls = st; lsRender(); }).catch(() => {});
       }
     }
+  }
+
+  // ---------- 桌面壳：侧边栏更新块（自动更新勾选 + 检查更新按钮；dev 态整块隐藏） ----------
+  if (platform.kind === "desktop") {
+    const navUpWrap = $("nav-up") as HTMLElement | null;
+    if (navUpWrap) {
+      const b = upBridge();
+      const chk = $("up-auto") as HTMLInputElement | null;
+      const btn = $("up-check") as HTMLButtonElement | null;
+      if (b) {
+        void b.getSettings().then((s2) => {
+          upSettings = s2;
+          if (chk) chk.checked = s2.enabled;
+        }).catch(() => {});
+      }
+      if (chk) {
+        chk.onchange = async () => {
+          const br = upBridge();
+          if (!br) return;
+          const next = { enabled: chk.checked, mirror: upSettings?.mirror || "" };
+          try {
+            upSettings = await br.putSettings(next);
+            toast(chk.checked ? "已启用启动时自动检查更新" : "已关闭启动时自动检查更新", "ok");
+          } catch (e2) {
+            chk.checked = upSettings?.enabled ?? chk.checked;
+            toast((e2 as Error).message, "err");
+          }
+        };
+      }
+      if (btn) {
+        btn.onclick = () => {
+          const st = upState;
+          if (st.status === "checking") return;
+          if (st.status === "idle" || st.status === "error") {
+            asideCheckPending = true;
+            upCheckDesktop(true);
+            return;
+          }
+          if (st.status === "available" || st.status === "downloading" || st.status === "downloaded") {
+            openUpdateDesktop();
+          }
+        };
+      }
+    }
+    renderUpSidebar();
   }
 
   // ---------- 桌面壳：侧边栏视图切换 + 任务数徽标 + 窗控按钮（frameless 自定义标题栏） ----------

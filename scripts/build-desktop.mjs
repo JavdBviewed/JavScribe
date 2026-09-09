@@ -41,6 +41,10 @@ const TITLEBAR_NAV = `
     <button type="button" class="nav-item" data-view="dispatch"><svg class="nav-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
     <button type="button" class="nav-item" data-view="jobs"><svg class="nav-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="nav-badge" class="nav-badge" hidden>0</span></button>
   </nav>
+  <div class="nav-up" id="nav-up">
+    <label class="nav-up-auto" title="启用后启动时自动检查新版本（只检查，不自动下载）"><input type="checkbox" id="up-auto"><span>自动更新</span></label>
+    <button type="button" id="up-check" class="nav-up-check">检查更新</button>
+  </div>
   <div class="nav-foot">
     <span class="nav-id">JAVSCRIBE-CLIENT</span>
     <span id="foot-ver" class="muted mono"></span>

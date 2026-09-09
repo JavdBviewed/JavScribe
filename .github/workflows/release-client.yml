@@ -180,12 +180,14 @@ jobs:
               exit 1
             fi
           fi
-          # gh release upload 对目录参数会递归上传 → 只取顶层真实产物：
-          # 排除子目录（win-unpacked/linux-unpacked）与 junk（*.blockmap / latest*.yml / builder-debug.yml）
+          # gh release upload 对目录参数会递归上传 → 只取顶层文件（-maxdepth 1 -type f，天然排除
+          # win-unpacked/linux-unpacked 子目录）。latest*.yml / *.blockmap 是 electron-updater
+          # 更新清单与差分块（github provider 与 mirror provider 都依赖）必须上传；
+          # 仅排除 builder-debug.yml（调试日志）
           assets=()
           while IFS= read -r -d '' f; do assets+=("$f"); done < <(
             find dist-all/release-windows dist-all/release-linux -maxdepth 1 -type f \
-                 ! -name '*.blockmap' ! -name 'latest*.yml' ! -name 'builder-debug.yml' -print0
+                 ! -name 'builder-debug.yml' -print0
           )
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error title=release-upload-failed::未找到真实产物（检查产物结构）"
@@ -199,3 +201,12 @@ jobs:
           fi
           echo "release 资产："
           gh release view "$TAG" --json assets --jq '.assets[].name' || true
+      - name: 钉 README 最新版 tag（客户端行）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: node scripts/pin-readme-release.mjs client "${GITHUB_REF#refs/tags/}"

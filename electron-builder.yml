@@ -26,11 +26,16 @@ compression: normal
 # 未签名（本期无证书，Release 文案注明）；签名/公证为后续议题
 # 发布不在 electron-builder 内做：release job 统一用 softprops 建 GitHub Release
 win:
+  # 产物命名规范：jav-scribe-client-{ver}-win-x64[-形态].{ext}（用户可辨识平台/形态）
+  # 本节为 win zip 兜底产物；nsis/portable 各自 artifactName 优先
+  artifactName: ${name}-${version}-win-x64.${ext}
   target:
     - nsis
     - portable
     - zip
 nsis:
+  # 安装包（Setup）
+  artifactName: ${name}-${version}-win-x64-setup.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -38,7 +43,12 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: JavScribe Client
   deleteAppDataOnUninstall: false
+portable:
+  # 便携版（免安装单文件）
+  artifactName: ${name}-${version}-win-x64-portable.${ext}
 linux:
+  # 产物命名规范：jav-scribe-client-{ver}-linux-x64.{ext}（本节为 linux zip 兜底产物）
+  artifactName: ${name}-${version}-linux-x64.${ext}
   # WM_CLASS 关联：desktopName 在根 package.json，此处同步进 .desktop/WM_CLASS
   syncDesktopName: true
   target:
@@ -48,3 +58,8 @@ linux:
   category: AudioVideo
   maintainer: "ryen <ryen@javdbviewed.com>"
   synopsis: JavScribe Client — 本地提音轨的字幕工作台
+appImage:
+  artifactName: ${name}-${version}-linux-x64.AppImage
+deb:
+  # deb 保持发行版惯例命名（与历史 release 兼容，用户无感）
+  artifactName: ${name}_${version}_${arch}.deb

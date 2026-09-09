@@ -1001,8 +1001,35 @@ body.desktop {
   background: var(--accent); color: var(--bg);
   font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
-.nav-foot {
+/* 侧边栏更新块：自动更新勾选 + 检查更新按钮（桌面壳注入；dev 形态整块 hidden） */
+.nav-up {
   margin-top: auto;
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 12px 12px 0;
+  border-top: 1px solid var(--line);
+}
+.nav-up-auto {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11.5px; letter-spacing: 0.05em; color: var(--muted);
+  cursor: pointer; user-select: none;
+}
+.nav-up-auto:hover { color: var(--fg); }
+.nav-up-auto input { margin: 0; width: 13px; height: 13px; accent-color: var(--accent); cursor: pointer; }
+.nav-up-check {
+  width: 100%; padding: 6px 10px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: transparent; color: var(--fg);
+  font-size: 11.5px; letter-spacing: 0.05em; font-family: inherit; font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+.nav-up-check:hover { border-color: var(--fg); }
+.nav-up-check:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.nav-up-check:disabled { opacity: 0.55; cursor: default; }
+.nav-up-check.on {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
+}
+.nav-foot {
   display: flex; flex-direction: column; gap: 4px;
   padding: 12px 12px 0;
   border-top: 1px solid var(--line);

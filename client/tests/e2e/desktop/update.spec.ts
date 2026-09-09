@@ -167,6 +167,52 @@ test("feed 不可达：静默降级（角标隐藏、无错误打扰）", async 
   }
 });
 
+test("侧边栏更新块：自动更新默认开 + 手动检查出新版本直接开弹窗", async ({ userData }) => {
+  const { app, page } = await relaunchPacked(userData);
+  try {
+    const up = page.locator("#nav-up");
+    await expect(up).toBeVisible();
+    // 「自动更新」（启动时自动检查）默认开启
+    await expect(page.locator("#up-auto")).toBeChecked();
+    // 侧边栏手动检查（与启动 3s 自动检查竞态无碍：两路都走同一状态机）
+    await page.click("#up-check");
+    await expect(page.locator("#modal-title")).toHaveText("检查更新");
+    await expect(page.locator("#up-dl")).toBeVisible();
+    // 稍后提醒关弹窗：按钮文案跟随状态变「新版本 9.9.9」（高亮）
+    await page.click("#up-later");
+    await expect(page.locator("#modal")).toBeHidden();
+    await expect(page.locator("#up-check")).toHaveText("新版本 9.9.9");
+    await expect(page.locator("#up-check")).toHaveClass(/on/);
+  } finally {
+    await app.close().catch(() => {});
+  }
+});
+
+test("侧边栏更新块：切换自动更新写 settings.json（与弹窗高级区同一数据源）", async ({ userData }) => {
+  const { app, page } = await relaunchPacked(userData);
+  try {
+    await expect(page.locator("#nav-up")).toBeVisible();
+    await page.locator("#up-auto").uncheck();
+    await expect
+      .poll(
+        async () =>
+          (await page.evaluate(
+            () =>
+              (window as unknown as { javDesktop: { update: { getSettings: () => Promise<{ enabled: boolean; mirror: string }> } } })
+                .javDesktop.update.getSettings(),
+          )).enabled,
+        { timeout: 10_000 },
+      )
+      .toBe(false);
+    const onDisk = JSON.parse(readFileSync(join(userData, "settings.json"), "utf-8")) as {
+      update_check: { enabled: boolean; mirror: string };
+    };
+    expect(onDisk.update_check).toEqual({ enabled: false, mirror: "" });
+  } finally {
+    await app.close().catch(() => {});
+  }
+});
+
 test("样式：更新角标与更新弹窗（打包形态）", async ({ userData, request }) => {
   const { app, page } = await relaunchPacked(userData);
   try {

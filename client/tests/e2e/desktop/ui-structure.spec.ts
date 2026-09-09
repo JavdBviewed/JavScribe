@@ -114,6 +114,10 @@ test("侧边栏脚注与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ pag
   await expect(page.locator("#foot-ver")).toHaveText("v0.2.2");
   await expect(page.locator(".nav-tick")).toHaveText("看板 5s · 生成 1s");
   await expect(page.locator("#up-chip")).toBeHidden();
+  // 侧边栏更新块：dev 形态 bridge 状态恒 disabled → 整块隐藏（打包形态见 update.spec）
+  await expect(page.locator("#nav-up")).toBeHidden();
+  await expect(page.locator("#up-auto")).not.toBeVisible();
+  await expect(page.locator("#up-check")).not.toBeVisible();
   await expect(page.locator("#modal-backdrop")).toBeHidden();
   await expect(page.locator("#modal")).toHaveAttribute("role", "dialog");
   await expect(page.locator("#modal")).toHaveAttribute("aria-modal", "true");
