@@ -13,6 +13,7 @@
     "sync:static": "node scripts/sync-static.mjs",
     "build:web:all": "pnpm build:web && pnpm sync:static",
     "preview": "vite preview",
+    "test:unit:client": "node client/tests/unit/srt-sanitize.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "typecheck": "tsc --noEmit",

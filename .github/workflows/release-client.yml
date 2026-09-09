@@ -67,6 +67,7 @@ jobs:
           key: javscribe-ffmpeg-win-${{ steps.ff.outputs.key }}
       - run: node scripts/fetch-ffmpeg.mjs win
       - run: pnpm typecheck
+      - run: pnpm test:unit:client
       - run: pnpm build:desktop
       - name: e2e 冒烟（桌面子集：functional + ui-structure，mock serve）
         shell: bash
@@ -125,6 +126,7 @@ jobs:
           key: javscribe-ffmpeg-linux-${{ steps.ff.outputs.key }}
       - run: node scripts/fetch-ffmpeg.mjs linux
       - run: pnpm typecheck
+      - run: pnpm test:unit:client
       - run: pnpm build:desktop
       - name: e2e 系统依赖（Electron 运行库）
         # sudo 会重置 PATH 到 secure_path，pnpm 在 toolcache 里会丢；用 env 在 sudo 内重建 PATH

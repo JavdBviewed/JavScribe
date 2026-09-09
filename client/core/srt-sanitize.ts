@@ -5,11 +5,21 @@
 // serve 侧（core/finalize.py）在生成时已清洗一次；桌面形态不经 8400 工作台代理、
 // 直接取服务上的 srt（写回源目录 / 保存下载），在 main 进程侧再做一次兜底。
 //
-// 兜底规则（只改时间戳，不动文本）：
+// 兜底规则（只改时间戳，不动文本；删除除外——被删 cue 是 fallback 冗余产物）：
 //   - start < 0    -> clamp 到 0
 //   - end < start  -> 提到 start
-//   - 按 (start, end) 稳定排序并重编号
+//   - 超长 cue（>30s）且区间内有其他 cue 起点 -> 删除（VAD 全量覆盖 fallback 产物）
+//   - 相邻 cue 重叠 -> 前一条 end 截到后一条 start（截成零长则删除）
+//   - 按 (start 升序, end 降序) 稳定排序并重编号
 // 无法完整解析的内容原样放行（宁可不动，不可改坏）。
+//
+// 超长 cue 背景（2026-09-09 PJAM-045 取证，任务线 09-09-srt-overlap-long-cues）：
+// 引擎 VAD 空结果时走「整段覆盖」fallback，产出 chunk 全长 + 一两句的长 cue，
+// 与同区域细粒度 cue 时间重叠（两路分段流），播放器表现为旧文本滞留叠压。
+// 孤立长 cue（区间内无其他 cue 起点，如 40s 连续独白）是该时段唯一字幕，保留。
+
+/** 超长 cue 阈值：正常对话字幕时长 p90 ≈ 9s（PJAM-045 实测），30s ≈ 3×p90 */
+const LONG_CUE_MS = 30_000;
 
 const TS_LINE_RE = /^\s*(-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*$/;
 
@@ -17,10 +27,9 @@ const TS_LINE_RE = /^\s*(-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(-?\d{1,2}:\d{2
 function tsToMs(hms: string): number {
   const neg = hms.startsWith("-");
   const body = neg ? hms.slice(1) : hms;
-  const [hm, sPart] = body.split(":");
-  const [h, m] = hm.split(":").map(Number);
+  const [h, m, sPart] = body.split(":");
   const [s, ms] = sPart.split(/[,.]/).map(Number);
-  const v = (h * 3600 + m * 60 + s) * 1000 + ms;
+  const v = (Number(h) * 3600 + Number(m) * 60 + s) * 1000 + ms;
   return neg ? -v : v;
 }
 
@@ -91,10 +100,41 @@ export function sanitizeSrtBytes(data: Uint8Array): Uint8Array {
       fixed++;
     }
   }
-  blocks.sort((a, b) => a.start - b.start || a.end - b.end); // 稳定排序 + 重编号
+  // start 升序；同 start 时长 cue 在前（同起点重叠时长的被截/删，保留细粒度）
+  blocks.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  // 防御二a：超长 cue（>30s）且区间内有其他 cue 起点 → 删除。
+  // 排序后只需看相邻：前一个同 start（同起点组）或后一个 start 落在本条区间内。
+  const keep: Block[] = [];
+  let dropped = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const covered =
+      b.end - b.start > LONG_CUE_MS &&
+      ((i > 0 && blocks[i - 1].start === b.start) ||
+        (i + 1 < blocks.length && blocks[i + 1].start < b.end));
+    if (covered) dropped++;
+    else keep.push(b);
+  }
+
+  // 防御二b：相邻重叠 → 前一条 end 截到后一条 start；截成零长则删除。
+  // 按 start 排序后此规则保证输出任意两 cue 零重叠。
+  const outBlocks: Block[] = [];
+  for (let i = 0; i < keep.length; i++) {
+    const b = keep[i];
+    if (i + 1 < keep.length && b.end > keep[i + 1].start) {
+      b.end = keep[i + 1].start;
+      b.newTs = `${msToTs(b.start)} --> ${msToTs(b.end)}`;
+      if (b.end <= b.start) {
+        dropped++;
+        continue;
+      }
+    }
+    outBlocks.push(b);
+  }
   let out = "";
-  for (let idx = 0; idx < blocks.length; idx++) {
-    const b = blocks[idx];
+  for (let idx = 0; idx < outBlocks.length; idx++) {
+    const b = outBlocks[idx];
     const ts = b.newTs ?? `${msToTs(b.start)} --> ${msToTs(b.end)}`;
     out += `${idx + 1}\n${ts}\n${b.text}\n\n`;
   }

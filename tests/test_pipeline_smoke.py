@@ -364,18 +364,18 @@ def _parse_back(text: str) -> list[tuple[int, int]]:
 
 
 def test_sanitize_evidence_pattern() -> None:
-    """取证模式：前 2 条负 start → 全量非负、按 start 升序、文本不变、重编号。"""
+    """取证模式：前 2 条负 start clamp 后，118s 长 cue 与细 cue 重叠 → 删长截短、零重叠重编号。"""
     logs: list[str] = []
     new_text, fixed = sanitize_srt_text(EVIDENCE_HEAD, log=logs.append)
-    assert fixed == 2, logs
+    assert fixed == 4, logs  # 2 负值 clamp + 1 删长 cue + 1 重叠截断
     cues = _parse_back(new_text)
-    assert all(s >= 0 for s, _ in cues), cues
-    assert cues == sorted(cues), cues
-    # 两条负值 clamp 到 0，end 不变
-    assert (0, 23880) in cues and (0, 118300) in cues and (9300, 15660) in cues
-    assert "毕竟科长你啊" in new_text and "店长的本领" in new_text
-    assert "之前啊" in new_text
-    assert "1\n00:00:00,000 --> 00:00:23,880" in new_text
+    assert cues == [(0, 9300), (9300, 15660)], cues
+    # 相邻零重叠
+    for (s1, e1), (s2, e2) in zip(cues, cues[1:]):
+        assert e1 <= s2, cues
+    assert "店长的本领" not in new_text  # 118s 长 cue（fallback 产物）被删
+    assert "毕竟科长你啊" in new_text and "之前啊" in new_text
+    assert "1\n00:00:00,000 --> 00:00:09,300" in new_text
     print("  test_sanitize_evidence_pattern OK")
 
 
@@ -407,11 +407,84 @@ def test_sanitize_end_negative_and_inverted() -> None:
     print("  test_sanitize_end_negative_and_inverted OK")
 
 
+def test_sanitize_long_covered_dropped() -> None:
+    """超长 cue（>30s）且区间内有其他 cue 起点 → 整条删除，保留细粒度 cue。"""
+    text = (
+        "1\n00:00:10,000 --> 00:01:00,000\n长句\n\n"
+        "2\n00:00:12,000 --> 00:00:15,000\n细A\n\n"
+        "3\n00:00:16,000 --> 00:00:18,000\n细B\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 1, new_text
+    assert _parse_back(new_text) == [(12000, 15000), (16000, 18000)]
+    assert "长句" not in new_text and "细A" in new_text and "细B" in new_text
+    print("  test_sanitize_long_covered_dropped OK")
+
+
+def test_sanitize_long_isolated_kept() -> None:
+    """孤立长 cue（区间内无其他 cue 起点，如 40s 连续独白）→ 原样保留。"""
+    text = (
+        "1\n00:00:10,000 --> 00:00:50,000\n长独白\n\n"
+        "2\n00:02:00,000 --> 00:02:05,000\n下一句\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 0 and new_text == text
+    print("  test_sanitize_long_isolated_kept OK")
+
+
+def test_sanitize_overlap_truncated() -> None:
+    """相邻微重叠 → 前一条 end 截到后一条 start，输出零重叠。"""
+    text = (
+        "1\n00:00:10,000 --> 00:00:11,000\n甲\n\n"
+        "2\n00:00:10,800 --> 00:00:12,000\n乙\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 1, new_text
+    assert _parse_back(new_text) == [(10000, 10800), (10800, 12000)]
+    print("  test_sanitize_overlap_truncated OK")
+
+
+def test_sanitize_same_start_keeps_finer() -> None:
+    """同起点长 cue + 短 cue（同起点组，长的 >30s）→ 只留细粒度短 cue。"""
+    text = (
+        "1\n00:00:10,000 --> 00:00:22,000\n细\n\n"
+        "2\n00:00:10,000 --> 00:01:10,000\n长\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 1, new_text
+    assert _parse_back(new_text) == [(10000, 22000)]
+    assert "长\n" not in new_text and "细" in new_text
+    print("  test_sanitize_same_start_keeps_finer OK")
+
+
+def test_sanitize_same_start_short_truncates_to_drop() -> None:
+    """同起点且均不超长 → 前一条被截成零长，删除，保留短者。"""
+    text = (
+        "1\n00:00:10,000 --> 00:00:12,000\n长\n\n"
+        "2\n00:00:10,000 --> 00:00:11,000\n短\n\n"
+    )
+    new_text, fixed = sanitize_srt_text(text)
+    assert fixed == 1, new_text
+    assert _parse_back(new_text) == [(10000, 11000)]
+    assert "短" in new_text and "\n长\n" not in new_text
+    print("  test_sanitize_same_start_short_truncates_to_drop OK")
+
+
+def test_sanitize_overlap_idempotent() -> None:
+    """二次幂等：首跑含负值/长 cue/重叠，二跑 0 改动且字节一致。"""
+    text = EVIDENCE_HEAD + "4\n00:02:00,000 --> 00:02:05,000\n丁\n\n"
+    first, fixed1 = sanitize_srt_text(text)
+    assert fixed1 == 4, first  # 2 负值 clamp + 1 删长 cue + 1 重叠截断
+    second, fixed2 = sanitize_srt_text(first)
+    assert fixed2 == 0 and second == first
+    print("  test_sanitize_overlap_idempotent OK")
+
+
 def test_sanitize_file_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / "a.srt"
         f.write_text(EVIDENCE_HEAD, encoding="utf-8")
-        assert sanitize_srt_file(f) == 2
+        assert sanitize_srt_file(f) == 4
         assert sanitize_srt_file(f) == 0  # 二次幂等
     print("  test_sanitize_file_roundtrip OK")
 
@@ -480,6 +553,12 @@ if __name__ == "__main__":
     test_sanitize_unparseable_untouched()
     test_sanitize_end_negative_and_inverted()
     test_sanitize_file_roundtrip()
+    test_sanitize_long_covered_dropped()
+    test_sanitize_long_isolated_kept()
+    test_sanitize_overlap_truncated()
+    test_sanitize_same_start_keeps_finer()
+    test_sanitize_same_start_short_truncates_to_drop()
+    test_sanitize_overlap_idempotent()
     test_run_finalize_sanitizes_negative()
     test_watch_stability()
     test_batch_two_files_no_skip_overwrite()

@@ -204,8 +204,10 @@ def test_result_proxy_sanitizes_negative_srt() -> None:
         assert r.status_code == 200, r.text
         body = r.content.decode("utf-8")
         assert "-1:45:55" not in body, body
-        assert "1\n00:00:00,000 --> 00:00:23,880" in body, body
+        # 负值 clamp 后与 9.3s 细 cue 重叠 → end 截断，输出零重叠
+        assert "1\n00:00:00,000 --> 00:00:09,300" in body, body
         assert "2\n00:00:09,300 --> 00:00:15,660" in body, body
+        assert "23,880" not in body, body
         assert 'filename="PJAM-001.zh.srt"' in r.headers.get("content-disposition", "")
         print("  test_result_proxy_sanitizes_negative_srt OK")
     finally:
