@@ -50,20 +50,21 @@ jobs:
         shell: bash
         run: pnpm version "${{ inputs.version }}" --no-git-tag-version --no-git-commit-version
       - run: pnpm install --frozen-lockfile
-      - name: 解析 BtbN latest 标签（ffmpeg 缓存键）
+      - name: 解析 BtbN latest（ffmpeg 缓存键 = API 响应哈希）
         id: ff
         shell: bash
         run: |
-          # BtbN 2026-09 资产更名，旧 download URL 已 404，改走 API 取 tag_name
-          tag="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
-            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
-            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
-          echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
+          # BtbN 发布频繁且命名多变（autobuild 标签 / latest 标签互换、资产改名）：
+          # 用 latest release API 响应的 sha256 前 16 位作缓存键，上游一变自动失效
+          json="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
+            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest)" || json="{}"
+          key="$(printf '%s' "$json" | sha256sum | cut -c1-16)"
+          echo "key=${key:-unknown}" >> "$GITHUB_OUTPUT"
       - name: ffmpeg 静态构建缓存
         uses: actions/cache@v4
         with:
           path: client/packaging/ffmpeg
-          key: javscribe-ffmpeg-win-${{ steps.ff.outputs.tag }}
+          key: javscribe-ffmpeg-win-${{ steps.ff.outputs.key }}
       - run: node scripts/fetch-ffmpeg.mjs win
       - run: pnpm typecheck
       - run: pnpm build:desktop
@@ -107,20 +108,21 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.version != ''
         run: pnpm version "${{ inputs.version }}" --no-git-tag-version --no-git-commit-version
       - run: pnpm install --frozen-lockfile
-      - name: 解析 BtbN latest 标签（ffmpeg 缓存键）
+      - name: 解析 BtbN latest（ffmpeg 缓存键 = API 响应哈希）
         id: ff
         shell: bash
         run: |
-          # BtbN 2026-09 资产更名，旧 download URL 已 404，改走 API 取 tag_name
-          tag="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
-            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
-            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
-          echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
+          # BtbN 发布频繁且命名多变（autobuild 标签 / latest 标签互换、资产改名）：
+          # 用 latest release API 响应的 sha256 前 16 位作缓存键，上游一变自动失效
+          json="$(curl -sf --retry 3 --retry-delay 2 -H 'user-agent: javscribe-ci' \
+            https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest)" || json="{}"
+          key="$(printf '%s' "$json" | sha256sum | cut -c1-16)"
+          echo "key=${key:-unknown}" >> "$GITHUB_OUTPUT"
       - name: ffmpeg 静态构建缓存
         uses: actions/cache@v4
         with:
           path: client/packaging/ffmpeg
-          key: javscribe-ffmpeg-linux-${{ steps.ff.outputs.tag }}
+          key: javscribe-ffmpeg-linux-${{ steps.ff.outputs.key }}
       - run: node scripts/fetch-ffmpeg.mjs linux
       - run: pnpm typecheck
       - run: pnpm build:desktop

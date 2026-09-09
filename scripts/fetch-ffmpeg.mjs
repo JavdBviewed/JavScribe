@@ -103,7 +103,12 @@ try {
   if (finalSize < 20 * 1024 * 1024) throw new Error(`ffmpeg 过小（${finalSize} B）`);
   // 冒烟：确认可执行
   const v = spawnSync(TARGET, ["-version"], { encoding: "utf8" });
-  if (v.status !== 0) throw new Error(`ffmpeg -version 失败：${v.stderr}`);
+  if (v.status !== 0 || v.error) {
+    throw new Error(
+      `ffmpeg -version 失败（status=${v.status} spawnErr=${v.error ? v.error.code + ":" + v.error.message : "none"}）` +
+      ` stdout=${(v.stdout || "").slice(0, 300)} stderr=${(v.stderr || "").slice(0, 300)}`,
+    );
+  }
   console.log(`[fetch-ffmpeg] 完成 → ${TARGET}（${Math.round(finalSize / 1048576)} MB，${v.stdout.split("\n")[0]}）`);
 } finally {
   rmSync(work, { recursive: true, force: true });
