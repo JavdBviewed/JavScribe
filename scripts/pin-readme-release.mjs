@@ -18,7 +18,7 @@ if (!tag || !tag.startsWith(`${kind}-v`)) {
   console.error(`用法: node scripts/pin-readme-release.mjs <client|serve> <${kind}-vX.Y.Z>（收到: ${kindRaw} ${tag}）`);
   process.exit(1);
 }
-const ver = tag.slice(tag.indexOf("v") + 1);
+const ver = tag.slice((kind + "-v").length); // 不能 indexOf("v")：serve 的 v 会误匹配
 
 let line;
 if (kind === "client") {
