@@ -1,6 +1,6 @@
 [project]
 name = "jav-scribe"
-version = "0.1.1"
+version = "0.1.2"
 description = "JavScribe — JAV 字幕生成与媒体库联动：ja→zh ASR（模型自持）、.zh.srt 原位落位、下载目录监听、进度查询、远端处理"
 readme = "README.md"
 authors = [
