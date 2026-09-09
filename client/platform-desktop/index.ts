@@ -48,4 +48,9 @@ export const desktopPlatform: PlatformAdapter = {
   downloadSrt(url, filename) {
     void desktop.download(url, filename);
   },
+
+  // 音轨缓存（任务表「换服务重跑」）；main 侧 audio-cache/ 查询
+  findAudioCache(videoName) {
+    return desktop.audioCache.find(videoName);
+  },
 };

@@ -8,6 +8,8 @@
 // 选择器，由调用方回退到 <input> 路径（保持 web 旧行为 1:1）。
 
 /** 单文件选取结果（dirHandle 仅 web 形态有；desktop 路径挂在 file._localPath） */
+import type { AudioCacheHit } from "./desktop-bridge";
+
 export interface PickedFile {
   file: File;
   dirHandle: FileSystemDirectoryHandle | null;
@@ -50,4 +52,9 @@ export interface PlatformAdapter {
   writeSrt(info: WriteBackInfo, srtName: string, data: ArrayBuffer): Promise<boolean>;
   /** 触发"保存/下载 srt"（web: <a download> 点击；desktop: 保存对话框） */
   downloadSrt(url: string, filename: string): void;
+  /**
+   * 音轨缓存查找（任务表「换服务重跑」用；按影片文件名查最近条目）。
+   * web 形态无持久 FS，恒返回 null；desktop 查 main 侧 audio-cache/。
+   */
+  findAudioCache(videoName: string): Promise<AudioCacheHit | null>;
 }

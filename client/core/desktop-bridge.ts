@@ -17,10 +17,26 @@ export interface TProgress {
   total: number;
 }
 
-/** 本地提音轨结果：ok 时 opus 在 main 侧 tmp（由 upload 流式读后清理） */
+/** 本地提音轨结果：ok 时 opus 在 main 侧（命中音轨缓存=缓存目录；未命中=tmp，upload 流式读后清理） */
 export type ExtractResult =
-  | { ok: true; opusPath: string; sizeBytes: number }
+  | { ok: true; opusPath: string; sizeBytes: number; cached?: boolean }
   | { ok: false; error: string };
+
+/** 音轨缓存查找结果（main 侧 audio-cache/；videoName 匹配最近条目） */
+export interface AudioCacheHit {
+  /** opus 缓存文件路径（仅 opusValid 时可直接复用） */
+  opusPath: string;
+  audioBytes: number;
+  videoPath: string;
+  videoName: string;
+  /** 源视频字节数（重提时 File shim size 用） */
+  videoBytes: number;
+  /** 源视频仍在且 size/mtime 与缓存一致 → opus 可直接复用 */
+  opusValid: boolean;
+  /** 源视频文件是否仍在磁盘 */
+  videoExists: boolean;
+  lastUsedAt: number;
+}
 
 export interface PickFileResult {
   path: string;
@@ -122,6 +138,10 @@ export interface JavDesktop {
     args: { videoPath?: string; data?: Uint8Array },
     onProgress?: (frac: number) => void,
   ): Promise<ExtractResult>;
+  /** 音轨缓存（按影片文件名查最近条目；无则 null） */
+  audioCache: {
+    find(videoName: string): Promise<AudioCacheHit | null>;
+  };
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
 

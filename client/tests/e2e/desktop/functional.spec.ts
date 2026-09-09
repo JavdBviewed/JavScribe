@@ -111,6 +111,8 @@ test("extract-audio IPC：mp4 → 真 opus（OggS 头）→ 流式上传后 tmp 
   );
   expect(ex.ok, JSON.stringify(ex)).toBe(true);
   expect(ex.sizeBytes).toBeGreaterThan(1000);
+  expect(ex.cached).toBe(true); // videoPath 通道提取成功 → opus rename 进 userData/audio-cache（换服务重跑复用）
+  expect(ex.opusPath.endsWith(".opus")).toBe(true);
   expect(readFileSync(ex.opusPath).subarray(0, 4).toString("hex")).toBe("4f676753");
 
   const up = await page.evaluate(
@@ -120,7 +122,7 @@ test("extract-audio IPC：mp4 → 真 opus（OggS 头）→ 流式上传后 tmp 
   expect(up.ok).toBe(true);
   const ups = (await (await request.get(`${MOCK}/_mock/uploads`)).json()) as Array<{ size: number }>;
   expect(ups[0].size).toBe(ex.sizeBytes);
-  expect(existsSync(ex.opusPath)).toBe(false); // upload 流式读完后 main 清理 tmp 目录
+  expect(existsSync(ex.opusPath)).toBe(true); // 缓存 opus 保留（7 天 / 20GB LRU）；tmp 侧无残留（extract 落缓存后已清）
 
   const bad = await page.evaluate(
     async (p) => await (window as any).javDesktop.extractAudio({ videoPath: p }),

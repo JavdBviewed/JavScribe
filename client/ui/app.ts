@@ -5,7 +5,7 @@
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
-import type { LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
+import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { $, esc } from "./dom";
@@ -568,8 +568,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
       ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
       : (j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
+    // 换服务重跑（仅 desktop）：终态行复用本地音轨缓存向其他服务提交新任务
+    const rerunBtn = (platform.kind === "desktop" && j.file
+      && (j.status === "done" || j.status === "error" || j.status === "skipped"))
+      ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
+      : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
@@ -577,7 +582,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${retry}</div>`;
+      <div class="job-actions">${dl}${retry}${rerunBtn}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -679,6 +684,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   jobList.onclick = async (ev) => {
+    const rb = (ev.target as HTMLElement).closest(".rerun") as HTMLButtonElement | null;
+    if (rb && !rb.disabled) {
+      if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+      void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "");
+      return;
+    }
     const b = (ev.target as HTMLElement).closest(".retry") as HTMLButtonElement | null;
     if (!b || b.disabled) return;
     const tr = b.closest(".job-row");
@@ -1227,6 +1238,105 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     state.autoSave = (ev.target as HTMLInputElement).checked;
     localStorage.setItem("javweb_autosave", state.autoSave ? "1" : "0");
   };
+
+  // ---------- 任务表「换服务重跑」：复用本地音轨缓存向另一个服务端提交新任务（仅 desktop） ----------
+  async function openRerunModal(videoName: string, curEngine: string, _curJobId: string) {
+    showModal(`换服务重跑 · ${videoName}`);
+    const body = $("modal-body");
+    body.innerHTML = '<div class="muted">检测本地音轨缓存中…</div>';
+    let hit: AudioCacheHit | null = null;
+    try { hit = await platform.findAudioCache(videoName); } catch { hit = null; }
+    if (!hit || (!hit.opusValid && !hit.videoExists)) {
+      body.innerHTML = `
+      <div class="set-note err">本地没有该影片的音轨缓存${hit && hit.videoExists ? "" : "（源视频也不在本机）"}</div>
+      <div class="muted small">重跑复用的是本机提取的音轨缓存（7 天保留）。该任务若是整片直传提交、或缓存已过期，就没有可复用的音轨。</div>`;
+      return;
+    }
+    const cands = (state.engines || []).filter((e) => e.name !== curEngine && e.online);
+    const statusHtml = hit.opusValid
+      ? `<div class="set-note">音轨缓存命中：<b>${mb(hit.audioBytes)} MB</b>·来源 ${esc(hit.videoPath)}</div>`
+      : `<div class="set-note">无有效音轨缓存（源视频已变更）。源视频在本机，将重新提取音轨后提交。</div>`;
+    if (!cands.length) {
+      body.innerHTML = statusHtml + '<div class="set-note err">没有其他在线服务可选（仅登记了本行服务，或其他服务均离线）</div>';
+      return;
+    }
+    const opts = cands.map((e, i) => `
+      <label class="chk-row"><input type="radio" name="rerun-engine" value="${esc(e.name)}"${i === 0 ? " checked" : ""}>
+      <span>${esc(e.name)} <span class="muted small mono">${esc(e.url)}</span></span></label>`).join("");
+    body.innerHTML = `
+      ${statusHtml}
+      <div class="set-group">目标服务</div>
+      ${opts}
+      <div class="set-row">
+        <button type="button" id="rerun-go" class="btn btn-primary">提交到所选服务</button>
+        <span id="rerun-prog" class="muted small"></span>
+      </div>`;
+    const goBtn = $("rerun-go") as HTMLButtonElement;
+    const prog = $("rerun-prog") as HTMLElement;
+    goBtn.onclick = async () => {
+      const eng = (body.querySelector<HTMLInputElement>('input[name="rerun-engine"]:checked') || null)?.value;
+      if (!eng || goBtn.disabled) return;
+      goBtn.disabled = true;
+      const fail = (msg: string) => {
+        body.insertAdjacentHTML("afterbegin", `<div class="set-note err">${esc(msg)}</div>`);
+        goBtn.disabled = false;
+      };
+      try {
+        const h = hit!;
+        // 第一段：取 opus（缓存命中直接复用；错开从源视频重提）
+        let opusPath: string; let audioBytes: number;
+        if (h.opusValid) {
+          opusPath = h.opusPath; audioBytes = h.audioBytes;
+          prog.textContent = "上传音轨中…";
+        } else {
+          prog.textContent = "重新提取音轨中…";
+          const shim = new File([], h.videoName) as File & { _localPath?: string };
+          Object.defineProperty(shim, "size", { value: h.videoBytes || 1, configurable: true });
+          shim._localPath = h.videoPath;
+          const res = await new Promise<Blob | { skipped: true }>((resolve, reject) => {
+            jav()!.extractAudio(shim, (pr) => {
+              prog.textContent = `重新提取音轨 · ${Math.round(pr * 100)}%`;
+            }).then(resolve, reject);
+          });
+          if (!res || "skipped" in res) throw new Error("音轨提取被跳过（文件为空或超限）");
+          const b = res as Blob & { _javOpusPath?: string; _javOpusSize?: number };
+          opusPath = b._javOpusPath || "";
+          audioBytes = b._javOpusSize || 0;
+          if (!opusPath) throw new Error("音轨提取没有产生可用音频");
+          prog.textContent = "上传音轨中…";
+        }
+        // 第二段：复用现有上传通道提交到目标服务（字节进度回显）
+        const upFile = new File([], h.videoName) as File & { _localPath?: string };
+        Object.defineProperty(upFile, "size", { value: audioBytes, configurable: true });
+        const audio = new Blob([]) as Blob & { _javOpusPath?: string; _javOpusSize?: number };
+        Object.defineProperty(audio, "size", { value: audioBytes, configurable: true });
+        audio._javOpusPath = opusPath;
+        audio._javOpusSize = audioBytes;
+        const d = await t.uploadAudio(upFile, eng, audio, (loaded, total, pct) => {
+          prog.textContent = `上传音轨 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`;
+        });
+        if (!d.ok) throw new Error(d.error || "音频上传失败");
+        // 等接受出具 job_id（desktop transport：201 即列 done；兼容 web 轮询语义多轮几次）
+        let jobId = "";
+        for (let i = 0; i < 20 && !jobId; i++) {
+          const st = await t.getUpload(d.uploadId);
+          if (st.phase === "done") jobId = st.job_id || "";
+          else if (st.phase === "error") throw new Error(st.error || "提交失败");
+          else await new Promise((r) => setTimeout(r, 300));
+        }
+        if (!jobId) throw new Error("提交接受超时（可在任务表查看）");
+        state.writeBackJobs.set(eng + "|" + jobId, {
+          engine: eng, videoName, dirHandle: null, videoPath: h.videoPath,
+        });
+        hideModal();
+        toast(`换服务重跑：「${videoName}」→ 「${eng}」任务 ${jobId}`, "ok");
+        refresh();
+      } catch (e) {
+        prog.textContent = "";
+        fail((e as Error).message || "重跑失败");
+      }
+    };
+  }
 
   // ---------- 服务设置 modal ----------
   const GROUP_ZH: Record<string, string> = { subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };

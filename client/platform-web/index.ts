@@ -90,4 +90,7 @@ export const webPlatform: PlatformAdapter = {
     a.click();
     a.remove();
   },
+
+  // 浏览器形态无持久本地盘符号，音轨不可复用 → 恒 null
+  findAudioCache: () => Promise.resolve(null),
 };

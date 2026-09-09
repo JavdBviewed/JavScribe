@@ -456,6 +456,9 @@ input:focus, select:focus {
 .dl-btn.retry { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .dl-btn.retry:hover { box-shadow: 0 3px 10px -3px var(--accent); }
 .dl-btn.retry:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
+.dl-btn.rerun { border-color: var(--line-strong); color: var(--muted); }
+.dl-btn.rerun:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 3px 10px -3px var(--accent); }
+.dl-btn.rerun:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
 .retried-note { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
 /* ---------- empty states ---------- */

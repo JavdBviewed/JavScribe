@@ -16,12 +16,14 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
+import type { AudioCacheHit } from "../core/desktop-bridge";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 
 // ---------------------------------------------------------------------------
@@ -509,9 +511,192 @@ function findFfmpeg(): string | null {
   return null;
 }
 
-type ExtractResult = { ok: true; opusPath: string; sizeBytes: number } | { ok: false; error: string };
+// ---------------------------------------------------------------------------
+// 音轨缓存（userData/audio-cache/）：本地提取的 opus 落盘复用
+//   - key = sha1(videoPath|size|mtimeMs)；条目 <key>.opus + <key>.meta.json
+//   - 命中（源视频 size/mtime 未变）→ 免重提，直接复用
+//   - 清理：启动时删超 7 天条目；总量超 20GB 按 lastUsedAt LRU 裁剪
+//   - 仅 videoPath 通道缓存；data 通道（无真实路径的 File）走 tmp 原行为
+// ---------------------------------------------------------------------------
+
+const AUDIO_CACHE_MAX_AGE_MS = 7 * 86400 * 1000;
+const AUDIO_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
+
+interface AudioCacheMeta {
+  videoPath: string;
+  videoName: string;
+  videoSize: number;
+  videoMtimeMs: number;
+  audioBytes: number;
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+function audioCacheDir(): string {
+  return path.join(app.getPath("userData"), "audio-cache");
+}
+
+function audioKey(videoPath: string, size: number, mtimeMs: number): string {
+  return crypto.createHash("sha1").update(`${videoPath}|${size}|${Math.round(mtimeMs)}`).digest("hex");
+}
+
+function cacheMetaOf(key: string): string {
+  return path.join(audioCacheDir(), key + ".meta.json");
+}
+
+function cacheOpusOf(key: string): string {
+  return path.join(audioCacheDir(), key + ".opus");
+}
+
+function readCacheMeta(key: string): AudioCacheMeta | null {
+  try {
+    const m = JSON.parse(fs.readFileSync(cacheMetaOf(key), "utf8")) as AudioCacheMeta;
+    if (!m || typeof m.videoPath !== "string") return null;
+    return m;
+  } catch {
+    return null;
+  }
+}
+
+function touchCache(key: string): void {
+  const m = readCacheMeta(key);
+  if (!m) return;
+  m.lastUsedAt = Date.now();
+  try { fs.writeFileSync(cacheMetaOf(key), JSON.stringify(m, null, 1)); } catch { /* 忽略 */ }
+}
+
+/** 精确命中：源视频存在且 size/mtime 与缓存一致 → 返回 opus 缓存路径，否则 null */
+function cacheGetExact(videoPath: string, size: number, mtimeMs: number): string | null {
+  const key = audioKey(videoPath, size, mtimeMs);
+  const opus = cacheOpusOf(key);
+  try {
+    const st = fs.statSync(opus);
+    if (!st.isFile() || st.size <= 0) return null;
+    const m = readCacheMeta(key);
+    if (!m) return null;
+    touchCache(key);
+    return opus;
+  } catch {
+    return null;
+  }
+}
+
+/** 提取成功落缓存（同卷 rename，失败回退 copy）；返回最终 opus 路径（缓存目录或原 tmp） */
+function cacheStore(videoPath: string, size: number, mtimeMs: number, opusSrc: string): string {
+  try {
+    const key = audioKey(videoPath, size, mtimeMs);
+    const dir = audioCacheDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const opus = cacheOpusOf(key);
+    try { fs.renameSync(opusSrc, opus); }
+    catch { fs.copyFileSync(opusSrc, opus); }
+    const meta: AudioCacheMeta = {
+      videoPath, videoName: path.basename(videoPath),
+      videoSize: size, videoMtimeMs: Math.round(mtimeMs),
+      audioBytes: fs.statSync(opus).size,
+      createdAt: Date.now(), lastUsedAt: Date.now(),
+    };
+    fs.writeFileSync(cacheMetaOf(key), JSON.stringify(meta, null, 1));
+    return opus;
+  } catch (e) {
+    console.warn("[audio-cache] 落缓存失败（回退 tmp 原行为）:", (e as Error).message);
+    return opusSrc;
+  }
+}
+
+/** 按影片文件名查最近缓存条目（换服务重跑用）；无则 null */
+function cacheFindByName(videoName: string): AudioCacheHit | null {
+  let dir: string;
+  try { dir = audioCacheDir(); fs.readdirSync(dir); } catch { return null; }
+  const entries = fs.readdirSync(dir).filter((f) => f.endsWith(".meta.json"));
+  let best: { meta: AudioCacheMeta; opus: string; valid: boolean; exists: boolean } | null = null;
+  for (const f of entries) {
+    const m = readCacheMeta(f.slice(0, -".meta.json".length));
+    if (!m || m.videoName !== videoName) continue;
+    const opus = cacheOpusOf(f.slice(0, -".meta.json".length));
+    let exists = false;
+    let valid = false;
+    try {
+      const vst = fs.statSync(m.videoPath);
+      exists = vst.isFile();
+      valid = exists && vst.size === m.videoSize && Math.round(vst.mtimeMs) === m.videoMtimeMs
+        && fs.statSync(opus).size > 0;
+    } catch { /* 源视频或缓存缺失 */ }
+    const rank = valid ? 2 : exists ? 1 : 0;
+    if (!best || rank > bestValidRank(best) || (rank === bestValidRank(best) && m.lastUsedAt > best.meta.lastUsedAt)) {
+      best = { meta: m, opus, valid, exists };
+    }
+  }
+  if (!best) return null;
+  if (best.valid) touchCache(path.basename(best.opus, ".opus"));
+  return {
+    opusPath: best.opus,
+    audioBytes: best.meta.audioBytes,
+    videoPath: best.meta.videoPath,
+    videoName: best.meta.videoName,
+    videoBytes: best.meta.videoSize,
+    opusValid: best.valid,
+    videoExists: best.exists,
+    lastUsedAt: best.meta.lastUsedAt,
+  };
+}
+
+function bestValidRank(b: { valid: boolean; exists: boolean }): number {
+  return b.valid ? 2 : b.exists ? 1 : 0;
+}
+
+/** 启动清理：超 7 天条目删除；总量超 20GB 按 lastUsedAt LRU 裁剪 */
+function cachePrune(): void {
+  try {
+    const dir = audioCacheDir();
+    const metas: { key: string; meta: AudioCacheMeta; bytes: number }[] = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".meta.json")) continue;
+      const key = f.slice(0, -".meta.json".length);
+      const m = readCacheMeta(key);
+      if (!m) continue;
+      let bytes = 0;
+      try { bytes = fs.statSync(cacheOpusOf(key)).size; } catch { /* opus 缺失 */ }
+      metas.push({ key, meta: m, bytes });
+    }
+    const now = Date.now();
+    for (const e of metas) {
+      const stale = now - Math.max(e.meta.createdAt, e.meta.lastUsedAt) > AUDIO_CACHE_MAX_AGE_MS;
+      if (stale) {
+        try { fs.rmSync(cacheOpusOf(e.key), { force: true }); fs.rmSync(cacheMetaOf(e.key), { force: true }); } catch { /* 忽略 */ }
+      }
+    }
+    let total = metas.filter((e) => now - Math.max(e.meta.createdAt, e.meta.lastUsedAt) <= AUDIO_CACHE_MAX_AGE_MS)
+      .reduce((a, e) => a + e.bytes, 0);
+    if (total > AUDIO_CACHE_MAX_BYTES) {
+      const survivors = metas
+        .filter((e) => now - Math.max(e.meta.createdAt, e.meta.lastUsedAt) <= AUDIO_CACHE_MAX_AGE_MS)
+        .sort((a, b) => b.meta.lastUsedAt - a.meta.lastUsedAt);
+      for (const e of survivors) {
+        if (total <= AUDIO_CACHE_MAX_BYTES) break;
+        total -= e.bytes;
+        try { fs.rmSync(cacheOpusOf(e.key), { force: true }); fs.rmSync(cacheMetaOf(e.key), { force: true }); } catch { /* 忽略 */ }
+      }
+    }
+  } catch (e) {
+    console.warn("[audio-cache] 清理失败（忽略）:", (e as Error).message);
+  }
+}
+
+type ExtractResult = { ok: true; opusPath: string; sizeBytes: number; cached?: boolean } | { ok: false; error: string };
 
 function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f: number) => void): Promise<ExtractResult> {
+  // 音轨缓存命中：源视频未变（size/mtime）→ 免重提，直接复用
+  if (args.videoPath) {
+    try {
+      const st = fs.statSync(args.videoPath);
+      const hit = cacheGetExact(args.videoPath, st.size, st.mtimeMs);
+      if (hit) {
+        onFrac(1);
+        return Promise.resolve({ ok: true, opusPath: hit, sizeBytes: fs.statSync(hit).size, cached: true });
+      }
+    } catch { /* stat 失败走提取流程 */ }
+  }
   const ffmpeg = findFfmpeg();
   if (!ffmpeg) {
     return Promise.resolve({
@@ -574,7 +759,19 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
         try {
           const size = fs.statSync(outPath).size;
           onFrac(1);
-          finish({ ok: true, opusPath: outPath, sizeBytes: size });
+          let finalPath = outPath;
+          let cached = false;
+          if (src && args.videoPath) {
+            // 源视频仍在 → 落音轨缓存（换服务重跑/二次派发免重提）；
+            // 仅 videoPath 通道：data 通道的 src 是 tmp/in.bin（一次性文件），落缓存会产生 videoName=in.bin 的垃圾条目
+            try {
+              const vst = fs.statSync(src);
+              finalPath = cacheStore(src, vst.size, vst.mtimeMs, outPath);
+              cached = path.dirname(finalPath) === audioCacheDir();
+              if (cached) fs.rmSync(tmp, { recursive: true, force: true }); // opus 已 rename 进缓存，tmp 已空 → 清掉不留 /tmp 残留
+            } catch { /* 源已删 → 保持 tmp 原行为 */ }
+          }
+          finish({ ok: true, opusPath: finalPath, sizeBytes: size, cached });
         } catch (e) {
           finish({ ok: false, error: "提取输出读取失败: " + (e as Error).message });
         }
@@ -802,6 +999,16 @@ function registerIpc(): void {
     return runExtract(args || {}, (frac) => sendToWin("extract-progress", { frac }));
   });
 
+  // 音轨缓存查找（任务表「换服务重跑」按影片文件名查最近条目）
+  ipcMain.handle("audio-cache-find", (_ev, videoName: string) => {
+    try {
+      return cacheFindByName(String(videoName || ""));
+    } catch (e) {
+      console.warn("[audio-cache] find 失败:", (e as Error).message);
+      return null;
+    }
+  });
+
   // 音频上传（opus 字节流 → serve /upload?ext=opus，无 key）
   ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array }) => {
     let opusDir: string | null = null;
@@ -833,7 +1040,8 @@ function registerIpc(): void {
       const err = e as Error & { network?: boolean };
       return { ok: false, error: err.message || String(e), network: !!err.network };
     } finally {
-      if (opusDir) {
+      // 音轨缓存目录内的文件保留（换服务重跑复用）；tmp 文件照旧整目录清理
+      if (opusDir && opusDir !== audioCacheDir()) {
         try {
           fs.rmSync(opusDir, { recursive: true, force: true });
         } catch {
@@ -1589,6 +1797,7 @@ app.whenReady().then(() => {
     app.setPath("userData", process.env.JAVSCRIBE_CLIENT_USERDATA);
   }
   store = new EngineStore(app.getPath("userData"));
+  void cachePrune(); // 音轨缓存启动清理（7 天 / 20GB LRU，fire-and-forget）
   buildMenu();
   registerIpc();
   registerUpdateIpc();
