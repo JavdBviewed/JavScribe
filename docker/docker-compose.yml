@@ -16,6 +16,9 @@
 #                        off). Set to /hostfs to let /scan resolve host paths
 #                        (e.g. /media/jav) that are not otherwise mounted in.
 #   JAV_HOSTFS         host root to bind RO at /hostfs (default /)
+#   JAV_DATA_DIR       host dir for the persistent data dir (config + uploaded
+#                        audio/subtitle cache inbox), survives image rebuilds
+#                        (default /opt/jav-scribe/data)
 name: jav-scribe
 
 services:
@@ -41,6 +44,9 @@ services:
     ports:
       - "${JAV_PORT:-8300}:8300"
     volumes:
+      # Persistent data dir: config + uploaded audio/subtitle cache (inbox),
+      # survives image rebuilds (entrypoint seeds the config on first boot)
+      - ${JAV_DATA_DIR:-/opt/jav-scribe/data}:/opt/jav-scribe
       # Model weights (first-boot download, persists across rebuilds)
       - ${JAV_MODELS_DIR:-/opt/jav-scribe/models}:/opt/chickenrice/models
       # Media directory to watch (BT/PT landing spot; .zh.srt lands next to source)

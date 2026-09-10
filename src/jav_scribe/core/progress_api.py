@@ -6,8 +6,17 @@ Endpoints (all JSON unless noted):
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
   POST /jobs/<id>/retry       -> re-queue SKIPPED files (force regenerate)
-  PUT  /upload?source=<name>   -> body = audio bytes; creates a remote job
-                                   (X-Source-Name header or ?source=, ?ext=)
+  PUT  /upload?source=<name>   -> body = audio bytes; stored content-addressed
+                                   as inbox/<sha1>.<ext> (same-content dedup,
+                                   streaming, in-memory-light), creates a remote
+                                   job (X-Source-Name header or ?source=, ?ext=,
+                                   optional ?sha1= declared hash, 400 on mismatch)
+  GET  /cache/check?sha1=<h>   -> {ok, cached, size?} pre-check: does the server
+       [&size=<n>&ext=<e>]      already have this exact content (for the
+                                   client's ask-first-upload-later flow)
+  POST /upload/submit?sha1=<h> -> bodyless submit of an already-cached file:
+       [&ext=<e>]               creates a job from inbox/<sha1>.<ext>;
+                                   409 {ok:false, error:"not-cached"} if absent
   GET  /jobs/<id>/result.srt   -> alias of /result
   GET  /config                 -> manageable settings (X-Api-Key required)
   PUT  /config                 -> {"values": {path: value}} whitelist-validated
@@ -30,10 +39,13 @@ unauthenticated (LAN policy).
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
+import os
 import re
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +59,20 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 MAX_UPLOAD_MB = 400
+
+# 上传流式块大小（避免整包读入内存；2.5h 影片 opus ~30-80MB）
+UPLOAD_CHUNK = 1024 * 1024
+
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+_EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
+
+
+def _clean_ext(raw: Any) -> str:
+    return str(raw or "opus").lstrip(".").lower()
+
+
+def cache_path(inbox_dir: Path, sha1: str, ext: str) -> Path:
+    return inbox_dir / f"{sha1}.{ext}"
 
 # ---------------------------------------------------------------------------
 # /config whitelist
@@ -292,6 +318,32 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True, "mapped": mapped, **result})
             return
+        if len(parts) == 2 and parts[0] == "cache" and parts[1] == "check":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            sha1 = str((q.get("sha1") or [""])[0]).lower()
+            if not _SHA1_RE.match(sha1):
+                self._send(400, {"ok": False, "error": "sha1 参数缺失或非法（需 40 位十六进制）"})
+                return
+            ext = _clean_ext((q.get("ext") or [None])[0])
+            if not _EXT_RE.match(ext):
+                self._send(400, {"ok": False, "error": "ext 参数非法"})
+                return
+            size_raw = (q.get("size") or [None])[0]
+            p = cache_path(self.inbox_dir, sha1, ext)
+            resp: dict[str, Any] = {"ok": True, "cached": False}
+            if p.is_file():
+                actual = p.stat().st_size
+                if size_raw is not None:
+                    try:
+                        if int(size_raw) != actual:
+                            self._send(200, {"ok": True, "cached": False, "size": actual})
+                            return
+                    except ValueError:
+                        pass
+                resp["cached"] = True
+                resp["size"] = actual
+            self._send(200, resp)
+            return
         if parts[0] == "jobs":
             if len(parts) == 1:
                 self._send(200, [j.to_dict() for j in self.engine.jobs])
@@ -340,6 +392,28 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(201, {"ok": True, "job_id": job.id})
             return
+        if len(parts) == 2 and parts[0] == "upload" and parts[1] == "submit":
+            # 先问后传命中路径：无 body，直接以已缓存音轨建任务
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            sha1 = str((q.get("sha1") or [""])[0]).lower()
+            if not _SHA1_RE.match(sha1):
+                self._send(400, {"ok": False, "error": "sha1 参数缺失或非法（需 40 位十六进制）"})
+                return
+            ext = _clean_ext((q.get("ext") or [None])[0])
+            if not _EXT_RE.match(ext):
+                self._send(400, {"ok": False, "error": "ext 参数非法"})
+                return
+            p = cache_path(self.inbox_dir, sha1, ext)
+            if not p.is_file():
+                self._send(409, {"ok": False, "error": "not-cached"})
+                return
+            source_name = self.headers.get("X-Source-Name") or (q.get("source") or ["remote"])[0]
+            job = self.engine.submit_remote_files([p], source_name=source_name)
+            self._send(
+                201,
+                {"ok": True, "job_id": job.id, "file": p.name, "sha1": sha1, "cached": True},
+            )
+            return
         self._send(404, {"ok": False, "error": "not found"})
 
     # -- PUT /upload ------------------------------------------------------
@@ -383,18 +457,60 @@ class _Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > MAX_UPLOAD_MB * 1024 * 1024:
             self._send(400, {"ok": False, "error": f"bad body size (max {MAX_UPLOAD_MB}MB)"})
             return
-        body = self.rfile.read(length)
+        ext = _clean_ext((q.get("ext") or [None])[0])
+        if not _EXT_RE.match(ext):
+            self._send(400, {"ok": False, "error": "ext 参数非法"})
+            return
+        declared_sha1 = str((q.get("sha1") or [""])[0]).lower() or None
+        if declared_sha1 is not None and not _SHA1_RE.match(declared_sha1):
+            self._send(400, {"ok": False, "error": "sha1 参数非法（需 40 位十六进制）"})
+            return
         source_name = (
             self.headers.get("X-Source-Name")
             or (q.get("source") or ["remote"])[0]
         )
-        ext = (q.get("ext") or ["opus"])[0].lstrip(".")
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
-        safe = "".join(c for c in source_name if c.isalnum() or c in "._-") or "remote"
-        audio_path = self.inbox_dir / f"{safe}.{ext}"
-        audio_path.write_bytes(body)
-        job = self.engine.submit_remote_files([audio_path], source_name=source_name)
-        self._send(201, {"ok": True, "job_id": job.id, "file": audio_path.name})
+        # 流式落盘边算 sha1（不整包驻留内存）；内容寻址存储，同内容去重复用。
+        # 点前缀临时文件：崩溃残留也会被 retention 清理（ext 命中 CACHE_EXTS）。
+        tmp = self.inbox_dir / (
+            f".upload.{os.getpid()}.{threading.get_ident()}.{int(time.time() * 1e6)}.{ext}"
+        )
+        digest = hashlib.sha1()
+        try:
+            remaining = length
+            with open(tmp, "wb") as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(UPLOAD_CHUNK, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+        except OSError as ex:
+            tmp.unlink(missing_ok=True)
+            self._send(500, {"ok": False, "error": f"写入失败: {ex}"})
+            return
+        hexd = digest.hexdigest()
+        if declared_sha1 is not None and hexd != declared_sha1:
+            tmp.unlink(missing_ok=True)
+            self._send(400, {"ok": False, "error": "sha1 不匹配（声明值与实际内容不符）"})
+            return
+        final = cache_path(self.inbox_dir, hexd, ext)
+        if final.is_file():
+            # 同内容已在缓存（重复提交/并发同名上传）：复用现有文件
+            tmp.unlink(missing_ok=True)
+        else:
+            try:
+                os.replace(tmp, final)
+            except OSError as ex:
+                tmp.unlink(missing_ok=True)
+                self._send(500, {"ok": False, "error": f"落盘失败: {ex}"})
+                return
+        job = self.engine.submit_remote_files([final], source_name=source_name)
+        self._send(
+            201,
+            {"ok": True, "job_id": job.id, "file": final.name, "sha1": hexd},
+        )
 
 
 class ProgressHTTP:

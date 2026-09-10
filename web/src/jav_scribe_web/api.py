@@ -95,6 +95,7 @@ class UploadTask:
     audio_mb: float | None = None
     job_id: str | None = None
     error: str | None = None
+    cached: bool = False  # 服务端命中内容缓存（免上传）
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +110,7 @@ class UploadTask:
             "audio_mb": self.audio_mb,
             "job_id": self.job_id,
             "error": self.error,
+            "cached": self.cached,
         }
 
 
@@ -208,9 +210,11 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         eng = JavScribeEngine(task.engine, entry["url"])
         try:
             async with _lock_for(task.engine):
-                task.job_id = await eng.upload_audio(
+                res = await eng.upload_audio(
                     audio_tmp.read_bytes(), task.name or "remote"
                 )
+                task.job_id = res["job_id"]
+                task.cached = bool(res.get("cached"))
         except Exception as ex:
             task.phase = "error"
             task.error = f"服务拒绝任务: {ex}"

@@ -33,8 +33,10 @@ def _client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def _handler(upload_status: int = 201):
+def _handler(upload_status: int = 201, cache: dict | None = None, calls: list | None = None):
     def handle(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append((request.method, request.url.path))
         p = request.url.path
         if p == "/health":
             return httpx.Response(200, json=HEALTH)
@@ -44,6 +46,14 @@ def _handler(upload_status: int = 201):
             return httpx.Response(200, json=JOB_DETAIL)
         if p == f"/jobs/{JOB_SUMMARY['id']}/result":
             return httpx.Response(200, content=SRT.encode(), headers={"content-type": "text/plain"})
+        if p == "/cache/check":
+            if cache is None:
+                return httpx.Response(404, json={"ok": False, "error": "not found"})  # 旧版服务
+            return httpx.Response(200, json=cache)
+        if p == "/upload/submit":
+            if cache is None:
+                return httpx.Response(404, json={"ok": False, "error": "not found"})
+            return httpx.Response(201, json={"ok": True, "job_id": "j-cache", "file": "x.opus", "cached": True})
         if p == "/upload":
             if request.headers.get("X-Source-Name") != "PJAM-045.mp4":
                 return httpx.Response(500)
@@ -76,9 +86,10 @@ def test_health_jobs_detail() -> None:
 def test_upload_ok_and_rejected() -> None:
     async def run():
         e = JavScribeEngine("w", BASE)
-        e._client = _client(_handler(201))
+        e._client = _client(_handler(201))  # 旧版服务（无 /cache/check）
         try:
-            assert await e.upload_audio(b"audio", "PJAM-045.mp4") == "j1"
+            res = await e.upload_audio(b"audio", "PJAM-045.mp4")
+            assert res == {"job_id": "j1", "cached": False}
         finally:
             await e.close()
         e2 = JavScribeEngine("w", BASE)
@@ -89,6 +100,32 @@ def test_upload_ok_and_rejected() -> None:
                 raise AssertionError("expected EngineUploadError")
             except EngineUploadError as ex:
                 assert "400" in str(ex)
+        finally:
+            await e2.close()
+    asyncio.run(run())
+
+
+def test_upload_cache_hit_skips_put() -> None:
+    """服务端命中缓存：/cache/check → /upload/submit，不发 PUT。"""
+    async def run():
+        calls: list = []
+        e = JavScribeEngine("w", BASE)
+        e._client = _client(_handler(cache={"ok": True, "cached": True, "size": 6}, calls=calls))
+        try:
+            res = await e.upload_audio(b"audio", "PJAM-045.mp4")
+            assert res == {"job_id": "j-cache", "cached": True}
+            assert ("PUT", "/upload") not in calls, calls
+            assert ("POST", "/upload/submit") in calls, calls
+        finally:
+            await e.close()
+        # 未命中：check 200 cached=false → 常规 PUT
+        calls2: list = []
+        e2 = JavScribeEngine("w", BASE)
+        e2._client = _client(_handler(cache={"ok": True, "cached": False}, calls=calls2))
+        try:
+            res2 = await e2.upload_audio(b"audio", "PJAM-045.mp4")
+            assert res2 == {"job_id": "j1", "cached": False}
+            assert ("PUT", "/upload") in calls2 and ("POST", "/upload/submit") not in calls2
         finally:
             await e2.close()
     asyncio.run(run())

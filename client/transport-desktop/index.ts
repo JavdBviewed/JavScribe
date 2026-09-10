@@ -70,7 +70,7 @@ function dispatchUpload(
       Object.assign(status, {
         phase: "done", progress: 1, finished: Date.now() / 1000, job_id: r.job_id || "",
       });
-      return { ok: true as const, uploadId: id, sizeMb: toMb(file.size) };
+      return { ok: true as const, uploadId: id, sizeMb: toMb(file.size), cached: r.cached === true };
     }
     Object.assign(status, {
       phase: "error", error: r.error || "上传失败", finished: Date.now() / 1000,

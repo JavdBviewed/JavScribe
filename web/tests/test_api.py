@@ -120,10 +120,10 @@ def test_upload_pipeline_dispatches_opus() -> None:
     """2s tone: upload -> extract (progress) -> fake workshop gets an ogg opus."""
     captured: dict = {}
 
-    async def fake_upload_audio(self, audio_bytes: bytes, name: str) -> str:
+    async def fake_upload_audio(self, audio_bytes: bytes, name: str) -> dict:
         captured["bytes"] = audio_bytes
         captured["name"] = name
-        return "job-fake-1"
+        return {"job_id": "job-fake-1", "cached": False}
 
     JavScribeEngine.upload_audio = fake_upload_audio  # type: ignore[method-assign]
     try:

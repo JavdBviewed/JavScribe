@@ -5,6 +5,8 @@ Protocol (JavScribe repo, progress_api.py):
   GET  /jobs                       -> [Job summary]
   GET  /jobs/<id>                  -> Job detail (includes files[])
   PUT  /upload?source=NAME         -> 201 {ok, job_id, file}   (body = audio bytes)
+  GET  /cache/check?sha1=&size=&ext= -> {ok, cached, size?}     (新版服务；旧版 404)
+  POST /upload/submit?sha1=&ext=   -> 201 {ok, job_id, file, cached}（命中免传字节；未命中 409）
   POST /jobs/<id>/retry          -> 201 {ok, job_id}  (re-queue SKIPPED files, force regenerate)
   GET  /jobs/<id>/result           -> SRT bytes
   GET  /config                     -> {ok, profile, items[]}      (X-Api-Key)
@@ -12,6 +14,7 @@ Protocol (JavScribe repo, progress_api.py):
 """
 from __future__ import annotations
 
+import hashlib
 from urllib.parse import unquote
 
 import httpx
@@ -69,15 +72,41 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
-    async def upload_audio(self, audio: bytes, source_name: str) -> str:
-        r = await self._get_client().put(
+    async def upload_audio(self, audio: bytes, source_name: str) -> dict:
+        """转发 opus：先问后传（服务端内容寻址缓存）。
+
+        命中 → POST /upload/submit 免传字节建任务；
+        未命中 / 旧版服务（/cache/check 404）/ submit 竞态失败 → 常规 PUT /upload。
+        返回 {job_id, cached}。
+        """
+        sha1 = hashlib.sha1(audio).hexdigest()
+        client = self._get_client()
+        try:
+            ck = await client.get(
+                f"{self.url}/cache/check",
+                params={"sha1": sha1, "size": len(audio), "ext": "opus"},
+            )
+            if ck.status_code == 200 and ck.json().get("cached") is True:
+                sub = await client.post(
+                    f"{self.url}/upload/submit",
+                    params={"sha1": sha1, "ext": "opus"},
+                    headers={"X-Source-Name": source_name},
+                )
+                if sub.status_code == 201:
+                    d = sub.json()
+                    return {"job_id": str(d.get("job_id") or ""), "cached": True}
+                # 命中后 submit 失败（缓存文件恰被 retention 清理等）→ 落回常规上传
+        except httpx.HTTPError:
+            pass  # 预检网络异常不阻断，落回常规上传由 PUT 报真实错误
+        r = await client.put(
             f"{self.url}/upload",
+            params={"ext": "opus", "sha1": sha1},
             content=audio,
             headers={"X-Source-Name": source_name, "Content-Type": "application/octet-stream"},
         )
         if r.status_code != 201:
             raise EngineUploadError(f"service rejected upload: HTTP {r.status_code}")
-        return str(r.json()["job_id"])
+        return {"job_id": str(r.json()["job_id"]), "cached": False}
 
     async def result(self, job_id: str) -> tuple[bytes, str]:
         r = await self._get_client().get(f"{self.url}/jobs/{job_id}/result")

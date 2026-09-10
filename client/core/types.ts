@@ -54,6 +54,8 @@ export interface UploadStatus {
   audio_mb?: number | null;
   job_id?: string | null;
   error?: string | null;
+  /** 服务端命中内容缓存（免上传；web 链路轮询可见） */
+  cached?: boolean | null;
 }
 
 export type ConfigType = "bool" | "enum" | "list" | "int" | "float" | "secret" | "text";

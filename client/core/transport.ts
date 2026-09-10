@@ -11,9 +11,9 @@ import type {
 
 export type UploadProgress = (loadedBytes: number, totalBytes: number, pct: number) => void;
 
-/** 上传（整片/音频）受理结果：202 → ok；非 202 → 错误文案 */
+/** 上传（整片/音频）受理结果：202 → ok；非 202 → 错误文案。cached=服务端命中内容缓存（免上传） */
 export type UploadDispatch =
-  | { ok: true; uploadId: string; sizeMb: number }
+  | { ok: true; uploadId: string; sizeMb: number; cached?: boolean }
   | { ok: false; error: string; network?: boolean };
 
 export class TransportError extends Error {

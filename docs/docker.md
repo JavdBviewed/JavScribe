@@ -51,8 +51,8 @@ docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-指定版本：把 compose 里 `image:` 的 `latest` 改成 `v0.1.2` 这类具体 tag
-（`ghcr.io/javdbviewed/jav-scribe-serve:v0.1.2`），升级 = 改 tag → `pull` → `up -d`。
+指定版本：把 compose 里 `image:` 的 `latest` 改成 `v0.1.3` 这类具体 tag
+（`ghcr.io/javdbviewed/jav-scribe-serve:v0.1.3`），升级 = 改 tag → `pull` → `up -d`。
 
 本地构建（离线 / 需要改引擎版本 CHICKENRICE_REF 时）：`up -d --build`。
 
@@ -63,6 +63,13 @@ docker compose -f docker/docker-compose.yml up -d
 | `JAV_WATCH_DIR` | `/media/jav` | 监听目录（BT/PT 落盘处），`.zh.srt` 生成在同级 |
 | `JAV_MODELS_DIR` | `/opt/jav-scribe/models` | 模型权重存放目录（volume） |
 | `JAV_PORT` | `8300` | 进度/上传 API 宿主机端口 |
+| `JAV_DATA_DIR` | `/opt/jav-scribe/data` | 持久化数据目录（`/config` 设置 + 上传音轨/字幕缓存 inbox），跨镜像重建不丢 |
+| `JAVSCRIBE_API_KEY` | 空 | `/config` 设置接口鉴权 Key（不设则 /config 不可用，上传/进度不受影响） |
+| `JAVSCRIBE_HOST_ROOT` | 空 | 设 `/hostfs` 后 `/scan` 可解析容器外宿主机路径 |
+
+上传缓存：`PUT /upload` 按内容寻址存到数据目录 `inbox/<sha1>.<ext>`，同内容只存一份；
+客户端/工作台上传前会先 `GET /cache/check` 预检，命中直接 `POST /upload/submit` 建任务
+（免传字节）。缓存与 `.zh.srt` 一起受「缓存保留天数」（默认 7 天 + 活跃任务保护）清理。
 
 ## 验证
 

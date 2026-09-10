@@ -21,7 +21,7 @@ const icall = (page: any, method: string, ...args: string[]) =>
 test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   const r = await icall(page, "getHealth");
   expect(r.ok).toBe(true);
-  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.4", engines: 1, online: 1 });
+  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.5", engines: 1, online: 1 });
 });
 
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {
@@ -77,6 +77,52 @@ test("upload-audio IPC 全链路：opus 字节流 → 201 job → finished → s
   }, d.job_id);
   expect(rd.ok).toBe(true);
   expect((rd as { text: string }).text).toContain("テスト字幕 test-a.mp4");
+});
+
+test("服务端音轨缓存：同 opus 二次提交免上传（cache/check → upload/submit）", async ({ page, request }) => {
+  const opus = readFileSync(fx("sine.opus"));
+  const up1 = await page.evaluate(async (p) => {
+    return await (window as any).javDesktop.upload.audio({ id: "t-cache-1", engine: "mock", name: "cache-a.mp4", opusPath: p });
+  }, fx("sine.opus"));
+  expect(up1.ok, JSON.stringify(up1)).toBe(true);
+  expect(up1.cached).toBeFalsy();
+  let ups = (await (await request.get(`${MOCK}/_mock/uploads`)).json()) as Array<{ size: number; sha1: string }>;
+  expect(ups).toHaveLength(1);
+  expect(ups[0].size).toBe(opus.length);
+
+  // 回归：上传不得删除源目录（历史 bug：upload-audio 曾递归 rm 整个 opus 源目录）
+  for (const f of ["video-a.mp4", "video-b.mkv", "sine.opus", "folder/video-c.mp4", "folder/video-c.zh.srt"]) {
+    expect(existsSync(fx(f)), `源目录文件不得被删：${f}`).toBe(true);
+  }
+
+  // 同一 opus 再提交（不同 source 名）：服务端缓存命中 → 免传字节，仍出新 job
+  const up2 = await page.evaluate(async (p) => {
+    return await (window as any).javDesktop.upload.audio({ id: "t-cache-2", engine: "mock", name: "cache-b.mp4", opusPath: p });
+  }, fx("sine.opus"));
+  expect(up2.ok, JSON.stringify(up2)).toBe(true);
+  expect(up2.cached).toBe(true);
+  expect(up2.job_id).toBeTruthy();
+  expect(up2.job_id).not.toBe(up1.job_id);
+  ups = await (await request.get(`${MOCK}/_mock/uploads`)).json();
+  expect(ups).toHaveLength(1); // 第二次没有真正传字节
+
+  // 整片直传同样去重：同视频第二次命中
+  const f1 = await page.evaluate(async (p) => {
+    return await (window as any).javDesktop.upload.file({ id: "t-cache-f1", engine: "mock", name: "vid-c.mkv", ext: "mkv", localPath: p });
+  }, fx("video-b.mkv"));
+  expect(f1.ok, JSON.stringify(f1)).toBe(true);
+  const f2 = await page.evaluate(async (p) => {
+    return await (window as any).javDesktop.upload.file({ id: "t-cache-f2", engine: "mock", name: "vid-c-copy.mkv", ext: "mkv", localPath: p });
+  }, fx("video-b.mkv"));
+  expect(f2.ok, JSON.stringify(f2)).toBe(true);
+  expect(f2.cached).toBe(true);
+  expect(f2.job_id).toBeTruthy();
+  ups = await (await request.get(`${MOCK}/_mock/uploads`)).json();
+  expect(ups).toHaveLength(2); // 仅 opus 首传 + 整片首传
+  expect(ups[1].size).toBe(readFileSync(fx("video-b.mkv")).length);
+
+  // 命中产生的 job 正常跑完
+  await waitForMockJobFinished(request, up2.job_id);
 });
 
 test("upload-audio data 通道（无路径 File）+ upload-file 整片直传", async ({ page, request }) => {

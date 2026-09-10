@@ -186,11 +186,13 @@ export interface JavDesktop {
 
 }
 
-/** upload-audio / upload-file 受理结果（serve 201 → job_id） */
+/** upload-audio / upload-file 受理结果（serve 201 → job_id；cached=服务端内容缓存命中，免上传） */
 export interface UploadDispatchResult {
   ok: boolean;
   job_id?: string;
   file?: string;
+  /** 服务端已有同内容缓存（/upload/submit 建任务，未传字节） */
+  cached?: boolean;
   error?: string;
   network?: boolean;
 }

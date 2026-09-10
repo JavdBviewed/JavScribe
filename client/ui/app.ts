@@ -1090,7 +1090,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         setFill(pct + "%");
       }).then((d) => {
         if (d.ok) {
-          setStep("step-extract", "done", "\u2713", `${prefix}音频 ${d.sizeMb} MB 已接收`);
+          setStep("step-extract", "done", "\u2713",
+            d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}音频 ${d.sizeMb} MB 已接收`);
           line2.classList.add("on");
           setStep("step-dispatch", "active", "3", "提交中…");
           setFill("100%");
@@ -1113,7 +1114,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         setFill(pct + "%");
       }).then((d) => {
         if (d.ok) {
-          setStep("step-upload", "done", "\u2713", `${prefix}${d.sizeMb} MB 已接收`);
+          setStep("step-upload", "done", "\u2713",
+            d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}${d.sizeMb} MB 已接收`);
           line1.classList.add("on");
           setStep("step-extract", "active", "2", "准备提取音频…");
           setFill("0", true);
@@ -1213,6 +1215,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         markExtractDone(d.audio_mb);
         setStep("step-dispatch", "done", "\u2713", `任务 ${d.job_id}`);
         setFill("100%");
+        if (d.cached && platform.kind === "web") toast("服务端已缓存该音轨，免上传", "ok");
         onDone([true, d]);
       } else if (d.phase === "error") {
         clearInterval(timer);
@@ -1316,6 +1319,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           prog.textContent = `上传音轨 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`;
         });
         if (!d.ok) throw new Error(d.error || "音频上传失败");
+        if (d.cached) prog.textContent = "服务端已缓存，免上传";
         // 等接受出具 job_id（desktop transport：201 即列 done；兼容 web 轮询语义多轮几次）
         let jobId = "";
         for (let i = 0; i < 20 && !jobId; i++) {

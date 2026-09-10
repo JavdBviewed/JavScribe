@@ -84,6 +84,43 @@ test("upload-audio 全链路：只传 opus → 202 → done → srt 可下载", 
   expect(srt.headers()["content-disposition"]).toContain("test-a.zh.srt");
 });
 
+test("服务端音轨缓存：同 opus 二次派发命中（workbench→serve 免传字节）", async () => {
+  const opus = readFileSync(fx("sine.opus"));
+  const postAudio = async (name: string) => {
+    const fd = new FormData();
+    fd.append("audio", new Blob([opus]), "x.opus");
+    fd.append("engine", "mock");
+    fd.append("name", name);
+    fd.append("size_mb", "0");
+    const r = await fetch(`${WEB_URL}/api/upload-audio`, { method: "POST", body: fd });
+    expect(r.status).toBe(202);
+    return (await r.json()).upload_id as string;
+  };
+  const waitPhase = async (id: string) => {
+    let d: any = null;
+    for (let i = 0; i < 30; i++) {
+      d = await (await req.get(`${WEB_URL}/api/uploads/${id}`)).json();
+      if (d.phase === "done" || d.phase === "error") break;
+      await new Promise((rs) => setTimeout(rs, 300));
+    }
+    return d;
+  };
+
+  const d1 = await waitPhase(await postAudio("cache-web-a.mp4"));
+  expect(d1.phase).toBe("done");
+  expect(d1.cached).toBeFalsy();
+  let ups = await (await req.get(`${MOCK_URL}/_mock/uploads`)).json();
+  expect(ups).toHaveLength(1);
+
+  const d2 = await waitPhase(await postAudio("cache-web-b.mp4"));
+  expect(d2.phase).toBe("done");
+  expect(d2.cached).toBe(true);
+  expect(d2.job_id).toBeTruthy();
+  expect(d2.job_id).not.toBe(d1.job_id);
+  ups = await (await req.get(`${MOCK_URL}/_mock/uploads`)).json();
+  expect(ups).toHaveLength(1); // 第二次派发没有向 serve 传字节
+});
+
 test("result 未完成 → 404；未知 upload → 404", async () => {
   await mockPause(req);
   try {

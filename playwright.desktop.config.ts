@@ -5,6 +5,7 @@ import { defineConfig } from "@playwright/test";
 //  - 桌面端直连 mock（不经 8400 工作台），所以 webServer 只起 mock
 //  - 前置：pnpm build:desktop（client 有改动时必须先重建，helpers 会检查产物并给出提示）
 export default defineConfig({
+  globalSetup: "./client/tests/e2e/desktop/global-setup.ts",
   testDir: "client/tests/e2e",
   testMatch: /desktop\/.*\.spec\.ts/,
   timeout: 180_000,

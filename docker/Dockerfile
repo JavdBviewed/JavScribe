@@ -84,4 +84,4 @@ VOLUME ["/opt/chickenrice/models"]
 EXPOSE 8300
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["serve", "--config", "/etc/jav-scribe/config.server.json"]
+CMD ["serve", "--config", "/opt/jav-scribe/config.server.json", "--inbox-dir", "/opt/jav-scribe/inbox"]

@@ -104,14 +104,13 @@ test("音轨缓存：本机提取落缓存；同影片二次派发命中缓存�
     expect(up1).toHaveLength(1);
     expect(up1[0].head).toBe(OGG_HEAD);
 
-    // 同影片二次派发：命中缓存，不再产生第二个缓存条目
+    // 同影片二次派发：本机缓存命中（免重提）+ 服务端缓存命中（免重传字节）
     await dispatchFile(page, join(FIXTURES, "video-a.mp4"));
-    expect(cacheCount(dir, ".opus")).toBe(1);
+    expect(cacheCount(dir, ".opus")).toBe(1); // 本机缓存复用，不产生第二个条目
     const up2 = await mockUploads(request, MOCK);
-    expect(up2).toHaveLength(2);
-    expect(up2[1].size).toBe(up1[0].size); // 缓存复用 = 字节一致
-    expect(up2[1].head).toBe(OGG_HEAD);
-    expect(up2[1].source).toBe("video-a.mp4");
+    expect(up2).toHaveLength(1); // 服务端命中 → 无第二次 PUT（字节天然一致）
+    const jobs = (await (await request.get(`${MOCK}/jobs`)).json()) as Array<{ label: string }>;
+    expect(jobs.filter((j) => j.label === "video-a.mp4")).toHaveLength(2); // 首传 + 命中建任务各一
   } finally {
     await app.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });

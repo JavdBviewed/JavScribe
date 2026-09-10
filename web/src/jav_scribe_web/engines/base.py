@@ -57,8 +57,8 @@ class EngineAdapter(ABC):
         """One job with per-file details (Job.to_dict(detail=True))."""
 
     @abstractmethod
-    async def upload_audio(self, audio: bytes, source_name: str) -> str:
-        """Send an extracted audio track; return the created job id."""
+    async def upload_audio(self, audio: bytes, source_name: str) -> dict:
+        """Send an extracted audio track (先问后传); return {job_id, cached}."""
 
     @abstractmethod
     async def result(self, job_id: str) -> tuple[bytes, str]:

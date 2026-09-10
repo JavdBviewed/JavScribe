@@ -159,16 +159,26 @@ def cmd_serve(args) -> int:
             engine.expand(files), source_kind="watch", label=str(files[0].parent)
         ),
     )
+    from pathlib import Path as _Path
+    inbox_dir = (
+        _Path(args.inbox_dir).expanduser().resolve()
+        if getattr(args, "inbox_dir", None)
+        else (_Path(os.environ["JAVSCRIBE_INBOX_DIR"]).expanduser().resolve()
+              if os.environ.get("JAVSCRIBE_INBOX_DIR")
+              else None)
+    )
     http = ProgressHTTP(
         engine,
         host=host,
         port=port,
         profile=profile,
+        inbox_dir=inbox_dir,
         config_path=config_file_path(args.config),
     )
     http.start()
     watcher.start()
-    _log(f"[serve] 进度接口: http://<本机IP>:{port}/health | 上传: PUT /upload?source=NAME")
+    _inbox = http.inbox_dir
+    _log(f"[serve] 进度接口: http://<本机IP>:{port}/health | 上传: PUT /upload?source=NAME | 缓存: {_inbox}")
     try:
         while True:
             time.sleep(1)
@@ -279,6 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-existing", action="store_true", help="不处理启动时已存在的文件")
     s.add_argument("--host", help="bind address (default 0.0.0.0)")
     s.add_argument("--port", type=int, help=f"HTTP port (default {DEFAULT_PROGRESS_PORT})")
+    s.add_argument("--inbox-dir", help="uploaded-audio/subtitle cache dir "
+                                       "(default ~/.jav_scribe/inbox; env JAVSCRIBE_INBOX_DIR)")
     _add_common(s)
     s.set_defaults(func=cmd_serve)
 

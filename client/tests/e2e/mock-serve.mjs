@@ -3,6 +3,7 @@
 // 另加 /_mock/* 控制口（仅测试用：暂停/播种/读上传/配 key 模式）。
 // 用法: node mock-serve.mjs [port]   默认 8301，仅监听 127.0.0.1
 import http from "node:http";
+import { createHash } from "node:crypto";
 
 // 端口：位置参数或 --port N（本地服务端集成 e2e 用客户端同款 --port 调用约定）
 const _lsArgv = process.argv.slice(2);
@@ -60,6 +61,7 @@ const state = {
   version: VERSION,     // 可经 /_mock/version 切换（更新检查 e2e：模拟服务落后于最新镜像）
   jobs: new Map(),      // id -> job
   uploads: [],          // PUT /upload 收到的载荷（测试断言：只传 opus）
+  cache: new Map(),     // sha1 -> {size, ext}（内容寻址缓存，/cache/check、/upload/submit 用）
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
   apiKeyMode: "ok",     // ok | no-key
   paused: false,
@@ -182,7 +184,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
       if (sub === "version") {
         return readBody().then((b) => {
           const v = b && JSON.parse(b).version;
@@ -232,6 +234,7 @@ const server = http.createServer((req, res) => {
       return sendErr(404, "not found");
     }
     if (req.method === "GET" && parts[1] === "uploads") return send(200, state.uploads);
+    if (req.method === "GET" && parts[1] === "cache") return send(200, Object.fromEntries(state.cache));
     return sendErr(404, "not found");
   }
 
@@ -239,6 +242,15 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET") {
     if (!parts.length || parts[0] === "health") {
       return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+    }
+    if (parts[0] === "cache" && parts[1] === "check") {
+      const sha1 = url.searchParams.get("sha1") || "";
+      if (!/^[0-9a-f]{40}$/.test(sha1)) return sendErr(400, "sha1 非法");
+      const ext = url.searchParams.get("ext") || "opus";
+      const sizeP = url.searchParams.get("size");
+      const ent = state.cache.get(sha1);
+      const cached = !!(ent && ent.ext === ext && (sizeP == null || Number(sizeP) === ent.size));
+      return send(200, cached ? { ok: true, cached: true, size: ent.size } : { ok: true, cached: false });
     }
     if (parts[0] === "config") {
       if (!checkKey()) return;
@@ -280,17 +292,35 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       const buf = Buffer.concat(chunks);
       const source = req.headers["x-source-name"] || "remote";
+      const ext = url.searchParams.get("ext") || "opus";
+      const actual = createHash("sha1").update(buf).digest("hex");
       const done = () => {
-        state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex") });
+        const declared = url.searchParams.get("sha1");
+        if (declared && declared !== actual) return sendErr(400, "sha1 不匹配");
+        state.cache.set(actual, { size: buf.length, ext });
+        state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex"), sha1: actual, ext });
         const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
         const j = jobOf([t], { source_kind: "remote", label: source });
-        return send(201, { ok: true, job_id: j.id, file: source });
+        return send(201, { ok: true, job_id: j.id, file: source, sha1: actual });
       };
       return state.uploadDelayMs > 0
         ? new Promise((r) => setTimeout(() => r(done()), state.uploadDelayMs))
         : done();
     });
     return;
+  }
+
+  // ---- POST /upload/submit（命中缓存免传字节直接建任务）----
+  if (req.method === "POST" && parts.length === 2 && parts[0] === "upload" && parts[1] === "submit") {
+    const sha1 = url.searchParams.get("sha1") || "";
+    if (!/^[0-9a-f]{40}$/.test(sha1)) return sendErr(400, "sha1 非法");
+    const ext = url.searchParams.get("ext") || "opus";
+    const ent = state.cache.get(sha1);
+    if (!ent || ent.ext !== ext) return send(409, { ok: false, error: "not-cached" });
+    const source = req.headers["x-source-name"] || "remote";
+    const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
+    const j = jobOf([t], { source_kind: "remote", label: source });
+    return send(201, { ok: true, job_id: j.id, file: source, cached: true });
   }
 
   // ---- PUT /config ----

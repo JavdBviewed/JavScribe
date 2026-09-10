@@ -10,7 +10,7 @@ import {
   test as base, expect, _electron as electron,
   type Page, type APIRequestContext,
 } from "@playwright/test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -18,28 +18,34 @@ import { fileURLToPath } from "node:url";
 
 export const MOCK = "http://127.0.0.1:8302";
 export const MOCK_KEY = "mock-key-123";
-export const FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
+// fixture 走 /tmp 安全副本（global-setup.ts 每次运行覆盖），与仓库原件解耦（见 global-setup.ts 注释）
+export const FIXTURES = join(tmpdir(), "javscribe-e2e-fixtures");
+const REPO_FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
 export const DIST = join(ROOT, "client", "dist-desktop");
 
 // ---------------------------------------------------------------------------
-// fixtures 自愈：仓库目录若被双向同步工具（如 Syncthing）与另一台机器同步，
-// 对端 git 工作区若缺少这些文件，删除会周期性同步回来（外部进程删除，非测试所为）。
-// fixtures 已入库（commit f2cd2e0），缺了直接 git restore，保证每个 test 冷启动时齐全。
+// fixtures 自愈：副本缺失 → 从仓库原件补拷（原件缺失则 git restore）。
+// fixtures 已入库（commit f2cd2e0），缺了能直接 restore，保证每个 test 冷启动时齐全。
 // ---------------------------------------------------------------------------
 const FIXTURE_FILES = ["video-a.mp4", "video-b.mkv", "sine.opus", "folder/video-c.mp4", "folder/video-c.zh.srt"];
 export function ensureFixtures(): void {
+  // 副本缺失 → 从仓库原件补拷（原件缺失则 git restore）；副本永不被 e2e 删除
   const missing = FIXTURE_FILES.filter((f) => !existsSync(join(FIXTURES, f)));
-  if (missing.length) {
-    console.log(`[fixtures] 缺失 ${missing.join(", ")} → git restore`);
-    try {
-      execFileSync("git", ["restore", "--", "client/tests/e2e/fixtures"], { cwd: ROOT, stdio: "pipe" });
-    } catch { /* 下面统一校验 */ }
-    const still = FIXTURE_FILES.filter((f) => !existsSync(join(FIXTURES, f)));
-    if (still.length) {
-      throw new Error(`测试 fixtures 缺失且 git restore 失败：${still.join(", ")}（检查仓库是否被外部同步工具持续删除）`);
+  if (!missing.length) return;
+  console.log(`[fixtures] 副本缺失 ${missing.join(", ")} → 从仓库补拷`);
+  for (const f of missing) {
+    const src = join(REPO_FIXTURES, f);
+    if (!existsSync(src)) {
+      try {
+        execFileSync("git", ["restore", "--", "client/tests/e2e/fixtures"], { cwd: ROOT, stdio: "pipe" });
+      } catch { /* 下面统一校验 */ }
     }
+    if (!existsSync(src)) {
+      throw new Error(`fixture 缺失且 git restore 失败：${f}（仓库原件被外部同步/git 进程删除且不在 git 索引）`);
+    }
+    cpSync(src, join(FIXTURES, f));
   }
 }
 
@@ -167,7 +173,7 @@ export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") 
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }
 
-/** 冷启动 + 等引擎在线（health 文案 v0.2.4 · 服务 1/1 在线） */
+/** 冷启动 + 等引擎在线（health 文案 v0.2.5 · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });
 }

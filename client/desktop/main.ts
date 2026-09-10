@@ -23,7 +23,7 @@ import * as https from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
-import type { AudioCacheHit } from "../core/desktop-bridge";
+import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 
 // ---------------------------------------------------------------------------
@@ -314,6 +314,58 @@ function httpPutBytes(
 }
 
 // ---------------------------------------------------------------------------
+// 服务端音轨缓存「先问后传」：上传前算 sha1 → /cache/check 预检 →
+//   命中：/upload/submit 直接建任务（免传字节，UI 推满进度）
+//   未命中 / 旧版服务（404）/ submit 竞态失败：返回 null，调用方回退常规 PUT /upload
+// ---------------------------------------------------------------------------
+
+/** 文件 sha1（流式分块读，不整包驻留内存） */
+function sha1File(p: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash("sha1");
+    const st = fs.createReadStream(p, { highWaterMark: 4 * 1024 * 1024 });
+    st.on("data", (c: Buffer) => h.update(c));
+    st.on("end", () => resolve(h.digest("hex")));
+    st.on("error", reject);
+  });
+}
+
+const sha1Hex = (buf: Buffer): string => crypto.createHash("sha1").update(buf).digest("hex");
+
+/**
+ * 预检 + 命中提交。成功返回 ok+cached:true 的受理结果；
+ * 需要回退上传（未命中 / 404 / 409 / 预检网络异常）时返回 null。
+ */
+async function tryServerCache(
+  base: string,
+  sha1: string,
+  sizeBytes: number,
+  ext: string,
+  sourceName: string,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<UploadDispatchResult | null> {
+  try {
+    const ck = await httpJson<{ ok?: boolean; cached?: boolean }>(
+      `${base}/cache/check?sha1=${sha1}&size=${sizeBytes}&ext=${encodeURIComponent(ext)}`,
+      { timeoutMs: 10000 },
+    );
+    if (ck.status !== 200 || ck.data?.cached !== true) return null; // 404=旧版服务，直接回退
+    onProgress(sizeBytes, sizeBytes); // 命中：直接推满进度（无需传字节）
+    const sub = await httpJson<{ job_id?: string; file?: string }>(
+      `${base}/upload/submit?sha1=${sha1}&ext=${encodeURIComponent(ext)}`,
+      { method: "POST", headers: { "X-Source-Name": sourceName }, timeoutMs: 15000 },
+    );
+    if (sub.status === 201 && sub.data && typeof sub.data === "object") {
+      const d = sub.data as { job_id?: string; file?: string };
+      return { ok: true, job_id: String(d.job_id || ""), file: String(d.file || ""), cached: true };
+    }
+    return null; // 命中后 submit 失败（如缓存文件恰被 retention 清理）→ 回退重传
+  } catch {
+    return null; // 预检网络异常不阻断主上传流程，回退后由 PUT 报真实错误
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 引擎快照：单飞 + 3s TTL（等价工作台 poller：离线保留上次值）
 // ---------------------------------------------------------------------------
 
@@ -530,6 +582,14 @@ interface AudioCacheMeta {
   audioBytes: number;
   createdAt: number;
   lastUsedAt: number;
+}
+
+/** upload-audio finally 清理判定：仅允许删除应用自建 mkdtemp 目录（tmpdir 下、首层名 javscribe-client-*） */
+function isOwnTempDir(dir: string): boolean {
+  const tmp = os.tmpdir().replace(/[\\/]+$/, "");
+  if (!dir.startsWith(tmp + path.sep)) return false;
+  const first = dir.slice(tmp.length + 1).split(path.sep)[0];
+  return first.startsWith("javscribe-client-");
 }
 
 function audioCacheDir(): string {
@@ -1016,20 +1076,33 @@ function registerIpc(): void {
       const entry = engineByName(String(args.engine || ""));
       let body: Buffer | NodeJS.ReadableStream;
       let totalBytes: number;
+      let sha1 = "";
       if (args.opusPath) {
         opusDir = path.dirname(args.opusPath);
         totalBytes = fs.statSync(args.opusPath).size;
         if (totalBytes <= 0) return { ok: false, error: "音频文件为空" };
         body = fs.createReadStream(args.opusPath, { highWaterMark: 1024 * 1024 });
+        sha1 = await sha1File(args.opusPath);
       } else if (args.data) {
-        body = Buffer.from(args.data);
-        totalBytes = body.length;
+        const buf = Buffer.from(args.data);
+        body = buf;
+        totalBytes = buf.length;
         if (!totalBytes) return { ok: false, error: "音频文件为空" };
+        sha1 = sha1Hex(buf);
       } else {
         return { ok: false, error: "缺少音频载荷" };
       }
+      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务
+      const hit = await tryServerCache(
+        entry.url, sha1, totalBytes, "opus", String(args.name || "remote"),
+        (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
+      );
+      if (hit) {
+        if (!Buffer.isBuffer(body)) (body as unknown as { destroy?: () => void }).destroy?.(); // 命中免传，释放未读的文件流
+        return hit;
+      }
       const r = await httpPutBytes(
-        entry.url + "/upload?ext=opus",
+        entry.url + `/upload?ext=opus&sha1=${sha1}`,
         totalBytes,
         body,
         { "X-Source-Name": String(args.name || "remote") },
@@ -1040,8 +1113,9 @@ function registerIpc(): void {
       const err = e as Error & { network?: boolean };
       return { ok: false, error: err.message || String(e), network: !!err.network };
     } finally {
-      // 音轨缓存目录内的文件保留（换服务重跑复用）；tmp 文件照旧整目录清理
-      if (opusDir && opusDir !== audioCacheDir()) {
+      // 只清理应用自建 mkdtemp 目录（data 通道音轨的临时落点）；
+      // 用户指定路径（影片目录等）永不删除——历史 bug 曾把 opus 源目录整目录递归删掉，误删用户文件
+      if (opusDir && isOwnTempDir(opusDir)) {
         try {
           fs.rmSync(opusDir, { recursive: true, force: true });
         } catch {
@@ -1065,8 +1139,16 @@ function registerIpc(): void {
       }
       const totalBytes = fs.statSync(filePath).size;
       if (totalBytes <= 0) return { ok: false, error: "空文件" };
+      const ext = String(args.ext || "mp4");
+      const sha1 = await sha1File(filePath);
+      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务
+      const hit = await tryServerCache(
+        entry.url, sha1, totalBytes, ext, String(args.name || "remote"),
+        (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
+      );
+      if (hit) return hit;
       const r = await httpPutBytes(
-        entry.url + "/upload?ext=" + encodeURIComponent(String(args.ext || "mp4")),
+        entry.url + `/upload?ext=${encodeURIComponent(ext)}&sha1=${sha1}`,
         totalBytes,
         fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
         { "X-Source-Name": String(args.name || "remote") },
