@@ -65,6 +65,9 @@ jobs:
         with:
           path: client/packaging/ffmpeg
           key: javscribe-ffmpeg-win-${{ steps.ff.outputs.key }}
+          # 前缀兜底：BtbN 标签/资产互换致哈希键失效时，直接复用历史构建缓存的 ffmpeg，免再走 CDN
+          restore-keys: |
+            javscribe-ffmpeg-win-
       - run: node scripts/fetch-ffmpeg.mjs win
       - run: pnpm typecheck
       - run: pnpm test:unit:client
@@ -124,6 +127,9 @@ jobs:
         with:
           path: client/packaging/ffmpeg
           key: javscribe-ffmpeg-linux-${{ steps.ff.outputs.key }}
+          # 前缀兜底：BtbN 标签/资产互换致哈希键失效时，直接复用历史构建缓存的 ffmpeg，免再走 CDN
+          restore-keys: |
+            javscribe-ffmpeg-linux-
       - run: node scripts/fetch-ffmpeg.mjs linux
       - run: pnpm typecheck
       - run: pnpm test:unit:client
