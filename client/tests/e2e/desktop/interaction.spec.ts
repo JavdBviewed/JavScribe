@@ -58,7 +58,7 @@ test("任务行细节：阶段文案 / ETA 倒计时 / 耗时逐秒 / 下载命�
     const m = ((await row.locator(".cell-elapsed").textContent()) || "").trim().match(/^(\d+):?(\d{2})$/);
     return m ? Number(m[1]) * 60 + Number(m[2]) : -1;
   };
-  await expect.poll(secs).toBeGreaterThanOrEqual(2, { timeout: 20_000 });
+  await expect.poll(secs, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
   const el1 = (await row.locator(".cell-elapsed").textContent()) || "";
   await page.waitForTimeout(2000);
   const el2 = (await row.locator(".cell-elapsed").textContent()) || "";
