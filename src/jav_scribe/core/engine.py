@@ -13,6 +13,7 @@ One job = one infer process (model loaded once). Jobs run sequentially.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import threading
 import time
@@ -29,9 +30,21 @@ from .finalize import existing_lang_sub, finalize_one
 from .log_parser import LogParser
 from .polish import PolishConfig, polish_srt
 from .proc_runner import ProcRunner
+from .rtf import RtfHistory
 from .task import Job, Task, TaskPhase, TaskStatus, new_job_id
 
 LogFn = Callable[[str], None]
+
+# Live sub-phase model (per task, driven by infer log events + a 1s ticker).
+# ChickenRice dumps all segment lines only when transcribe() finishes, so the
+# transcribing band is interpolated from an RTF estimate (measured history).
+# (phase: (lo, hi, expected_s, detail)) — expected_s=None => RTF driven.
+LIVE_PHASES: dict[str, tuple[float, float, float | None, str]] = {
+    "preparing": (0.00, 0.25, 180.0, "模型加载中"),
+    "vad": (0.25, 0.40, 90.0, "语音检测中"),
+    "transcribing": (0.40, 0.95, None, "转写中"),
+    "finalizing": (0.95, 1.00, 20.0, "合并写入字幕"),
+}
 
 
 class Engine:
@@ -40,6 +53,7 @@ class Engine:
         cfg: dict[str, Any],
         log: Optional[LogFn] = None,
         profile: str = "default",
+        data_dir: Optional[Path] = None,
     ) -> None:
         self.cfg = cfg
         self.profile = profile
@@ -53,6 +67,9 @@ class Engine:
         self._pending_jobs: list[Job] = []
         self._inflight_files: set[Path] = set()
         self._inflight_lock = threading.Lock()
+        self._rtf = RtfHistory(Path(data_dir) / "rtf-history.json") if data_dir else None
+        self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
+        self._live_thread.start()
 
     # ------------------------------------------------------------------
     # Submission
@@ -198,6 +215,13 @@ class Engine:
     def _process_one(self, job: Job, task: Task, lang: str) -> None:
         task.started = time.time()
         task.status = TaskStatus.RUNNING
+        task.live_phase = "preparing"
+        task.live_phase_started = task.started
+        task.phase_detail = LIVE_PHASES["preparing"][3]
+        task.eta_s = None
+        task.est_transcribe_s = None
+        task.transcribe_started = None
+        task.last_progress_at = None
         if self._restore(task):
             self._infer_one(job, task, lang)
         if self._stop_evt.is_set() and task.status == TaskStatus.RUNNING:
@@ -254,6 +278,43 @@ class Engine:
     # ------------------------------------------------------------------
     # Stage 2: infer (one process per job for all pending files)
     # ------------------------------------------------------------------
+    def _enter_transcribing(self, todo: list[Task], job: Job) -> None:
+        """VAD finished (duration line seen): start the RTF-interpolated band."""
+        inf = self.cfg.get("infer", {})
+        device = str(inf.get("device") or "auto")
+        model = str(inf.get("model") or "")
+        now = time.time()
+        for t in todo:
+            if t.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                continue
+            if t.transcribe_started is None:
+                t.transcribe_started = now
+            if self._rtf is not None:
+                est, _basis = self._rtf.estimate(device, model, t.duration_s, t.speech_s)
+                t.est_transcribe_s = est
+            t.live_phase = "transcribing"
+            t.live_phase_started = now
+            t.phase_detail = LIVE_PHASES["transcribing"][3]
+            lo, hi, _exp, _det = LIVE_PHASES["transcribing"]
+            t.progress = max(t.progress, lo)
+            if t.est_transcribe_s:
+                t.eta_s = t.est_transcribe_s + 20.0  # + finalize margin
+
+    def _record_rtf(self, todo: list[Task], transcribe_started: float | None) -> None:
+        """Persist measured speed samples (one per finished file with a duration)."""
+        if self._rtf is None or not transcribe_started:
+            return
+        inf = self.cfg.get("infer", {})
+        device = str(inf.get("device") or "auto")
+        model = str(inf.get("model") or "")
+        for t in todo:
+            if not t.output_files or not t.transcribe_started:
+                continue
+            end = t.last_progress_at or t.finished or 0.0
+            wall = end - t.transcribe_started
+            if wall > 5 and (t.duration_s or t.speech_s):
+                self._rtf.record(device, model, t.duration_s, t.speech_s, wall)
+
     def _infer_one(self, job: Job, task: Task, lang: str) -> None:
         # One infer process per job: model loaded once, all files in the batch.
         todo = [t for t in job.files if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and not t.output_files]
@@ -263,30 +324,68 @@ class Engine:
         self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型）")
         self._parser = LogParser()
         self._current_task = None
+        shared = {"transcribe_started": None, "model_loaded": False}
 
         def on_line(line: str) -> None:
             self.log(f"  [infer] {line}")
             evt = self._parser.feed(line)
             t = self._match_task(job, evt.file_path, evt.file_idx, todo)
+            now = time.time()
             if evt.kind == "file_start":
                 self._current_task = t
                 if t is not None:
                     t.status = TaskStatus.RUNNING
                     t.phase = TaskPhase.SUBTITLING
-                    t.progress = 0.0
-                    t.duration_s = None
                     t.position_s = None
-            elif evt.kind == "duration" and t is not None:
-                t.duration_s = evt.duration_s
-            elif evt.kind == "file_progress" and t is not None and evt.progress is not None:
-                t.progress = evt.progress
-                if t.duration_s:
-                    t.position_s = evt.progress * t.duration_s
-            elif evt.kind == "file_written" and t is not None and evt.file_path:
-                p = Path(evt.file_path)
-                if p not in t.output_files:
-                    t.output_files.append(p)
+                    # 不重置 progress：批量后续文件时，前置阶段进度要保留
+                    if t.transcribe_started is not None:
+                        t.live_phase = "transcribing"
+                        t.live_phase_started = now
+                        t.phase_detail = LIVE_PHASES["transcribing"][3]
+                    elif shared.get("model_loaded") and t.live_phase == "preparing":
+                        # 同批后续文件：模型已加载，跳过「模型加载中」直接进 VAD 阶段
+                        t.live_phase = "vad"
+                        t.live_phase_started = now
+                        t.phase_detail = LIVE_PHASES["vad"][3]
+            elif evt.kind == "batch_probe":
+                shared["model_loaded"] = True
+                for tt in todo:
+                    if tt.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and tt.transcribe_started is None:
+                        tt.live_phase = "vad"
+                        tt.live_phase_started = now
+                        tt.phase_detail = LIVE_PHASES["vad"][3]
+            elif evt.kind == "duration":
+                if t is not None:
+                    if evt.duration_s:
+                        t.duration_s = evt.duration_s
+                    if evt.speech_s:
+                        t.speech_s = evt.speech_s
+                    # 每个文件各自在「自己的 Duration 行」进入转写带：
+                    # 同批后续文件此刻还在排队，不能给它们插 RTF 估算
+                    if evt.duration_s and t.transcribe_started is None:
+                        shared["transcribe_started"] = shared["transcribe_started"] or now
+                        self._enter_transcribing([t], job)
+            elif evt.kind == "file_progress":
+                if t is not None and evt.progress is not None:
+                    lo, hi, _e, _d = LIVE_PHASES["transcribing"]
+                    actual = lo + (hi - lo) * evt.progress  # 真实位置映射进转写带
+                    t.progress = max(t.progress, actual)
+                    t.last_progress_at = now
+                    if t.duration_s:
+                        t.position_s = evt.progress * t.duration_s
+                    t.eta_s = max(0.0, (t.est_transcribe_s or 0.0) * (1 - evt.progress)) + 20.0
+            elif evt.kind == "file_written":
+                if t is not None and evt.file_path:
+                    p = Path(evt.file_path)
+                    if p not in t.output_files:
+                        t.output_files.append(p)
+                    t.live_phase = "finalizing"
+                    t.live_phase_started = now
+                    t.phase_detail = LIVE_PHASES["finalizing"][3]
+                    t.progress = max(t.progress, 0.97)
+                    t.eta_s = None
             elif evt.kind == "model_load":
+                shared["model_loaded"] = True
                 self.log("  [infer] 模型加载中…")
 
         ok = self._run_command(cmd, cwd=cwd, on_line=on_line)
@@ -296,6 +395,7 @@ class Engine:
                     t.status = TaskStatus.ERROR
                     t.message = t.message or "引擎退出非零"
                     t.finished = time.time()
+        self._record_rtf(todo, shared["transcribe_started"])
 
         # Finalize outputs for every file that got something written.
         for t in todo:
@@ -305,7 +405,44 @@ class Engine:
                 t.status = TaskStatus.DONE if t.output_files else TaskStatus.ERROR
                 t.message = t.message or ("完成" if t.output_files else "无字幕输出")
                 t.progress = 1.0 if t.status == TaskStatus.DONE else t.progress
+                t.eta_s = None
                 t.finished = time.time()
+
+    # ------------------------------------------------------------------
+    # Live progress ticker: 1s heartbeat so the UI sees smooth progress and
+    # a ticking ETA between infer log events (segment lines only arrive when
+    # a batched transcribe() finishes).
+    # ------------------------------------------------------------------
+    def _live_loop(self) -> None:
+        while not self._stop_evt.wait(1.0):
+            try:
+                self._live_tick()
+            except Exception:  # noqa: BLE001 - ticker must never kill the engine
+                pass
+
+    def _live_tick(self) -> None:
+        now = time.time()
+        for job in list(self.jobs):
+            for t in job.files:
+                if t.status == TaskStatus.RUNNING and t.phase == TaskPhase.SUBTITLING:
+                    self._update_live_task(t, now)
+
+    def _update_live_task(self, t: Task, now: float) -> None:
+        phase = t.live_phase if t.live_phase in LIVE_PHASES else "preparing"
+        lo, hi, exp, detail = LIVE_PHASES[phase]
+        t.phase_detail = detail
+        if phase == "transcribing":
+            if t.est_transcribe_s and t.transcribe_started:
+                frac = max(0.0, min(0.999, (now - t.transcribe_started) / t.est_transcribe_s))
+                t.progress = max(t.progress, lo + (hi - lo) * frac)
+                t.eta_s = max(0.0, t.est_transcribe_s * (1.0 - frac)) + 20.0
+            # 无估算（旧配置/无历史）：保持事件驱动的值，不插值
+        else:
+            started = t.live_phase_started or now
+            if exp:
+                frac = max(0.0, min(1.0, (now - started) / exp))
+                t.progress = max(t.progress, lo + (hi - lo) * frac)
+            t.eta_s = None
 
     def _match_task(self, job: Job, path: Optional[str], idx: Optional[int], todo: list[Task]) -> Task | None:
         if path:
@@ -422,12 +559,14 @@ class Engine:
         timeout: float | None = None,
     ) -> bool:
         self._last_exit_code = None
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         self._runner = ProcRunner(
             " ".join(shlex.quote(c) for c in cmd),
             cwd=cwd,
             on_line=on_line,
             on_progress_pct=on_progress,
             on_exit=lambda code: setattr(self, "_last_exit_code", code),
+            env=env,
         )
         if not self._runner.start():
             return False

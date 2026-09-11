@@ -90,6 +90,9 @@ function makeTask(path, opts = {}) {
     output_files: opts.output_files || [],
     started: opts.started ?? Date.now() / 1000,
     finished: opts.finished ?? null,
+    // 复刻真实 serve 0.1.4+：阶段文案 + RTF 预估剩余秒（live progress）
+    phase_detail: opts.phase_detail ?? (opts.status === "running" ? "模型加载中" : ""),
+    eta_s: opts.eta_s ?? null,
   };
 }
 function jobOf(files, { source_kind = "remote", label = "" } = {}) {
@@ -111,6 +114,8 @@ function taskDone(t, outPath) {
   t.finished = Date.now() / 1000;
   t.message = "完成";
   t.output_files = [outPath];
+  t.phase_detail = "";
+  t.eta_s = null;
 }
 function jobToDict(j, detail = false) {
   const d = {
@@ -143,6 +148,8 @@ setInterval(() => {
       t.progress = Math.min(1, t.progress + state.step);
       t.position_s = Math.round(t.duration_s * t.progress);
       t.position = fmtTs(t.position_s);
+      t.phase_detail = "转写中";
+      t.eta_s = Math.round((1 - t.progress) * 100 * 10) / 10;
       if (t.progress >= 1) taskDone(t, `/mock/out/${t.name.replace(/\.[^.]+$/, "")}.zh.srt`);
     }
     if (j.files.every((t) => t.status !== "running")) {
@@ -278,7 +285,20 @@ const server = http.createServer((req, res) => {
       if (parts[2] === "result" || parts[2] === "result.srt") {
         const t = j.files[0];
         if (!t || t.status !== "done") return sendErr(404, "no result srt yet");
-        return send(200, srtFor(t.name), "text/plain");
+        // 与真实 serve 一致：下载名 = 源视频名（label 非「文件夹扫描」时）否则任务首文件，回退 job id
+        const label = (j.label || "").replace(/^文件夹扫描/, "").replace(/[·].*$/, "").trim();
+        const src = label && !label.includes("/") && label.length > 3 && /\.[a-z0-9]+$/i.test(label)
+          ? label
+          : (j.id === undefined ? t.name : (/\.[a-z0-9]+$/i.test(t.name) ? t.name : j.id + ".srt"));
+        const stem = src.split("/").pop().replace(/\.[^.]+$/, "");
+        const body = srtFor(t.name);
+        res.writeHead(200, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Length": Buffer.byteLength(body),
+          "Content-Disposition": `attachment; filename="${stem}.zh.srt"`,
+        });
+        res.end(body);
+        return;
       }
       return send(200, jobToDict(j, true));
     }

@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -54,6 +55,8 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
                 "position": "",
                 "duration_s": None,
                 "position_s": None,
+                "phase_detail": "",
+                "eta_s": None,
                 "message": f"{done}/{total}",
                 "output_files": [],
             }
@@ -70,6 +73,8 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
                 "position": t.get("position") or "",
                 "duration_s": t.get("duration_s"),
                 "position_s": t.get("position_s"),
+                "phase_detail": t.get("phase_detail") or "",
+                "eta_s": t.get("eta_s"),
                 "message": t.get("message") or "",
                 "finished": t.get("finished"),
                 "output_files": t.get("output_files") or [],
@@ -366,16 +371,25 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         # 防御兜底：服务引擎偶发产出负时间戳 srt（见 srt_sanitizer 注释），
         # 下载代理处统一清洗，保证用户拿到的文件合法。
         data, _fixed = sanitize_srt_bytes(data, log=_log.warning)
-        label = next(
-            (j.get("label", "") for j in poller.jobs.get(engine, []) if j.get("id") == job_id),
-            "",
-        )
-        stem = Path(label).stem if label else Path(suggested).stem
-        filename = f"{stem}.zh.srt"
+        # 文件名：新服务直接透传服务端 Content-Disposition（源视频名）；
+        # 旧服务无该头 → suggested 为 {job_id}.srt，退回 label 推导。
+        if suggested and suggested != f"{job_id}.srt":
+            filename = suggested
+        else:
+            label = next(
+                (j.get("label", "") for j in poller.jobs.get(engine, []) if j.get("id") == job_id),
+                "",
+            )
+            stem = Path(label).stem if label else Path(suggested).stem
+            filename = f"{stem}.zh.srt"
+        if filename.isascii():
+            cd = f'attachment; filename="{filename}"'
+        else:
+            cd = f"attachment; filename*=UTF-8''{quote(filename)}"
         return Response(
             content=data,
             media_type="application/x-subrip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": cd},
         )
 
     # -- 跳过任务「仍要重新生成」(代理服务 POST /jobs/<id>/retry) --------------

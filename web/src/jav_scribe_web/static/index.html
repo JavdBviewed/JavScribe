@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-D2JUcf8V.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-DWR0Xeoq.css">
+  <script type="module" crossorigin src="/assets/index-BE5_mxS-.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-C4JYHtSY.css">
 </head>
 <body>
 <header>
@@ -41,7 +41,7 @@
     </div>
     <div id="local-serve-hint" hidden>
       <div class="ls-hint-title"><span class="watch-lamp" aria-hidden="true"></span>未检测到本地服务端</div>
-      <div class="muted small">把 <b>JavScribe Serve</b>（服务端程序，与客户端同版本，同一 Release 可下载）放进本客户端所在目录，启动时会自动拉起并登记为「本地服务端」，字幕就生成本机。已有远程字幕服务器？用上方表单填地址即可。</div>
+      <div class="muted small">把 <b>JavScribe Serve</b> 放进本客户端所在目录，启动时自动拉起并登记为「本地服务端」，字幕就在本机生成。已有远程字幕服务器？用上方表单填地址即可。</div>
     </div>
     <div id="engine-grid"></div>
     <div id="engines-empty" class="empty">
@@ -59,9 +59,8 @@
     <div id="drop" role="button" tabindex="0" aria-label="选择影片文件">
       <div class="drop-icon">&#9654;</div>
       <div class="drop-main">拖入影片，或点击选择文件</div>
-      <div class="muted small">mp4 / mkv / ts / mov … 默认在你的浏览器里本地提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片（原片只到本服务，不出本机）</div>
-      <button type="button" id="pick-folder" class="btn drop-pick">选择文件夹</button>
-      <div class="muted small drop-pick-hint">一次选中整个文件夹（浏览器本地过滤视频与字幕）</div>
+      <div class="muted small">mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class="help" tabindex="0" data-tip="默认在你自己的浏览器里提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片，原片只到所选服务，不出该服务所在机器。">?</span></div>
+      <button type="button" id="pick-folder" class="btn drop-pick" title="一次选中整个文件夹（浏览器本地过滤视频与字幕）">选择文件夹</button>
       <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
       <input type="file" id="folder" hidden webkitdirectory>
     </div>
@@ -85,25 +84,24 @@
         <select id="engine-select"></select>
       </label>
       <label class="field">
-        <span class="field-label">音轨提取</span>
-        <select id="extract-select" title="小文件在你自己的浏览器里提取音轨，只上传音频；大文件或本地提取失败时改传整片（由本服务提取）">
+        <span class="field-label">音轨提取<span class="help" tabindex="0" data-tip="自动：小文件（≤1.6GB）在你自己的浏览器里提音轨、只传音频；大文件或本地提取失败时改传整片，由所选服务提取。浏览器本地首次约需下载 30MB 引擎，之后有缓存。">?</span></span>
+        <select id="extract-select">
           <option value="auto">自动（推荐，≤1.6GB 本地）</option>
           <option value="local">仅浏览器本地</option>
           <option value="server">整片上传本服务</option>
         </select>
       </label>
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
-      <label class="chk-row autosave-chk" title="任务完成后，自动把生成的 srt 写回上传影片的原目录（仅对「选择文件 / 选择文件夹」选取的影片有效）">
+      <label class="chk-row autosave-chk">
         <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
+        <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务机器上的影片旁。">?</span>
       </label>
     </div>
-    <div class="muted small autosave-note">勾选后：用「选择文件 / 选择文件夹」上传的影片，任务完成时自动把 srt 写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务器上的影片旁。</div>
-    <div class="muted small autosave-note">「音轨提取」：浏览器本地 = 在你这台电脑上用网页内嵌的 ffmpeg 提 opus（首次约需下载 30MB 引擎，之后有缓存），2.5 小时影片只传 ~35MB 音频；整片上传 = 视频先传到本服务（不出本服务），在这里提完音轨再发给字幕服务。</div>
 
     <div id="scan-panel">
       <div class="scan-head">
         <span class="scan-title">扫描服务机器上的目录</span>
-        <span class="muted small">路径要填「所选服务」实际运行的那台服务器（后端所在机，如下载落地目录）上的目录，不是当前访问本页面这台电脑的本地路径；要批量处理本机（如 Windows 本地磁盘）的文件夹，用上方「选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整</span>
+        <span class="muted small">填「所选服务」所在机器上的目录<span class="help" tabindex="0" data-tip="扫描的是所选服务实际运行的那台服务器（后端所在机，如它的下载落地目录），不是当前访问本页面这台电脑的路径。要批量处理本机的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」上传处理。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">
@@ -128,7 +126,7 @@
     <div id="watch-panel" hidden>
       <div class="watch-head">
         <span class="watch-title"><span id="watch-lamp" class="watch-lamp" aria-hidden="true"></span>监听本机文件夹</span>
-        <span class="muted small">监听这台电脑上的一个文件夹（含子文件夹，递归）：新写入完整的视频若同目录还没有同名字幕，自动提交到所选服务生成，完成后 srt 自动写回影片同目录；上方「音轨提取」模式同样适用于被监听的影片</span>
+        <span class="muted small">新视频自动入列，完成后 srt 自动写回<span class="help" tabindex="0" data-tip="监听这台电脑上的一个文件夹（含子文件夹，递归）：新写入完整的视频若同目录还没有同名字幕，自动提交到所选服务生成，完成后 srt 自动写回影片同目录。上方「音轨提取」模式同样适用于被监听的影片。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">

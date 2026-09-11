@@ -208,7 +208,20 @@ def test_result_proxy_sanitizes_negative_srt() -> None:
         assert "1\n00:00:00,000 --> 00:00:09,300" in body, body
         assert "2\n00:00:09,300 --> 00:00:15,660" in body, body
         assert "23,880" not in body, body
-        assert 'filename="PJAM-001.zh.srt"' in r.headers.get("content-disposition", "")
+        # 服务端带真实 Content-Disposition（源视频名）→ 代理直接透传
+        assert 'filename="PJAM-045.mp4.zh.srt"' in r.headers.get("content-disposition", "")
+
+        # 旧服务无该头（suggested 退回 {job_id}.srt）→ 用 web 侧 label 推导
+        async def fake_result_legacy(self, job_id: str):
+            return NEG.encode("utf-8"), f"{job_id}.srt"
+
+        JavScribeEngine.result = fake_result_legacy  # type: ignore[method-assign]
+        try:
+            r = client.get("/api/jobs/车间A/j-done/result")
+            assert r.status_code == 200, r.text
+            assert 'filename="PJAM-001.zh.srt"' in r.headers.get("content-disposition", "")
+        finally:
+            JavScribeEngine.result = fake_result  # type: ignore[method-assign]
         print("  test_result_proxy_sanitizes_negative_srt OK")
     finally:
         del JavScribeEngine.result  # restore real method

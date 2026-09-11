@@ -84,6 +84,15 @@ function fmtDuration(s: number | null | undefined): string {
 
 function mb(b: number): number { return Math.round(b / 1048576); }
 
+// 下载/写回统一命名：<源视频名>.zh.srt（与服务端落盘、写回源目录一致）
+// 优先用 label（上传时 X-Source-Name 的原始视频名；扫描任务 label 为「文件夹扫描 · N 项」，退回 file 路径）
+function srtNameFor(j: JobRow): string {
+  const cand = j.label && !j.label.startsWith("文件夹扫描") ? j.label : j.file;
+  const base = (cand || "subtitle").replace(/.*[\\/]/, ""); // 取文件名（win 反斜杠 / posix 斜杠）
+  const stem = base.replace(/\.[^.]+$/, ""); // 去扩展名
+  return stem + SRT_SUFFIX;
+}
+
 function jav(): JavExtractAPI | undefined {
   return (window as { JavExtract?: JavExtractAPI }).JavExtract;
 }
@@ -550,19 +559,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function jobRowData(j: JobRow, now: number) {
     const pct = Math.round((j.progress || 0) * 100);
     const isRun = j.status === "running";
-    const pos = j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—");
+    // 位置列：运行中显示当前处理阶段（服务端日志事件驱动），终态显示时间轴位置
+    const pos = isRun
+      ? (j.phase_detail || "—")
+      : (j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—"));
     const elapsed = j.created ? fmtDuration((j.finished || now) - j.created) : "—";
     let eta = "";
     const prog = j.progress || 0;
-    if (isRun && prog > 0.01 && j.created) {
-      const el = now - j.created;
-      eta = el > 5 ? fmtDuration(el * (1 - prog) / prog) : "";
+    if (isRun) {
+      if (j.eta_s != null && j.eta_s >= 0 && j.eta_s < 86400) {
+        eta = `剩 ~${fmtDuration(j.eta_s)}`;
+      } else if (prog > 0.01 && j.created) {
+        const el = now - j.created;
+        eta = el > 5 ? `剩 ~${fmtDuration(el * (1 - prog) / prog)}` : "";
+      }
     }
     // 跳过行优先显示 message（含已存在字幕的完整路径）
     const sub = j.status === "skipped" && j.message ? j.message
       : (j.label && j.label !== j.file) ? j.label : (j.message || "");
     const dl = j.status === "done" && j.job_id
-      ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download>&#8595; 下载 srt</a>`
+      ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
       : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
     const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
@@ -574,7 +590,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
@@ -637,6 +653,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         row._core = d.core;
         row._html = d.html;
         row.innerHTML = d.html;
+        if (j.created) row.dataset.created = String(j.created);
         list.appendChild(row);
         rowMap.set(key, row);
       } else if (row._core !== d.core) {
@@ -672,6 +689,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       `<span class="pg-info mono">第 ${state.page + 1} / ${pages} 页 · 共 ${total} 条</span>` +
       `<button type="button" id="pg-next" class="pg-btn" ${state.page >= pages - 1 ? "disabled" : ""} aria-label="下一页">&#8250;</button>`;
   }
+
+  // 耗时列 1s 刷新：轮询 5s 一次，运行中任务的耗时要逐秒走（ETA 随轮询更新）
+  window.setInterval(() => {
+    const now = Date.now() / 1000;
+    for (const row of Array.from(jobList.children) as JobRowEl[]) {
+      if (!row.classList.contains("running")) continue;
+      const created = Number(row.dataset.created || 0);
+      if (!created) continue;
+      const el = row.querySelector(".cell-elapsed");
+      if (el) {
+        const txt = fmtDuration(now - created);
+        if (el.textContent !== txt) el.textContent = txt;
+      }
+    }
+  }, 1000);
 
   jobPager.onclick = (ev) => {
     const target = ev.target as HTMLElement;
@@ -864,7 +896,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
-  drop.onclick = () => { if (!state.busy) pickFile(); };
+  drop.onclick = (ev) => {
+    if (ev.target instanceof Element && ev.target.closest(".help")) return; // 帮助图标不触发选文件
+    if (!state.busy) pickFile();
+  };
   drop.onkeydown = (ev) => {
     if ((ev.key === "Enter" || ev.key === " ") && !state.busy) { ev.preventDefault(); pickFile(); }
   };

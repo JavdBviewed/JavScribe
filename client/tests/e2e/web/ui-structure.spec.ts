@@ -62,8 +62,10 @@ test("扫描面板结构（服务端目录语义文案）", async ({ page }) => 
   await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  // 关键语义：路径填「所选服务」运行所在服务器，不是本机
-  await expect(page.locator(".scan-head .muted")).toHaveText(/不是当前访问本页面这台电脑的本地路径/);
+  // 关键语义：路径填「所选服务」运行所在服务器，不是本机（长解释收进 ? 帮助 tooltip）
+  await expect(page.locator(".scan-head .muted")).toHaveText(/填「所选服务」所在机器上的目录/);
+  const tip = await page.locator(".scan-head .help").getAttribute("data-tip");
+  expect(tip).toMatch(/不是当前访问本页面这台电脑/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {

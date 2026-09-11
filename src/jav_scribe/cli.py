@@ -63,7 +63,11 @@ def _make_engine(args, cfg: dict[str, Any], profile: str) -> "Engine":
         cfg.setdefault("emby", {})["enabled"] = True
     if args.no_skip:
         sub["skip_if_exists"] = False
-    return Engine(cfg, log=_log, profile=profile)
+    data_dir = os.environ.get("JAVSCRIBE_DATA_DIR")
+    if not data_dir:
+        cp = config_file_path(args.config)
+        data_dir = str(cp.parent) if cp else str(Path.home() / CONFIG_DIR_NAME)
+    return Engine(cfg, log=_log, profile=profile, data_dir=Path(data_dir))
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:

@@ -51,7 +51,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from ..constants import APP_NAME, APP_VERSION
+from ..constants import APP_NAME, APP_VERSION, VIDEO_EXTS
 from . import retention as retentionlib
 from . import scan as scanlib
 
@@ -243,7 +243,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.engine.log(f"[http] {self.address_string()} {fmt % args}")
 
     # -- helpers ---------------------------------------------------------
-    def _send(self, code: int, payload, ctype: str = "application/json") -> None:
+    def _send(self, code: int, payload, ctype: str = "application/json",
+              extra: Optional[dict[str, str]] = None) -> None:
         if isinstance(payload, (dict, list)):
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         elif isinstance(payload, str):
@@ -253,8 +254,40 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", f"{ctype}; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    def _result_disposition(self, job: "Job") -> str:
+        """Content-Disposition with the source-video name (not the task id).
+
+        Upload jobs keep the original video name in job.label (X-Source-Name);
+        local jobs use the real file path.  sha1-named inbox uploads without a
+        source name fall back to the job id.
+        """
+        lang = str((self.engine.cfg.get("subtitle") or {}).get("lang_tag") or "zh")
+        name: Optional[str] = None
+        label = (job.label or "").strip()
+        if label and not label.startswith("文件夹扫描"):
+            cand = Path(label).name
+            if Path(cand).suffix:
+                name = cand
+        if name is None:
+            for t in job.files:
+                if t.path.suffix.lstrip(".").lower() in VIDEO_EXTS:
+                    name = t.path.name
+                    break
+        if name is None and job.files:
+            name = job.files[0].path.name
+        stem = Path(name or "result").stem
+        if re.fullmatch(r"[0-9a-f]{40}", stem):
+            stem = job.id
+        base = f"{stem}.{lang}.srt" if lang not in ("", "none") else f"{stem}.srt"
+        ascii_stem = base if base.isascii() else f"{job.id}.srt"
+        quoted = urllib.parse.quote(base)
+        return f'attachment; filename="{ascii_stem}"; filename*=UTF-8\'\'{quoted}'
+
 
     def _check_api_key(self) -> bool:
         """X-Api-Key gate for /config. False means an error was already sent."""
@@ -357,7 +390,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if data is None:
                     self._send(404, {"ok": False, "error": "no result srt yet"})
                 else:
-                    self._send(200, data, "text/plain")
+                    self._send(200, data, "text/plain",
+                               extra={"Content-Disposition": self._result_disposition(job)})
                 return
             self._send(200, job.to_dict(detail=True))
             return

@@ -64,6 +64,30 @@ test("单文件本地提音轨全流程：chip → 三步动画 → 完成 → �
   expect(readText(p)).toContain("テスト字幕 video-a.mp4");
 });
 
+test("任务行细节：阶段文案 / ETA 倒计时 / 耗时逐秒 / 下载命名", async ({ page }) => {
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
+  // 运行中：位置列 = 服务端阶段文案（非时间轴位置），ETA 带「剩 ~」
+  await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
+  await expect(row.locator(".cell-pos")).toContainText("转写中", { timeout: 15_000 });
+  await expect(row.locator(".eta")).toContainText("剩 ~", { timeout: 15_000 });
+  // 耗时列 1s 走秒：先等 ticker 至少走过 2s，再间隔 2s 采样两次必须不同
+  const secs = async () => {
+    const m = ((await row.locator(".cell-elapsed").textContent()) || "").trim().match(/^(\d+):?(\d{2})$/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : -1;
+  };
+  await expect.poll(secs).toBeGreaterThanOrEqual(2, { timeout: 20_000 });
+  const el1 = (await row.locator(".cell-elapsed").textContent()) || "";
+  await page.waitForTimeout(2000);
+  const el2 = (await row.locator(".cell-elapsed").textContent()) || "";
+  expect(el2).not.toBe(el1);
+  // 完成：下载链接名 = <源视频名>.zh.srt（与落盘/写回一致）
+  await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 40_000 });
+  expect(await row.locator(".job-actions a.dl-btn").getAttribute("download")).toBe("video-a.zh.srt");
+});
+
 test("整片上传回退路径（extract-select=server）：上传视频→提取音频→提交", async ({ page }) => {
   await page.selectOption("#extract-select", "server");
   await page.setInputFiles("#file", fx("video-a.mp4"));

@@ -165,11 +165,20 @@ class JavScribeEngine(EngineAdapter):
 
 
 def _attachment_name(content_disposition: str | None) -> str | None:
+    """解析 Content-Disposition 文件名；优先 RFC 5987 filename*（UTF-8 原名）。"""
     if not content_disposition:
         return None
-    for part in content_disposition.split(";"):
-        part = part.strip()
+    parts = [p.strip() for p in content_disposition.split(";")]
+    for part in parts:
+        if part.lower().startswith("filename*="):
+            val = part.split("=", 1)[1].strip()
+            if val.count("'") >= 2:
+                val = val.split("'", 2)[2]
+            decoded = unquote(val, errors="replace")
+            return decoded or None
+    for part in parts:
         if part.lower().startswith("filename="):
             value = unquote(part.split("=", 1)[1].strip().strip('"'))
             return value or None
+    return None
     return None

@@ -4,7 +4,7 @@ import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   // 页面已随 fixture 冷启动完成（引擎 mock 在线、Key 预置）
-  await expect(page.locator("#health")).toHaveText(/v0\.2\.5 · 服务 1\/1 在线/);
+  await expect(page.locator("#health")).toHaveText(/v0\.2\.6 · 服务 1\/1 在线/);
 });
 
 test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dispatch + 三 section 顺序）", async ({ page }) => {
@@ -50,9 +50,10 @@ test("拖放区结构（桌面措辞：本机提取、无大小限制）", async
   await expect(drop).toHaveAttribute("tabindex", "0");
   await expect(drop).toHaveAttribute("aria-label", "选择影片文件");
   await expect(drop.locator(".drop-main")).toHaveText("拖入影片，或点击选择文件");
-  // 桌面措辞：无 1.6GB 字样（wasm 上限仅存在于浏览器形态）
+  // 桌面措辞：短句主文 + help 提示「本机提取音轨/无大小限制」；无 1.6GB 字样（wasm 上限仅存在于浏览器形态）
   const hint = drop.locator(".muted.small").first();
-  await expect(hint).toHaveText(/在本机提取音轨，只上传 ~35MB 音频（无大小限制）/);
+  await expect(hint).toHaveText(/小文件只传音轨，大文件传整片/);
+  await expect(hint.locator(".help")).toHaveAttribute("data-tip", /在本机提取音轨，只上传 ~35MB 音频（无大小限制）/);
   await expect(hint).not.toHaveText(/1\.6GB/);
   await expect(page.locator("#file")).toBeHidden();
   expect(await page.locator("#file").getAttribute("accept")).toContain(".mp4");
@@ -76,8 +77,8 @@ test("派单栏结构（提取模式三选项桌面措辞 + autosave）", async 
   await expect(page.locator("#dispatch-go")).toBeDisabled();
   await expect(page.locator("#autosave")).not.toBeChecked();
   await expect(page.getByText("完成后写回源目录")).toBeVisible();
-  // autosave 说明桌面措辞：写回失败走保存对话框
-  await expect(page.locator(".autosave-note").first()).toHaveText(/写回失败时改为自动下载（保存对话框）/);
+  // autosave 说明桌面措辞（help 提示）：写回失败走保存对话框
+  await expect(page.locator(".autosave-chk .help")).toHaveAttribute("data-tip", /写回失败时改为自动下载（保存对话框）/);
 });
 
 test("扫描面板结构（服务端目录语义文案不变）", async ({ page }) => {
@@ -85,7 +86,8 @@ test("扫描面板结构（服务端目录语义文案不变）", async ({ page 
   await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".scan-head .muted")).toHaveText(/不是当前访问本页面这台电脑的本地路径/);
+  await expect(page.locator(".scan-head .muted")).toHaveText(/填「所选服务」所在机器上的目录/);
+  await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /不是当前访问本页面这台电脑的路径/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
@@ -111,7 +113,7 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
 
 test("侧边栏脚注与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
   await expect(page.locator("#nav .nav-id")).toHaveText("JAVSCRIBE-CLIENT");
-  await expect(page.locator("#foot-ver")).toHaveText("v0.2.5");
+  await expect(page.locator("#foot-ver")).toHaveText("v0.2.6");
   await expect(page.locator(".nav-tick")).toHaveText("看板 5s · 生成 1s");
   await expect(page.locator("#up-chip")).toBeHidden();
   // 侧边栏更新块：dev 形态 bridge 状态恒 disabled → 整块隐藏（打包形态见 update.spec）

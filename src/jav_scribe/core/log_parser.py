@@ -13,8 +13,8 @@ PATTERN_TRANSLATING = re.compile(
 )
 PATTERN_DURATION = re.compile(r"时长\s*[：:]\s*([^→]+?)\s*→")
 PATTERN_TIMESTAMP = re.compile(
-    r"\[\s*(\d+):(\d+(?:\.\d+)?)\s*-->\s*(\d+):(\d+(?:\.\d+)?)\s*\]"
-)
+    r"\[\s*-?(\d+):(\d+(?:\.\d+)?)\s*-->\s*(\d+):(\d+(?:\.\d+)?)\s*\]"
+)  # 起始时间允许负号（批处理偶发 -mm:ss 伪影，进度按结束时间算）
 PATTERN_DEVICE = re.compile(
     r"模型运行精度\s*[：:]\s*(\S+)\s*[，,]\s*设备\s*[：:]\s*(\S+)"
 )
@@ -30,6 +30,19 @@ PATTERN_LOAD_MODEL_EN = re.compile(r"Loading\s+Whisper\s+model")
 PATTERN_WRITING_EN = re.compile(r"Writing\s*[：:]\s*(.+?)\s*$")
 PATTERN_CN_DUR = re.compile(
     r"(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分)?\s*(?:(\d+(?:\.\d+)?)\s*秒)?"
+)
+# ChickenRice v1.9 (faster-whisper) English log lines, e.g.:
+#   "Using batched inference with batch size: 8"
+#   "Attempting transcription with batch_size=8"
+#   "Duration: 2h 59m 27s -> 1h 19m 13s (44.1% speech detected)"
+PATTERN_TRANSCRIBE_START = re.compile(r"Attempting transcription with batch_size=(\d+)"
+                                     r"|尝试以\s*batch_size=(\d+)\s*(?:开始)?转写")
+PATTERN_BATCH_PROBE = re.compile(r"Using batched inference with batch size:\s*(\d+)"
+                                 r"|使用批量推理(?:，批处理大小)?[:：]\s*(\d+)")
+PATTERN_HMS = re.compile(r"(?:(\d+)\s*(?:h|小时))?\s*(?:(\d+)\s*(?:m|分))?\s*(?:(\d+(?:\.\d+)?)\s*(?:s|秒))?", re.I)
+PATTERN_DURATION_FULL = re.compile(
+    r"Duration\s*[\uFF1A:]\s*(.+?)\s*\u2192\s*(.+?)\s*(?:\(\s*(\d+(?:\.\d+)?)%?\s*speech\s*detected\s*\))?\s*$",
+    re.I,
 )
 
 
@@ -57,6 +70,8 @@ class LogEvent:
     file_path: Optional[str] = None
     progress: Optional[float] = None
     duration_s: Optional[float] = None
+    speech_s: Optional[float] = None
+    speech_pct: Optional[float] = None
     detail: Optional[str] = None
     output_format: Optional[str] = None  # for file_written
 
@@ -66,16 +81,37 @@ class LogParser:
 
     def __init__(self) -> None:
         self.current_duration_s: Optional[float] = None
+        self.current_speech_s: Optional[float] = None
         self.current_file: Optional[str] = None
         self.total_files: Optional[int] = None
 
     def feed(self, line: str) -> LogEvent:
         line = line.rstrip()
 
+        if PATTERN_TRANSCRIBE_START.search(line):
+            return LogEvent(kind="transcribe_start", raw=line)
+        if PATTERN_BATCH_PROBE.search(line):
+            return LogEvent(kind="batch_probe", raw=line)
+
+        m = PATTERN_DURATION_FULL.search(line)
+        if m:
+            total = _parse_hms(m.group(1))
+            speech = _parse_hms(m.group(2))
+            pct = float(m.group(3)) if m.group(3) else None
+            if total:
+                self.current_duration_s = total
+            if speech:
+                self.current_speech_s = speech
+            return LogEvent(
+                kind="duration", raw=line,
+                duration_s=total, speech_s=speech, speech_pct=pct,
+            )
+
         m = PATTERN_TRANSLATING.search(line) or PATTERN_TRANSLATING_EN.search(line)
         if m:
             self.current_file = m.group(3).strip()
             self.current_duration_s = None
+            self.current_speech_s = None
             return LogEvent(
                 kind="file_start",
                 raw=line,
@@ -138,3 +174,20 @@ class LogParser:
             return LogEvent(kind="model_load", raw=line, detail="加载模型中…")
 
         return LogEvent(kind="raw", raw=line)
+
+
+def _parse_hms(s: str) -> Optional[float]:
+    """Parse '2h 59m 27s' / '1h' / '25s' / '3423.5' / '3423.5 s' -> seconds."""
+    s = s.strip().rstrip(".")
+    if not s:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*s?", s, re.I):
+        return float(s[:-1].strip() if s[-1].lower() == "s" else s)
+    m = PATTERN_HMS.fullmatch(s)
+    if not m:
+        return None
+    h = int(m.group(1) or 0)
+    mi = int(m.group(2) or 0)
+    se = float(m.group(3) or 0.0)
+    total = h * 3600 + mi * 60 + se
+    return total if total > 0 else None

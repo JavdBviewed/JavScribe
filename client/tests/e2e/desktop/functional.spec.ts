@@ -21,7 +21,7 @@ const icall = (page: any, method: string, ...args: string[]) =>
 test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   const r = await icall(page, "getHealth");
   expect(r.ok).toBe(true);
-  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.5", engines: 1, online: 1 });
+  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.6", engines: 1, online: 1 });
 });
 
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {

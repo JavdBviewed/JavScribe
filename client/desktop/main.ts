@@ -493,6 +493,8 @@ function jobRows(infos: EngineInfo[]): any[] {
             position: t?.position || "",
             duration_s: t?.duration_s ?? null,
             position_s: t?.position_s ?? null,
+            phase_detail: t?.phase_detail || "",
+            eta_s: t?.eta_s ?? null,
             message: t?.message || "",
             finished: t?.finished ?? null,
             output_files: t?.output_files || [],

@@ -40,7 +40,15 @@ class Task:
     restored_path: Path | None = None
     output_files: list[Path] = field(default_factory=list)
     duration_s: float | None = None  # media duration of current source
+    speech_s: float | None = None    # VAD-detected speech duration
     position_s: float | None = None  # processed up to (timeline position)
+    phase_detail: str = ""           # 当前子阶段文案（模型加载/语音检测/转写中…）
+    eta_s: float | None = None       # 预估剩余秒数（RTF 估算）
+    est_transcribe_s: float | None = None  # 转写阶段预估总墙钟
+    transcribe_started: float | None = None  # 转写阶段起点（wall）
+    live_phase: str = "preparing"   # preparing|vad|transcribing|finalizing|polishing
+    live_phase_started: float | None = None
+    last_progress_at: float | None = None  # 最后一个真实片段位置时刻
     started: float | None = None
     finished: float | None = None
 
@@ -57,8 +65,12 @@ class Task:
             "progress": round(self.progress, 4),
             "message": self.message,
             "duration_s": self.duration_s,
+            "speech_s": self.speech_s,
             "position_s": self.position_s,
             "position": _fmt_ts(self.position_s),
+            "phase_detail": self.phase_detail,
+            "eta_s": round(self.eta_s, 1) if self.eta_s is not None else None,
+            "est_transcribe_s": round(self.est_transcribe_s, 1) if self.est_transcribe_s is not None else None,
             "output_files": [str(p) for p in self.output_files],
             "started": self.started,
             "finished": self.finished,

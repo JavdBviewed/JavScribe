@@ -34,6 +34,8 @@ export interface JobRow {
   position?: string;
   duration_s?: number | null;
   position_s?: number | null;
+  phase_detail?: string | null;
+  eta_s?: number | null;
   message?: string;
   created?: number | null;
   finished?: number | null;
