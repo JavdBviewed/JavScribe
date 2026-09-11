@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import config_file_path, load_config
-from .constants import APP_VERSION, DEFAULT_PROGRESS_PORT, REMOTE_AUDIO_KBITRATE
+from .constants import APP_VERSION, CONFIG_DIR_NAME, DEFAULT_PROGRESS_PORT, REMOTE_AUDIO_KBITRATE
 
 
 def _log(msg: str) -> None:
