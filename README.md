@@ -10,7 +10,7 @@
 🖥️ **JavScribe Client**（桌面客户端）v0.2.5：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.5/jav-scribe-client-0.2.5-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.5/jav-scribe-client-0.2.5-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.5/jav-scribe-client-0.2.5-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.5/jav-scribe-client_0.2.5_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.5)
 
 <!-- release-latest:serve -->
-⚙️ **JavScribe Serve**（headless 服务端）v0.1.3：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.3/JavScribe-Serve-0.1.3-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.3/JavScribe-Serve-0.1.3-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.1.3)
+⚙️ **JavScribe Serve**（headless 服务端）v0.1.4：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.4/JavScribe-Serve-0.1.4-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.1.4/JavScribe-Serve-0.1.4-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.1.4)
 
 [全部 Release →](https://github.com/JavdBviewed/JavScribe/releases)（发布后本区自动钉到最新 tag）
 
