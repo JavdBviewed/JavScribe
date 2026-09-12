@@ -3,7 +3,7 @@
 //    （产物缺失时整文件 skip，CI 在 build job 之后必然存在）
 //  - 每 test 全新 userData（userData fixture：mockReset + 预置 engines.json），launchPackedApp
 //    恒带 JAVSCRIBE_UPDATE_FEED=http://127.0.0.1:8304/ 与 JAVSCRIBE_NO_UPDATE_RELUNCH=1
-//  - 打包形态启动 3s 后自动检查（main 的 UP_AUTO_CHECK_DELAY_MS）；feed 版本 9.9.9 > 应用 0.2.6
+//  - 打包形态启动 3s 后自动检查（main 的 UP_AUTO_CHECK_DELAY_MS）；feed 版本 9.9.9 > 应用 0.2.7
 //  - 安装包 1.5MB 分块 64KB/25ms ≈ 0.6s 下载完，进度事件真实推进
 import { test, expect, type APIRequestContext } from "./helpers";
 import { PACKED_BIN, relaunchPacked, freezeForShot, shot } from "./helpers";
@@ -43,7 +43,7 @@ test("自动检查发现新版本 → 下载 → 重启安装 → 进程退出",
 
     await chip.click();
     await expect(page.locator("#modal-title")).toHaveText("检查更新");
-    await expect(page.locator(".set-note")).toContainText("当前 v0.2.6 → 最新 v9.9.9");
+    await expect(page.locator(".set-note")).toContainText("当前 v0.2.7 → 最新 v9.9.9");
     await expect(page.locator(".up-changelog")).toContainText("e2e 测试内容");
     await expect(page.locator("#up-dl")).toBeVisible();
     await expect(page.locator("#up-later")).toBeVisible();
@@ -133,20 +133,20 @@ test("更新设置 get/put（IPC 往返 + settings.json 落盘）", async ({ use
     // 分两次 evaluate（不把 bridge 函数对象传出 renderer，避免序列化歧义）
     const before = await page.evaluate(
       () =>
-        (window as unknown as { javDesktop: { update: { getSettings: () => Promise<{ enabled: boolean; mirror: string }> } } })
+        (window as unknown as { javDesktop: { update: { getSettings: () => Promise<{ enabled: boolean; mirror: string; proxy: string }> } } })
           .javDesktop.update.getSettings(),
     );
-    expect(before).toEqual({ enabled: true, mirror: "" });
+    expect(before).toEqual({ enabled: true, mirror: "", proxy: "" });
     const after = await page.evaluate(
       () =>
-        (window as unknown as { javDesktop: { update: { putSettings: (s: { enabled: boolean; mirror: string }) => Promise<{ enabled: boolean; mirror: string }> } } })
-          .javDesktop.update.putSettings({ enabled: false, mirror: "https://gh.example.com/" }),
+        (window as unknown as { javDesktop: { update: { putSettings: (s: { enabled: boolean; mirror: string; proxy: string }) => Promise<{ enabled: boolean; mirror: string; proxy: string }> } } })
+          .javDesktop.update.putSettings({ enabled: false, mirror: "https://gh.example.com/", proxy: "socks5://127.0.0.1:10808" }),
     );
-    expect(after).toEqual({ enabled: false, mirror: "https://gh.example.com/" });
+    expect(after).toEqual({ enabled: false, mirror: "https://gh.example.com/", proxy: "socks5://127.0.0.1:10808" });
     const onDisk = JSON.parse(readFileSync(join(userData, "settings.json"), "utf-8")) as {
-      update_check: { enabled: boolean; mirror: string };
+      update_check: { enabled: boolean; mirror: string; proxy: string };
     };
-    expect(onDisk.update_check).toEqual({ enabled: false, mirror: "https://gh.example.com/" });
+    expect(onDisk.update_check).toEqual({ enabled: false, mirror: "https://gh.example.com/", proxy: "socks5://127.0.0.1:10808" });
   } finally {
     await app.close().catch(() => {});
   }
@@ -205,9 +205,9 @@ test("侧边栏更新块：切换自动更新写 settings.json（与弹窗高级
       )
       .toBe(false);
     const onDisk = JSON.parse(readFileSync(join(userData, "settings.json"), "utf-8")) as {
-      update_check: { enabled: boolean; mirror: string };
+      update_check: { enabled: boolean; mirror: string; proxy: string };
     };
-    expect(onDisk.update_check).toEqual({ enabled: false, mirror: "" });
+    expect(onDisk.update_check).toEqual({ enabled: false, mirror: "", proxy: "" });
   } finally {
     await app.close().catch(() => {});
   }

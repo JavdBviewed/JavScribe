@@ -82,6 +82,8 @@ export interface UpdateState {
 export interface UpdateSettings {
   enabled: boolean;
   mirror: string;
+  /** 更新代理（socks5://127.0.0.1:10808 / http://host:port；空=直连），main 经 session.setProxy 应用 */
+  proxy: string;
 }
 
 // ---------- 文件夹监控（仅 desktop 形态；main 进程轮询检测，renderer 排队派发） ----------

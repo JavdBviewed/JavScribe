@@ -13,7 +13,7 @@
 //   - 错误文案等价 _map_config_error / api_retry
 // 平台能力（原生对话框 / 递归枚举 / ffmpeg 提取 / fs 写回 / 保存下载）走 IPC。
 
-import { app, BrowserWindow, Menu, dialog, ipcMain, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, net, session, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -1285,10 +1285,17 @@ function registerIpc(): void {
 
 // ---------------------------------------------------------------------------
 // 版本更新（electron-updater；仅打包形态生效）
-//   - feed：默认 app-update.yml（三期 CI 产出的 github provider，owner/repo 已固化）；
-//     设置「镜像源」后切 generic provider：mirror + "https://github.com/JavdBviewed/JavScribe/releases/download/"
-//     （generic 按平台取清单：win=latest.yml，linux x64=latest-linux.yml——与 electron-builder 产物一致）
-//   - 测试钩子：JAVSCRIBE_UPDATE_FEED 直接覆盖 feed base（e2e 指向本地 mock-update-feed）；
+//   - feed：
+//     ① 默认无钩子无镜像 → 检查前经 GitHub Releases API 动态解析最新稳定 client-v* tag，
+//        切 generic 到该 tag 目录（避免 electron-updater 6.x「Atom feed 首条=仓库 latest release」
+//        被无 latest.yml 的 serve release 抢占导致 404；v0.2.6 事故根因）。解析失败静默回退
+//        app-update.yml 的 github provider（owner/repo 已固化）。
+//     ② 设置「镜像源」后切 generic provider：mirror + "https://github.com/JavdBviewed/JavScribe/releases/download/"
+//        （generic 按平台取清单：win=latest.yml，linux x64=latest-linux.yml——与 electron-builder 产物一致）
+//   - 代理：设置「更新代理」（socks5://127.0.0.1:10808 / http://host:port）→
+//        session.defaultSession.setProxy，electron.net 通道（updater 清单/下载 + 本模块 API）全走代理
+//   - 测试钩子：JAVSCRIBE_UPDATE_FEED 直接覆盖 feed base（e2e 指向本地 mock-update-feed，
+//     存在钩子时跳过 API 动态解析，CI 零外网依赖）；
 //     JAVSCRIBE_NO_UPDATE_RELUNCH=1 时「重启安装」只退出不重启（e2e 断言进程退出用）
 //   - dev 形态（!app.isPackaged）：upState 恒 disabled，UI 角标恒隐藏（既有桌面基线零变化）
 // ---------------------------------------------------------------------------
@@ -1302,7 +1309,7 @@ interface UpState {
 }
 
 interface UpSettings {
-  update_check: { enabled: boolean; mirror: string };
+  update_check: { enabled: boolean; mirror: string; proxy: string };
   ignored_versions: string[];
 }
 
@@ -1314,13 +1321,14 @@ let upIgnored: string[] = [];
 let upSettingsPath = "";
 
 function upLoadSettings(): UpSettings {
-  const def: UpSettings = { update_check: { enabled: true, mirror: "" }, ignored_versions: [] };
+  const def: UpSettings = { update_check: { enabled: true, mirror: "", proxy: "" }, ignored_versions: [] };
   try {
     const raw = JSON.parse(fs.readFileSync(upSettingsPath, "utf-8")) as Partial<UpSettings>;
     return {
       update_check: {
         enabled: raw.update_check?.enabled !== false,
         mirror: typeof raw.update_check?.mirror === "string" ? raw.update_check.mirror : "",
+        proxy: typeof raw.update_check?.proxy === "string" ? raw.update_check.proxy : "",
       },
       ignored_versions: Array.isArray(raw.ignored_versions)
         ? raw.ignored_versions.filter((v): v is string => typeof v === "string")
@@ -1356,6 +1364,105 @@ function upFeedBase(): string {
   return "";
 }
 
+/** 应用「更新代理」到 Electron 全局会话：electron.net 通道（updater 清单/下载 + 本模块 API 请求）走该代理。
+ *  留空 = direct:// 直连。仅打包形态应用（dev 形态 updater 禁用，避免影响开发网络）。 */
+function upApplyProxy(): void {
+  if (!app.isPackaged) return;
+  try {
+    const proxy = upLoadSettings().update_check.proxy.trim();
+    if (proxy) session.defaultSession.setProxy({ mode: "fixed_servers", proxyRules: proxy });
+    else session.defaultSession.setProxy({ mode: "direct" });
+  } catch (e) {
+    console.error("[update] 代理应用失败:", (e as Error).message);
+  }
+}
+
+function upCmpVer(a: number[], b: number[]): number {
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+/** GitHub Releases API：最新稳定（非 prerelease）client-v* 版本号；任何失败 reject（调用方静默回退）。
+ *  走 Electron net（认会话代理）而非 node https（不走代理，国内直连会挂）。 */
+function upLatestClientTag(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = net.request({ url: "https://api.github.com/repos/JavdBviewed/JavScribe/releases?per_page=30" });
+    req.setHeader("Accept", "application/vnd.github+json");
+    let buf = "";
+    const timer = setTimeout(() => fail(new Error("github-api-timeout(8s)")), 8000);
+    function fail(e: Error): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { req.abort(); } catch { /* 已 abort */ }
+      reject(e);
+    }
+    req.on("response", (res) => {
+      if (res.statusCode !== 200) {
+        fail(new Error(`github-api-http-${res.statusCode}`));
+        return;
+      }
+      res.on("data", (d: Buffer) => {
+        buf += d.toString("utf-8");
+        if (buf.length > 2_000_000) fail(new Error("github-api-response-too-large"));
+      });
+      res.on("end", () => {
+        if (settled) return;
+        try {
+          const j: unknown = JSON.parse(buf);
+          if (!Array.isArray(j)) { fail(new Error("github-api-bad-shape")); return; }
+          let best: number[] | null = null;
+          let bestVer = "";
+          for (const r of j) {
+            const o = r as { tag_name?: unknown; prerelease?: unknown };
+            if (o?.prerelease === true) continue; // 自动更新只追稳定版
+            const tag = typeof o?.tag_name === "string" ? o.tag_name : "";
+            const m = /^client-v(\d+(?:\.\d+)*)$/.exec(tag);
+            if (!m) continue;
+            const nums = m[1].split(".").map(Number);
+            if (!best || upCmpVer(nums, best) > 0) { best = nums; bestVer = m[1]; }
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(bestVer); // 无匹配 = ""（回退现有行为）
+        } catch (e) {
+          fail(e as Error);
+        }
+      });
+      res.on("error", (e: Error) => fail(e));
+    });
+    req.on("error", (e: Error) => fail(e));
+    req.end();
+  });
+}
+
+/** checkForUpdates 前确保 feed 正确：
+ *  - 测试钩子（JAVSCRIBE_UPDATE_FEED）→ 不动（init 已按钩子设置，e2e 零外网）
+ *  - 镜像源 → 切 generic（幂等，保证对话框改完立即生效，无需重启）
+ *  - 默认 → 动态解析最新 client-v* tag 切 generic；失败静默回退 app-update.yml github provider */
+async function upEnsureFeed(): Promise<void> {
+  try {
+    const hook = process.env.JAVSCRIBE_UPDATE_FEED || "";
+    if (hook) return;
+    const mirror = upLoadSettings().update_check.mirror.trim().replace(/\/+$/, "");
+    if (mirror) {
+      autoUpdater.setFeedURL({ provider: "generic", url: mirror + "/https://github.com/JavdBviewed/JavScribe/releases/download/" });
+      return;
+    }
+    const ver = await upLatestClientTag();
+    if (!ver) return; // 解析不到 → 保持 app-update.yml 默认行为
+    autoUpdater.setFeedURL({ provider: "generic", url: `https://github.com/JavdBviewed/JavScribe/releases/download/client-v${ver}/` });
+  } catch (e) {
+    console.error("[update] feed 解析失败，回退默认行为:", (e as Error).message);
+  }
+}
+
 function upNotesOf(info: { releaseNotes?: unknown }): string {
   const n = info?.releaseNotes;
   if (typeof n === "string") return n;
@@ -1368,13 +1475,14 @@ function upNotesOf(info: { releaseNotes?: unknown }): string {
   return "";
 }
 
-function doUpdateCheck(): void {
+async function doUpdateCheck(): Promise<void> {
   if (!app.isPackaged) {
     upSet({ status: "disabled" });
     return;
   }
   if (upState.status === "checking") return;
   upSet({ status: "checking" });
+  await upEnsureFeed(); // 动态 feed 解析（钩子/镜像/默认三种路径；内部全捕获不抛）
   autoUpdater
     .checkForUpdates()
     .catch((e: Error) => upSet({ status: "error", error: e?.message || String(e) }));
@@ -1387,6 +1495,7 @@ function initUpdater(): void {
     return; // dev 形态：不接 electron-updater（无 app-update.yml，避免噪声日志）
   }
   upIgnored = upLoadSettings().ignored_versions;
+  upApplyProxy(); // 启动即应用持久化代理（早于 3s 延迟检查）
   const base = upFeedBase();
   if (base) {
     autoUpdater.setFeedURL({ provider: "generic", url: base });
@@ -1409,7 +1518,7 @@ function initUpdater(): void {
   );
   autoUpdater.on("error", (err: Error) => upSet({ status: "error", error: err?.message || String(err) }));
   if (upLoadSettings().update_check.enabled) {
-    setTimeout(() => doUpdateCheck(), UP_AUTO_CHECK_DELAY_MS); // 启动延迟检查：不抢首屏
+    setTimeout(() => { void doUpdateCheck(); }, UP_AUTO_CHECK_DELAY_MS); // 启动延迟检查：不抢首屏
   } else {
     upSet({ status: "idle" });
   }
@@ -1460,7 +1569,7 @@ function buildMenu(): void {
     },
     {
       label: "帮助",
-      submenu: [{ label: "检查更新…", click: () => doUpdateCheck() }],
+      submenu: [{ label: "检查更新…", click: () => { void doUpdateCheck(); } }],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1469,7 +1578,7 @@ function buildMenu(): void {
 function registerUpdateIpc(): void {
   ipcMain.handle("update-state", () => upState);
   ipcMain.handle("update-check", () => {
-    doUpdateCheck();
+    void doUpdateCheck();
     return upState;
   });
   ipcMain.handle("update-download", () => {
@@ -1501,13 +1610,15 @@ function registerUpdateIpc(): void {
     return upState;
   });
   ipcMain.handle("update-settings-get", () => upLoadSettings().update_check);
-  ipcMain.handle("update-settings-put", (_ev, s: { enabled?: unknown; mirror?: unknown }) => {
+  ipcMain.handle("update-settings-put", (_ev, s: { enabled?: unknown; mirror?: unknown; proxy?: unknown }) => {
     const cur = upLoadSettings();
     cur.update_check = {
       enabled: s?.enabled !== false,
       mirror: typeof s?.mirror === "string" ? s.mirror.trim() : "",
+      proxy: typeof s?.proxy === "string" ? s.proxy.trim() : "",
     };
     upSaveSettings(cur);
+    upApplyProxy(); // 代理立即生效（下一次检查/下载即走新代理；镜像源下次检查经 upEnsureFeed 生效）
     return cur.update_check;
   });
 }

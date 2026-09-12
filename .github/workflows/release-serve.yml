@@ -143,9 +143,13 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG 已存在 → 仅覆盖上传"
+            # 幂等补正：历史 release 若曾为正式 release，改回 prerelease（防占用仓库 latest）
+            gh release edit "$TAG" --prerelease || true
           else
             echo "创建 release $TAG"
-            if ! gh release create "$TAG" --title "$TAG" --notes "JavScribe Serve — headless 服务端（无 GUI）"; then
+            # 恒 prerelease：serve 包不含 latest.yml，一旦成为仓库 latest release，
+            # 客户端 electron-updater 默认 GitHubProvider 取 latest 解析 404（v0.2.6 事故根因）
+            if ! gh release create "$TAG" --title "$TAG" --prerelease --notes "JavScribe Serve — headless 服务端（无 GUI）"; then
               echo "::error title=release-create-failed::gh release create 失败（报错见上方日志）"
               exit 1
             fi

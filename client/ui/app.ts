@@ -418,9 +418,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <label class="chk-row"><input type="checkbox" id="up-enabled"${upSettings?.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label>
       <label class="field"><span class="field-label">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
       <input id="up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upSettings?.mirror || "")}"></label>
+      <label class="field"><span class="field-label">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
+      <input id="up-proxy" class="mono" type="text" placeholder="留空直连 GitHub" value="${esc(upSettings?.proxy || "")}"></label>
       <div class="up-row">
         <button type="button" class="btn" id="up-save-set">保存设置</button>
-        <span class="muted small">镜像源下次启动应用时生效。</span>
+        <span class="muted small">保存后立即生效（代理下次检查/下载即走新代理）。</span>
       </div>`;
       ($("up-dl") as HTMLButtonElement).onclick = () => {
         void upBridge()?.download().catch(() => {});
@@ -437,6 +439,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         const next = {
           enabled: ($("up-enabled") as HTMLInputElement).checked,
           mirror: (($("up-mirror") as HTMLInputElement).value || "").trim(),
+          proxy: (($("up-proxy") as HTMLInputElement).value || "").trim(),
         };
         try {
           upSettings = await b.putSettings(next);
@@ -467,7 +470,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     body.innerHTML = `
     <div class="set-note err">${esc(s.error || "检查更新失败")}</div>
-    <div class="muted small">若网络无法直连 GitHub，可设置镜像源后重试。</div>`;
+    <div class="muted small">若网络无法直连 GitHub，可设置镜像源或更新代理后重试。</div>`;
   }
 
   upChip.onclick = () => {
@@ -1897,7 +1900,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         chk.onchange = async () => {
           const br = upBridge();
           if (!br) return;
-          const next = { enabled: chk.checked, mirror: upSettings?.mirror || "" };
+          const next = { enabled: chk.checked, mirror: upSettings?.mirror || "", proxy: upSettings?.proxy || "" };
           try {
             upSettings = await br.putSettings(next);
             toast(chk.checked ? "已启用启动时自动检查更新" : "已关闭启动时自动检查更新", "ok");
