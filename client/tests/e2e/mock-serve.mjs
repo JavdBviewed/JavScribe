@@ -199,6 +199,20 @@ const server = http.createServer((req, res) => {
           return send(200, { ok: true, version: state.version });
         });
       }
+      if (sub === "seed-hash-job") {
+        // 回归测试用：空 label + 音轨 sha1 文件名的已完成任务（下载名绝不可是 hash）
+        return readBody().then((b) => {
+          const { sha1 = "60d514bef136a97d6517d3d5d02cdb28cd72251b" } = b ? JSON.parse(b) : {};
+          const t = makeTask(`/opt/jav-scribe/inbox/${sha1}.opus`, {
+            status: "done", progress: 1, phase: "done",
+            started: Date.now() / 1000 - 120, finished: Date.now() / 1000 - 60,
+            output_files: [`/opt/jav-scribe/inbox/${sha1}.zh.srt`],
+            message: "完成",
+          });
+          const j = jobOf([t], { source_kind: "remote", label: "" });
+          return send(200, { ok: true, job_id: j.id });
+        });
+      }
       if (sub === "seed") {
         return readBody().then((b) => {
           const { n = 25, status = "done", skipped = 0, progress = 0 } = b ? JSON.parse(b) : {};
@@ -285,12 +299,14 @@ const server = http.createServer((req, res) => {
       if (parts[2] === "result" || parts[2] === "result.srt") {
         const t = j.files[0];
         if (!t || t.status !== "done") return sendErr(404, "no result srt yet");
-        // 与真实 serve 一致：下载名 = 源视频名（label 非「文件夹扫描」时）否则任务首文件，回退 job id
+        // 与真实 serve 一致：下载名 = 源视频名（label 非「文件夹扫描」时）否则任务首文件，回退 job id；
+        // 40 位内容寻址 hash（音轨 sha1）不可作文件名（与引擎 _result_disposition 同款守卫）
         const label = (j.label || "").replace(/^文件夹扫描/, "").replace(/[·].*$/, "").trim();
         const src = label && !label.includes("/") && label.length > 3 && /\.[a-z0-9]+$/i.test(label)
           ? label
           : (j.id === undefined ? t.name : (/\.[a-z0-9]+$/i.test(t.name) ? t.name : j.id + ".srt"));
-        const stem = src.split("/").pop().replace(/\.[^.]+$/, "");
+        let stem = src.split("/").pop().replace(/\.[^.]+$/, "");
+        if (/^[0-9a-f]{40}$/i.test(stem)) stem = j.id;
         const body = srtFor(t.name);
         res.writeHead(200, {
           "Content-Type": "text/plain; charset=utf-8",

@@ -173,7 +173,7 @@ export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") 
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }
 
-/** 冷启动 + 等引擎在线（health 文案 v0.2.7 · 服务 1/1 在线） */
+/** 冷启动 + 等引擎在线（health 文案 v0.2.8 · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });
 }

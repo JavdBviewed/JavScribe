@@ -85,11 +85,30 @@ function fmtDuration(s: number | null | undefined): string {
 function mb(b: number): number { return Math.round(b / 1048576); }
 
 // 下载/写回统一命名：<源视频名>.zh.srt（与服务端落盘、写回源目录一致）
-// 优先用 label（上传时 X-Source-Name 的原始视频名；扫描任务 label 为「文件夹扫描 · N 项」，退回 file 路径）
+// 优先用 label（上传时 X-Source-Name 的原始视频名；扫描任务 label 为「文件夹扫描 · N 项」，退回 file 路径）。
+// 兜底链里任何一环若是 40 位内容寻址 hash（音轨 opus 的 sha1 文件名，非可读名）则弃用，
+// 最终退回任务 id（与服务端 _result_disposition 的同款守卫，杜绝 hash 名泄漏到下载文件名）。
+const HASH_RE = /^[0-9a-f]{40}$/i;
+function cleanStem(s: string | null | undefined): string {
+  const base = (s || "").replace(/.*[\\/]/, ""); // 取文件名（win 反斜杠 / posix 斜杠）
+  const stem = base.replace(/\.[^.]+$/, "");      // 去扩展名
+  return stem && !HASH_RE.test(stem) ? stem : "";
+}
+// 与 serve constants.VIDEO_EXTS 对齐：file 带这些扩展名时说明它是真实影片路径（本地任务），
+// 远端任务的 file 则是 inbox 内容寻址名（<sha1>.opus / <sha1>.mp4）
+const VIDEO_EXT_RE = /\.(mp4|mkv|avi|mov|webm|flv|wmv|ts|m2ts|mpg|mpeg)$/i;
 function srtNameFor(j: JobRow): string {
-  const cand = j.label && !j.label.startsWith("文件夹扫描") ? j.label : j.file;
-  const base = (cand || "subtitle").replace(/.*[\\/]/, ""); // 取文件名（win 反斜杠 / posix 斜杠）
-  const stem = base.replace(/\.[^.]+$/, ""); // 去扩展名
+  // 兜底链（任何一环是 40 位内容寻址 hash 则弃用）：
+  // ① 本地任务（扫描/监听/本地直传）：file 即真实影片路径 → 最可信
+  // ② 远端任务：label = 上传时的原始视频名（X-Source-Name；须带视频扩展名，"remote" 等占位值不可用）
+  // ③ file 的任意可读名 → 任务 id（与服务端 _result_disposition 同款守卫）
+  const fileStem = cleanStem(j.file);
+  const stem =
+    (fileStem && VIDEO_EXT_RE.test(j.file || "") ? fileStem : "") ||
+    (j.label && !j.label.startsWith("文件夹扫描") && VIDEO_EXT_RE.test(j.label)
+      ? cleanStem(j.label) : "") ||
+    fileStem ||
+    (j.job_id ? String(j.job_id) : "subtitle");
   return stem + SRT_SUFFIX;
 }
 

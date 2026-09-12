@@ -3,7 +3,7 @@
 import { test, expect, type APIRequestContext } from "./helpers";
 import {
   MOCK, MOCK_KEY, FIXTURES,
-  mockPause, mockResume, mockConfigMode, mockJobs, waitForMockJobFinished,
+  mockPause, mockResume, mockConfigMode, mockJobs, waitForMockJobFinished, goView,
 } from "./helpers";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -21,7 +21,7 @@ const icall = (page: any, method: string, ...args: string[]) =>
 test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   const r = await icall(page, "getHealth");
   expect(r.ok).toBe(true);
-  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.7", engines: 1, online: 1 });
+  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.8", engines: 1, online: 1 });
 });
 
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {
@@ -308,6 +308,29 @@ test("listJobs IPC：展平 + running 优先 + created 降序", async ({ page, r
       expect(x.job_id).toBeTruthy();
       expect(x.file).toMatch(/seed-\d{3}\.mp4/);
     }
+  } finally {
+    await mockResume(request);
+  }
+});
+
+// 09-12 回归：空 label + 音轨 sha1 文件名的任务，下载按钮文件名绝不许是 40 位 hash
+//（用户实机拿到 <opus-sha1>.zh.srt 的根因路径：srtNameFor 兜底链泄漏内容寻址名）
+test("下载名回归：空 label + hash 名音轨任务 → 下载按钮用任务 id 命名（非 40 位 hash）", async ({ page, request }) => {
+  const sha1 = "60d514bef136a97d6517d3d5d02cdb28cd72251b";
+  await mockPause(request);
+  try {
+    const seed = await (await request.post(`${MOCK}/_mock/seed-hash-job`, { data: { sha1 }, headers: jh })).json() as { ok: boolean; job_id: string };
+    expect(seed.ok).toBe(true);
+    // 桌面端默认视图 = dispatch，任务行在隐藏的 #sec-jobs 里，先切「字幕任务」视图
+    await goView(page, "jobs");
+    // main 侧 3s 快照 TTL + UI 5s 轮询：等该任务行渲染出来
+    const row = page.locator(".job-row").filter({ has: page.locator(".fn", { hasText: `${sha1}.opus` }) });
+    await row.waitFor({ timeout: 20_000 });
+    const btn = row.locator("a.dl-btn[download]");
+    await btn.waitFor({ timeout: 5_000 });
+    const name = (await btn.getAttribute("download")) || "";
+    expect(name).not.toMatch(/^[0-9a-f]{40}\.zh\.srt$/i);
+    expect(name).toBe(`${seed.job_id}.zh.srt`);
   } finally {
     await mockResume(request);
   }

@@ -4,7 +4,7 @@ import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   // 页面已随 fixture 冷启动完成（引擎 mock 在线、Key 预置）
-  await expect(page.locator("#health")).toHaveText(/v0\.2\.7 · 服务 1\/1 在线/);
+  await expect(page.locator("#health")).toHaveText(/v0\.2\.8 · 服务 1\/1 在线/);
 });
 
 test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dispatch + 三 section 顺序）", async ({ page }) => {
@@ -113,7 +113,7 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
 
 test("侧边栏脚注与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
   await expect(page.locator("#nav .nav-id")).toHaveText("JAVSCRIBE-CLIENT");
-  await expect(page.locator("#foot-ver")).toHaveText("v0.2.7");
+  await expect(page.locator("#foot-ver")).toHaveText("v0.2.8");
   await expect(page.locator(".nav-tick")).toHaveText("看板 5s · 生成 1s");
   await expect(page.locator("#up-chip")).toBeHidden();
   // 侧边栏更新块：dev 形态 bridge 状态恒 disabled → 整块隐藏（打包形态见 update.spec）

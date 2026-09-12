@@ -1,7 +1,7 @@
 // 交互类：完整用户流（单文件三步动画→完成→看板→下载；整片上传回退；文件夹批量；扫描全流程；Windows 拦截；筛选×分页；retry；autosave 降级下载；小飞机跳转；删除服务）
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
-  waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockSpeed, cleanEngines, addEngine, MOCK_KEY, FIXTURES,
+  waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockSpeed, cleanEngines, addEngine, MOCK_KEY, MOCK_URL, FIXTURES,
   waitForJobsEmpty,
 } from "../helpers";
 import path from "node:path";
@@ -86,6 +86,20 @@ test("任务行细节：阶段文案 / ETA 倒计时 / 耗时逐秒 / 下载命�
   // 完成：下载链接名 = <源视频名>.zh.srt（与落盘/写回一致）
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 40_000 });
   expect(await row.locator(".job-actions a.dl-btn").getAttribute("download")).toBe("video-a.zh.srt");
+});
+
+// 09-12 回归：空 label + 音轨 sha1 文件名的任务，下载按钮文件名绝不许是 40 位 hash
+test("下载名回归：空 label + hash 名音轨任务 → 下载按钮用任务 id 命名（非 40 位 hash）", async ({ page }) => {
+  const sha1 = "60d514bef136a97d6517d3d5d02cdb28cd72251b";
+  const seed = await (await req.post(`${MOCK_URL}/_mock/seed-hash-job`, {
+    data: { sha1 }, headers: { "Content-Type": "application/json" },
+  })).json() as { ok: boolean; job_id: string };
+  expect(seed.ok).toBe(true);
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: `${sha1}.opus` }) });
+  await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 15_000 });
+  const name = await row.locator(".job-actions a.dl-btn").getAttribute("download");
+  expect(name).not.toMatch(/^[0-9a-f]{40}\.zh\.srt$/i);
+  expect(name).toBe(`${seed.job_id}.zh.srt`);
 });
 
 test("整片上传回退路径（extract-select=server）：上传视频→提取音频→提交", async ({ page }) => {

@@ -380,7 +380,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 (j.get("label", "") for j in poller.jobs.get(engine, []) if j.get("id") == job_id),
                 "",
             )
-            stem = Path(label).stem if label else Path(suggested).stem
+            # label 须为真实视频名（带扩展名）：裸 "remote" 等占位值退回任务 id
+            lab = Path(label).name if label else ""
+            stem = Path(lab).stem if lab and Path(lab).suffix else Path(suggested).stem
             filename = f"{stem}.zh.srt"
         if filename.isascii():
             cd = f'attachment; filename="{filename}"'
