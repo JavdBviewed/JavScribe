@@ -402,6 +402,48 @@ def test_engine_skips_embedded_target() -> None:
     print("  test_engine_skips_embedded_target OK")
 
 
+def test_engine_mixed_batch_skip_checks_not_bypassed() -> None:
+    """回归：批量推理会把全部 PENDING 文件拉进首批，若跳过检查滞后于批次，
+    排在可处理文件之后的「内嵌目标语言 / 已存在字幕」文件会被顺带生成。
+    预检必须在任何推理前完成。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        clean = tmp / "clean.mkv"
+        clean.write_bytes(b"fake")
+        embedded = tmp / "embedded-zh.mkv"
+        embedded.write_bytes(b"fake")
+        ext = tmp / "ext.mkv"
+        ext.write_bytes(b"fake")
+        ext.with_name("ext.zh.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\n已有\n", encoding="utf-8")
+        cfg = _engine_cfg(tmp, _FAKE_OK)
+        engine = Engine(cfg, log=lambda _s: None, profile="test")
+
+        def fake_probe(path):
+            if path.name == "embedded-zh.mkv":
+                return [{"codec": "subrip", "language": "chi"}]
+            return []
+
+        orig = subprobe._run_ffprobe
+        subprobe._run_ffprobe = fake_probe
+        try:
+            job = engine.submit([clean, embedded, ext], run_in_thread=False)
+        finally:
+            subprobe._run_ffprobe = orig
+        by_name = {t.path.name: t for t in job.files}
+        assert by_name["clean.mkv"].status == TaskStatus.DONE, by_name["clean.mkv"].to_dict()
+        t = by_name["embedded-zh.mkv"]
+        assert t.status == TaskStatus.SKIPPED, t.to_dict()
+        assert "内嵌" in t.message, t.message
+        t = by_name["ext.mkv"]
+        assert t.status == TaskStatus.SKIPPED, t.to_dict()
+        assert "已存在" in t.message, t.message
+        # 内嵌/已存在文件不得产出任何字幕
+        assert not (tmp / "embedded-zh.srt").exists()
+        assert not (tmp / "ext.srt").exists()
+        assert (tmp / "clean.zh.srt").is_file()
+    print("  test_engine_mixed_batch_skip_checks_not_bypassed OK")
+
+
 def test_engine_processes_ja_embedded() -> None:
     """内嵌 ja 不挡 zh 生成（JAV 库主场景）。"""
     with tempfile.TemporaryDirectory() as td:

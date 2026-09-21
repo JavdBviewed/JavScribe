@@ -182,14 +182,20 @@ class Engine:
 
     def _pipeline(self, job: Job) -> None:
         lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
+        sub_cfg = self.cfg.get("subtitle", {})
+        mode = str(sub_cfg.get("skip_embedded", "target") or "target").lower()
+
+        # ---- 预检：逐文件定跳过语义（已存在字幕 / 内嵌字幕 / 在途冲突）。
+        # 必须在任何批量推理之前完成：_infer_one 会把全部 PENDING 文件拉进
+        # 同一批次，检查若滞后于批次，应跳过的文件会被顺带生成字幕。
+        ready: list[Task] = []
         for task in job.files:
+            if task.status != TaskStatus.PENDING:
+                continue
             if self._stop_evt.is_set():
                 task.status = TaskStatus.CANCELED
                 task.message = "已取消"
-                continue
-            if task.status != TaskStatus.PENDING:
-                # 批量推理一次处理任务内全部文件：处理第一个文件时，
-                # 其余文件已随该批次统一收尾（DONE/ERROR），直接跳过
+                task.finished = time.time()
                 continue
             key = task.path.resolve()
             forced = False
@@ -199,7 +205,7 @@ class Engine:
                     self._force_embedded.discard(key)
                     forced = True
             target = existing_lang_sub(task.path, lang)
-            if target is not None and self.cfg.get("subtitle", {}).get("skip_if_exists", True):
+            if target is not None and sub_cfg.get("skip_if_exists", True):
                 task.status = TaskStatus.SKIPPED
                 task.phase = TaskPhase.DONE
                 task.progress = 1.0
@@ -207,8 +213,7 @@ class Engine:
                 task.finished = time.time()
                 self.log(f"[engine] 跳过（字幕已存在）: {task.path.name}")
                 continue
-            sub_cfg = self.cfg.get("subtitle", {})
-            if not forced and str(sub_cfg.get("skip_embedded", "target")).lower() != "off":
+            if not forced and mode != "off":
                 subs = probe_embedded_subs(task.path, log=self.log)
                 skip, reason = should_skip_embedded(
                     sub_cfg, [x["language"] for x in subs]
@@ -232,11 +237,15 @@ class Engine:
                     self.log(f"[engine] 跳过（其他任务正在处理）: {task.path.name}")
                     continue
                 self._inflight_files.add(key)
-            try:
+            ready.append(task)
+
+        # ---- 批量推理：一次加载模型处理全部预检通过的文件
+        for task in ready:
+            if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                # 前一批次已统一收尾（DONE/ERROR）的文件直接跳过
                 self._process_one(job, task, lang)
-            finally:
-                with self._inflight_lock:
-                    self._inflight_files.discard(key)
+            with self._inflight_lock:
+                self._inflight_files.discard(task.path.resolve())
         self._polish_job(job)
         self._emby_job(job)
 
