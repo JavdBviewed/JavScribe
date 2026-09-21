@@ -15,7 +15,7 @@
 
 import { app, BrowserWindow, Menu, dialog, ipcMain, net, session, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -25,6 +25,11 @@ import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
+import {
+  type EmbeddedSub,
+  parseProbeOutput,
+  shouldSkipEmbedded,
+} from "../core/sub-embed";
 
 // ---------------------------------------------------------------------------
 // 引擎登记（语义与 web/src/jav_scribe_web/config.py 一致）
@@ -1715,7 +1720,90 @@ function watchHasSub(dir: string, name: string, dirNames: Map<string, Set<string
   return LOCAL_SUB_PATTERNS.some((pt) => names.has(stem + pt));
 }
 
-function watchTick(): void {
+// ---------------------------------------------------------------------------
+// 内嵌字幕探测（watch 候选过滤；语义与服务端 core/subprobe.py 同源，
+// 见 client/core/sub-embed.ts）。ffprobe 只读容器头，(path,size,mtime) 缓存；
+// 缺失/失败 fail-open（服务端 engine 同判定是权威兜底）。
+// 客户端无独立设置面：内置默认 target/zh（与服务端默认一致），serve 侧
+// /config 的 skip_embedded/embedded_langs 为权威（偏差已记入任务 implement.md）。
+// ---------------------------------------------------------------------------
+const EMBED_DEFAULTS = { skip_embedded: "target", lang_tag: "zh", embedded_langs: ["zh"] };
+const embedProbeCache = new Map<string, EmbeddedSub[]>();
+const EMBED_CACHE_MAX = 256;
+
+function findFfprobe(): string | null {
+  const name = process.platform === "win32" ? "ffprobe.exe" : "ffprobe";
+  const envDir = process.env.JAVSCRIBE_FFMPEG_DIR;
+  if (envDir) {
+    const cand = path.join(envDir, name);
+    if (fs.existsSync(cand)) return cand;
+  }
+  const ffmpeg = findFfmpeg();
+  if (ffmpeg) {
+    const cand = path.join(path.dirname(ffmpeg), name);
+    if (fs.existsSync(cand)) return cand;
+  }
+  for (const p of (process.env.PATH || "").split(path.delimiter)) {
+    if (!p) continue;
+    const cand = path.join(p, name);
+    try {
+      if (fs.statSync(cand).isFile()) return cand;
+    } catch {
+      /* 不存在 */
+    }
+  }
+  return null;
+}
+
+function probeEmbeddedSubsCached(
+  ff: string, file: string, size: number, mtimeMs: number,
+): Promise<EmbeddedSub[]> {
+  const key = `${file}|${size}|${mtimeMs}`;
+  const hit = embedProbeCache.get(key);
+  if (hit) return Promise.resolve(hit);
+  return new Promise((resolve) => {
+    execFile(
+      ff,
+      ["-v", "error", "-select_streams", "s",
+       "-show_entries", "stream=codec_name,tags.language", "-of", "json", file],
+      { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        const subs = err ? [] : parseProbeOutput(stdout);
+        if (embedProbeCache.size >= EMBED_CACHE_MAX) embedProbeCache.clear();
+        embedProbeCache.set(key, subs);
+        resolve(subs);
+      },
+    );
+  });
+}
+
+/** 内嵌目标语言字幕轨 -> 不派发；ffprobe 缺失/异常 fail-open。 */
+async function watchSkipEmbedded(file: string, st: fs.Stats): Promise<boolean> {
+  const ff = findFfprobe();
+  if (!ff) return false;
+  try {
+    const subs = await probeEmbeddedSubsCached(ff, file, st.size, st.mtimeMs);
+    const r = shouldSkipEmbedded(EMBED_DEFAULTS, subs.map((x) => x.language));
+    if (r.skip) console.log(`[watch] 跳过（内嵌字幕）: ${path.basename(file)} ${r.reason}`);
+    return r.skip;
+  } catch {
+    return false;
+  }
+}
+
+let watchTickInFlight = false;
+
+async function watchTick(): Promise<void> {
+  if (watchTickInFlight) return; // ffprobe 探测未结束：跳过本轮，防 tick 重叠
+  watchTickInFlight = true;
+  try {
+    await watchTickInner();
+  } finally {
+    watchTickInFlight = false;
+  }
+}
+
+async function watchTickInner(): Promise<void> {
   const root = watchSettings.path;
   if (!root || !fs.existsSync(root)) {
     watchLastError = "监听目录不存在或不可访问";
@@ -1740,6 +1828,7 @@ function watchTick(): void {
       const prev = watchSeen.get(v.path);
       if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs) {
         watchSeen.delete(v.path); // 连续两次不变 → 稳定，发候选
+        if (await watchSkipEmbedded(v.path, st)) continue; // 内嵌目标字幕轨：不派发
         watchEmit({ path: v.path, name: v.name, size: st.size });
       } else {
         watchSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
@@ -1758,7 +1847,7 @@ function watchStartTimer(): void {
   if (watchTimer) return;
   watchTimer = setInterval(watchTick, watchSettings.pollMs);
   watchTimer.unref?.();
-  watchTick(); // 立即首轮：建立稳定性基线 / 发现存量文件
+  void watchTick(); // 立即首轮：建立稳定性基线 / 发现存量文件
 }
 
 function watchStopTimer(): void {
