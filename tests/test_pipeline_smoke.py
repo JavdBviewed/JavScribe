@@ -512,7 +512,14 @@ def test_run_finalize_sanitizes_negative() -> None:
         job = engine.submit([video], run_in_thread=False)
         assert job.files[0].status == TaskStatus.DONE, job.files[0].to_dict()
         zh = video.with_name("demo.zh.srt")
-        cues = _parse_back(zh.read_text(encoding="utf-8"))
+        text = zh.read_text(encoding="utf-8")
+        # 尾部 0 时长指纹 cue（09-21）不参与内容合法性断言
+        blocks = text.strip().split("\n\n")
+        if blocks and any(
+            l.strip().startswith("<!-- jav-scribe") for l in blocks[-1].splitlines()
+        ):
+            blocks = blocks[:-1]
+        cues = _parse_back("\n\n".join(blocks))
         assert all(s >= 0 for s, _ in cues), cues
         assert cues == sorted(cues)
         print("  test_run_finalize_sanitizes_negative OK")

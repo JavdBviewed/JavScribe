@@ -13,13 +13,17 @@ One job = one infer process (model loaded once). Jobs run sequentially.
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
 import os
+import re
 import shlex
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import __version__ as _VERSION
 from ..constants import (
     ALL_EXTS_SET,
     DEFAULT_LANG_TAG,
@@ -27,6 +31,7 @@ from ..constants import (
 )
 from .emby import EmbyConfig, refresh_for_video
 from .finalize import existing_lang_sub, finalize_one
+from .subprobe import probe_embedded_subs, should_skip_embedded
 from .log_parser import LogParser
 from .polish import PolishConfig, polish_srt
 from .proc_runner import ProcRunner
@@ -66,6 +71,8 @@ class Engine:
         self._job_thread: threading.Thread | None = None
         self._pending_jobs: list[Job] = []
         self._inflight_files: set[Path] = set()
+        # retry_job 放行的文件：resubmit 时豁免内嵌字幕判定（一次性）
+        self._force_embedded: set[Path] = set()
         self._inflight_lock = threading.Lock()
         self._rtf = RtfHistory(Path(data_dir) / "rtf-history.json") if data_dir else None
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
@@ -139,6 +146,10 @@ class Engine:
             if target is not None:
                 target.unlink(missing_ok=True)
                 self.log(f"[engine] 重新生成：已删除旧字幕 {target}")
+            elif str(task.message or "").startswith("跳过："):
+                # 内嵌字幕跳过的任务：无外部字幕可删，放行内嵌判定重生成
+                with self._inflight_lock:
+                    self._force_embedded.add(task.path.resolve())
             paths.append(task.path)
         if not paths:
             return None
@@ -180,6 +191,13 @@ class Engine:
                 # 批量推理一次处理任务内全部文件：处理第一个文件时，
                 # 其余文件已随该批次统一收尾（DONE/ERROR），直接跳过
                 continue
+            key = task.path.resolve()
+            forced = False
+            with self._inflight_lock:
+                # retry_job 放行的文件豁免内嵌判定（一次性消费）
+                if key in self._force_embedded:
+                    self._force_embedded.discard(key)
+                    forced = True
             target = existing_lang_sub(task.path, lang)
             if target is not None and self.cfg.get("subtitle", {}).get("skip_if_exists", True):
                 task.status = TaskStatus.SKIPPED
@@ -189,7 +207,20 @@ class Engine:
                 task.finished = time.time()
                 self.log(f"[engine] 跳过（字幕已存在）: {task.path.name}")
                 continue
-            key = task.path.resolve()
+            sub_cfg = self.cfg.get("subtitle", {})
+            if not forced and str(sub_cfg.get("skip_embedded", "target")).lower() != "off":
+                subs = probe_embedded_subs(task.path, log=self.log)
+                skip, reason = should_skip_embedded(
+                    sub_cfg, [x["language"] for x in subs]
+                )
+                if skip:
+                    task.status = TaskStatus.SKIPPED
+                    task.phase = TaskPhase.DONE
+                    task.progress = 1.0
+                    task.message = f"跳过：{reason}"
+                    task.finished = time.time()
+                    self.log(f"[engine] 跳过（内嵌字幕）: {task.path.name} {reason}")
+                    continue
             with self._inflight_lock:
                 if key in self._inflight_files:
                     # 同一文件正被其他任务处理（watcher 重扫/重复提交），跳过
@@ -400,7 +431,7 @@ class Engine:
         # Finalize outputs for every file that got something written.
         for t in todo:
             if t.output_files:
-                self._finalize_task(t, lang)
+                self._finalize_task(t, lang, job)
             if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
                 t.status = TaskStatus.DONE if t.output_files else TaskStatus.ERROR
                 t.message = t.message or ("完成" if t.output_files else "无字幕输出")
@@ -505,15 +536,54 @@ class Engine:
                 cwd = str(Path(first).resolve().parent)
         return parts + args + [str(f) for f in files], (cwd or None)
 
-    def _finalize_task(self, task: Task, lang: str) -> None:
+    def _finalize_task(self, task: Task, lang: str, job: Job) -> None:
         task.phase = TaskPhase.FINALIZING
         written = [p for p in task.output_files]
-        res = finalize_one(task.source, written, self.cfg.get("subtitle", {}), log=self.log)
+        sub_cfg = self.cfg.get("subtitle", {})
+        meta = self._marker_meta(task, job) if sub_cfg.get("marker", True) else None
+        res = finalize_one(
+            task.source, written, sub_cfg, log=self.log, marker_meta=meta
+        )
         task.output_files = res.final_paths or task.output_files
         if res.skipped:
             task.message = f"目标已存在: {res.skipped[0].name}"
         elif res.final_paths:
             task.message = "完成"
+
+    def _marker_meta(self, task: Task, job: Job) -> dict:
+        """指纹元数据：版本/引擎/job/时间/音轨 sha1/源大小。"""
+        audio_sha1 = "-"
+        src = task.source
+        # 远程上传走内容寻址 inbox：<sha1>.<ext>，stem 即音轨 sha1
+        if re.fullmatch(r"[0-9a-f]{40}", src.stem) and src.suffix.lower() in (
+            ".opus", ".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".mp4", ".mkv",
+        ):
+            audio_sha1 = src.stem
+        if audio_sha1 == "-":
+            # 本地 watch/run：客户端可能在源旁留 .javscribe.opus 侧车
+            sidecar = src.with_name(src.stem + ".javscribe.opus")
+            if sidecar.is_file():
+                try:
+                    h = hashlib.sha1()
+                    with open(sidecar, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                    audio_sha1 = h.hexdigest()
+                except OSError:
+                    pass
+        src_size = "-"
+        try:
+            src_size = task.path.stat().st_size
+        except OSError:
+            pass
+        return {
+            "version": _VERSION,
+            "engine": self.profile,
+            "job_id": job.id,
+            "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "audio_sha1": audio_sha1,
+            "src_size": src_size,
+        }
 
     # ------------------------------------------------------------------
     # Stage 3/4: polish + emby

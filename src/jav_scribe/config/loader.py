@@ -50,6 +50,12 @@ DEFAULTS: dict[str, Any] = {
         "skip_if_exists": True,
         "overwrite": False,
         "tag_formats": ["srt", "vtt"],
+        # 内嵌字幕跳过策略：off=不跳 / target=仅目标语言内嵌轨命中才跳（默认）
+        # / any=任意内嵌字幕轨都跳；embedded_langs 为 target 模式的目标语言
+        "skip_embedded": "target",
+        "embedded_langs": [DEFAULT_LANG_TAG],
+        # 生成 srt 尾部写入 JavScribe 指纹 cue（0 时长 + HTML 注释）
+        "marker": True,
     },
     "polish": {
         "enabled": False,

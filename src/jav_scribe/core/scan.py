@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
+
+from .subprobe import norm_language, probe_embedded_subs, should_skip_embedded
 
 MAX_SCAN_ITEMS = 5000
 MAX_LIST_ITEMS = 200  # PUT /config: list members capped
@@ -212,10 +215,17 @@ def _subtitle_for(p: Path, patterns: list[str]) -> Optional[str]:
 
 
 def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
-    """Scan `root` per live scan rules. Returns {path, items, truncated}."""
+    """Scan `root` per live scan rules. Returns {path, items, truncated}.
+
+    每项含字幕三态：subtitle_status = external（外部 srt）/ embedded（内嵌轨）/
+    none；has_subtitle 为兼容旧布尔语义（mode-aware：外部存在 或 内嵌会触发
+    跳过）。内嵌探测仅 skip_embedded != off 时跑（ffprobe 只读容器头，并行）。
+    """
     exts, pats, recurse = _scan_cfg(cfg)
+    sub_cfg = cfg.get("subtitle", {}) or {}
+    probe_on = str(sub_cfg.get("skip_embedded", "target")).lower() != "off"
     it = root.rglob("*") if recurse else root.glob("*")
-    items: list[dict[str, Any]] = []
+    candidates: list[tuple[Path, int]] = []
     truncated = False
     try:
         for f in it:
@@ -228,22 +238,39 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
                 st = f.stat()
                 if st.st_size <= 0:
                     continue
-                sub = _subtitle_for(f, pats)
-                items.append(
-                    {
-                        "path": str(f),
-                        "name": f.name,
-                        "size": st.st_size,
-                        "has_subtitle": sub is not None,
-                        "subtitle": sub,
-                    }
-                )
+                candidates.append((f, st.st_size))
             except OSError:
                 continue  # vanished mid-scan / permission quirk
-            if len(items) >= MAX_SCAN_ITEMS:
+            if len(candidates) >= MAX_SCAN_ITEMS:
                 truncated = True
                 break
     except OSError:
         pass
+
+    # 内嵌字幕轨探测（并行，只读容器头；失败按无轨处理）
+    embedded: dict[Path, list[dict[str, Any]]] = {}
+    if probe_on and candidates:
+        workers = min(8, max(2, len(candidates) // 32))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(probe_embedded_subs, f): f for f, _ in candidates}
+            for fut in as_completed(futs):
+                embedded[futs[fut]] = fut.result()
+
+    items: list[dict[str, Any]] = []
+    for f, size in candidates:
+        sub = _subtitle_for(f, pats)
+        subs = embedded.get(f, [])
+        skip, _reason = should_skip_embedded(sub_cfg, [x["language"] for x in subs])
+        items.append(
+            {
+                "path": str(f),
+                "name": f.name,
+                "size": size,
+                "has_subtitle": sub is not None or skip,
+                "subtitle": sub,
+                "subtitle_status": "external" if sub else ("embedded" if subs else "none"),
+                "embedded_langs": [norm_language(x["language"]) for x in subs],
+            }
+        )
     items.sort(key=lambda x: x["name"].lower())
     return {"path": str(root), "items": items, "truncated": truncated}

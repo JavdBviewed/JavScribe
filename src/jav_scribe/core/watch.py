@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..constants import ALL_EXTS_SET
+from .subprobe import probe_embedded_subs, should_skip_embedded
 
 LogFn = Callable[[str], None]
 NewFileFn = Callable[[list[Path]], None]
@@ -33,12 +34,15 @@ class Watcher:
         process_existing: bool = True,
         log: Optional[LogFn] = None,
         on_new_files: Optional[NewFileFn] = None,
+        sub_cfg: Optional[dict] = None,
     ) -> None:
         self.dirs = [Path(d).expanduser() for d in dirs]
         self.interval_s = interval_s
         self.process_existing = process_existing
         self.log = log or (lambda _s: None)
         self.on_new_files = on_new_files
+        # 内嵌字幕跳过策略（subtitle 段）；None/off 不过滤
+        self.sub_cfg = sub_cfg or {}
         # path -> (size, mtime, first_seen_scan, queued)
         self._seen: dict[Path, tuple[int, float, int, bool]] = {}
         self._scan_no = 0
@@ -99,9 +103,26 @@ class Watcher:
                 self._seen[path] = (cur_size, cur_mtime, first_scan, False)
                 self.log(f"[watch] 大小变化中(下载未完成?): {path.name}")
 
-        if ready and self.on_new_files:
-            self.on_new_files(ready)
+        if ready:
+            ready = self._filter_embedded(ready)
+            if ready and self.on_new_files:
+                self.on_new_files(ready)
         return ready
+
+    def _filter_embedded(self, ready: list[Path]) -> list[Path]:
+        """内嵌目标语言字幕轨的文件不派发（ffprobe 只读容器头，带缓存）。"""
+        mode = str(self.sub_cfg.get("skip_embedded", "target")).lower()
+        if not ready or mode == "off":
+            return ready
+        kept: list[Path] = []
+        for p in ready:
+            subs = probe_embedded_subs(p, log=self.log)
+            skip, reason = should_skip_embedded(self.sub_cfg, [x["language"] for x in subs])
+            if skip:
+                self.log(f"[watch] 跳过（内嵌字幕）: {p.name} {reason}")
+            else:
+                kept.append(p)
+        return kept
 
     def _loop(self) -> None:
         while not self._stop_evt.wait(self.interval_s):

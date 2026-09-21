@@ -132,6 +132,7 @@ def cmd_watch(args) -> int:
         on_new_files=lambda files: engine.submit(
             engine.expand(files), source_kind="watch", label=str(files[0].parent)
         ),
+        sub_cfg=cfg.get("subtitle", {}),
     )
     _log(f"[watch] 监听: {[str(d) for d in watcher.valid_dirs]}（每 {watcher.interval_s}s 扫描）")
     watcher.start()
@@ -164,6 +165,7 @@ def cmd_serve(args) -> int:
         on_new_files=lambda files: engine.submit(
             engine.expand(files), source_kind="watch", label=str(files[0].parent)
         ),
+        sub_cfg=cfg.get("subtitle", {}),
     )
     from pathlib import Path as _Path
     inbox_dir = (

@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..constants import APP_NAME, APP_VERSION, VIDEO_EXTS
 from . import retention as retentionlib
 from . import scan as scanlib
+from . import subprobe
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -90,6 +91,9 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("subtitle.skip_if_exists", "字幕已存在时跳过", "bool", None, False),
     ("subtitle.overwrite", "覆盖已存在字幕", "bool", None, False),
     ("subtitle.naming", "输出命名方式", "enum", ["rename", "keep"], False),
+    ("subtitle.skip_embedded", "内嵌字幕时跳过", "enum", ["off", "target", "any"], False),
+    ("subtitle.embedded_langs", "内嵌字幕目标语言（逗号分隔）", "list", None, False),
+    ("subtitle.marker", "字幕写入 JavScribe 指纹", "bool", None, False),
     ("infer.device", "推理设备", "enum", ["auto", "cpu", "cuda"], False),
     ("infer.model", "字幕模型", "string", None, False),
     ("infer.log_level", "日志级别", "enum", ["DEBUG", "INFO", "WARNING", "ERROR"], False),
@@ -168,6 +172,11 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                     value = scanlib.normalize_video_exts(value)
                 elif path == "scan.subtitle_patterns":
                     value = scanlib.normalize_subtitle_patterns(value)
+                elif path == "subtitle.embedded_langs":
+                    try:
+                        value = subprobe.normalize_embedded_langs(value)
+                    except subprobe.EmbedLangsError as ex2:
+                        raise scanlib.ScanError(str(ex2))
                 else:  # 通用 list（预留）
                     raise scanlib.ScanError(f"{path} 暂不支持列表更新")
             except scanlib.ScanError as ex:

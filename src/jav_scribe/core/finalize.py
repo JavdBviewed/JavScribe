@@ -50,11 +50,13 @@ def finalize_one(
     written: list[Path],
     sub_cfg: dict,
     log: Optional[LogFn] = None,
+    marker_meta: Optional[dict] = None,
 ) -> FinalizeResult:
     """Move/copy engine output into <stem>.<lang>.<ext> form.
 
     sub_cfg keys used: naming (rename|keep), lang_tag, output_dir,
-    skip_if_exists, overwrite, tag_formats.
+    skip_if_exists, overwrite, tag_formats, marker.
+    marker_meta 非 None 且 marker 开启时，对落位的 srt 追加 JavScribe 指纹。
     """
     logf = log or (lambda _s: None)
     res = FinalizeResult(source=source)
@@ -121,6 +123,12 @@ def finalize_one(
                 shutil.move(str(w), str(target))
         res.final_paths.append(target)
         logf(f"[finalize] {w.name} -> {target.name}")
+
+    # JavScribe 指纹：对落位的 srt 追加尾部 0 时长 cue + 注释（幂等，已有不动）
+    if sub_cfg.get("marker", True) and marker_meta:
+        for p in res.final_paths:
+            if p.suffix.lower() == ".srt":
+                append_javscribe_marker(p, marker_meta, log=logf)
 
     if not res.final_paths and not res.skipped:
         res.message = "未找到引擎输出"
@@ -307,3 +315,102 @@ def existing_lang_sub(source: Path, lang: str, ext: str = "srt") -> Path | None:
         return source.with_suffix(f".{ext}")
     p = source.with_name(f"{source.stem}.{lang}.{ext}")
     return p if p.is_file() else None
+
+
+# ---------------------------------------------------------------------------
+# JavScribe 指纹（srt 尾部 0 时长 cue + HTML 注释）
+#
+# 为什么尾部不选开头：SRT 无头部注释语法，头部放无时间戳块会让严格解析器
+# （Aegisub 等）cue 索引整体错位；尾部追加时全部正式 cue 已解析完，
+# 0 时长 cue（start=end）结构合法、播放器不显示，注释对 HTML 渲染器不可见。
+# 检测签名 = 前缀 MARKER_PREFIX（与位置无关：客户端/工作台 sanitizer 重排
+# cue 后前缀仍在，检测不受影响）。指纹含 audio_sha1：同名录名换源内容可判 stale。
+# ---------------------------------------------------------------------------
+
+MARKER_PREFIX = "<!-- jav-scribe"
+
+
+def javscribe_marker_info(text: str) -> Optional[dict]:
+    """检测 srt 文本内的 JavScribe 指纹。非 JavScribe 生成 -> None。
+
+    返回 {"raw": 注释行, "version": str|None, "fields": {k: v}}。
+    """
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith(MARKER_PREFIX):
+            continue
+        info: dict = {"raw": s, "version": None, "fields": {}}
+        body = s[len(MARKER_PREFIX):]
+        if body.rstrip().endswith("-->"):
+            body = body.rstrip()[: -3]
+        for part in body.split("|"):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("v") and "=" not in part:
+                info["version"] = part[1:].strip()
+            elif "=" in part:
+                k, v = part.split("=", 1)
+                info["fields"][k.strip()] = v.strip()
+        return info
+    return None
+
+
+def render_javscribe_marker(meta: dict) -> str:
+    """单行指纹注释。meta 键：version/engine/job_id/ts/audio_sha1/src_size。"""
+    return (
+        f"{MARKER_PREFIX} v{meta.get('version') or '?'}"
+        f" | engine={meta.get('engine') or '-'}"
+        f" | job={meta.get('job_id') or '-'}"
+        f" | {meta.get('ts') or '-'}"
+        f" | audio_sha1={meta.get('audio_sha1') or '-'}"
+        f" | src_size={meta.get('src_size') or '-'} -->"
+    )
+
+
+def _next_cue_index(text: str) -> int:
+    mx = 0
+    for ln in text.splitlines():
+        t = ln.strip()
+        if t.isdigit():
+            mx = max(mx, int(t))
+    return mx + 1
+
+
+def append_javscribe_marker(
+    path: Path, meta: dict, log: Optional[LogFn] = None
+) -> bool:
+    """srt 尾部追加指纹 cue。幂等：已有 `<!-- jav-scribe` 不重复追加。
+
+    返回 True=已写入；False=已有指纹/读取失败/写失败。
+    """
+    logf = log or (lambda _s: None)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        logf(f"[marker] 读取失败，跳过指纹: {path.name} ({e})")
+        return False
+    if MARKER_PREFIX in text:
+        return False
+    idx = _next_cue_index(text)
+    head = text
+    if not head.endswith("\n"):
+        head += "\n"
+    if not head.endswith("\n\n"):
+        head += "\n"
+    new = (
+        head
+        + f"{idx}\n00:00:00,000 --> 00:00:00,000\n"
+        + render_javscribe_marker(meta)
+        + "\n"
+    )
+    tmp = path.with_suffix(path.suffix + ".javscribe-tmp")
+    try:
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        logf(f"[marker] 写入失败: {path.name} ({e})")
+        tmp.unlink(missing_ok=True)
+        return False
+    logf(f"[marker] 指纹已写入: {path.name}")
+    return True

@@ -34,6 +34,7 @@ BASE_CFG = {
                 "formats": ["srt"], "lang_tag": "zh", "naming": "rename",
                 "output_dir": None, "skip_if_exists": True, "overwrite": False,
                 "tag_formats": ["srt", "vtt"],
+                "skip_embedded": "target", "embedded_langs": ["zh"], "marker": True,
             },
             "polish": {"enabled": False, "base_url": "", "api_key": "", "model": "", "batch_lines": 60},
             "emby": {"enabled": False, "url": "", "api_key": ""},
@@ -138,9 +139,13 @@ def test_auth_and_masking() -> None:
             code, body = _http("GET", base + "/config", key="k1")
             assert code == 200 and body["ok"] and body["profile"] == "server", (code, body)
             items = {i["path"]: i for i in body["items"]}
-            assert len(items) == 23, len(items)  # 19 基础项 + 3 扫描规则项 + 1 缓存保留项
+            assert len(items) == 26, len(items)  # 19 基础项 + 3 内嵌字幕/指纹项 + 3 扫描规则项 + 1 缓存保留项
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
+            assert items["subtitle.skip_embedded"]["options"] == ["off", "target", "any"]
+            assert items["subtitle.skip_embedded"]["value"] in ("off", "target", "any")
+            assert items["subtitle.marker"]["value"] in (True, False)
+            assert isinstance(items["subtitle.embedded_langs"]["value"], list)
             # 敏感项打码：未设置 -> ""
             assert items["emby.api_key"]["secret"] and items["emby.api_key"]["value"] == ""
             cfg["emby"]["api_key"] = "sek"
