@@ -112,6 +112,61 @@ def test_probe_failure_returns_empty() -> None:
             subprobe._run_ffprobe = orig
 
 
+def test_probe_argv_contract_stream_tags_section() -> None:
+    """回归：ffmpeg 7.x 实测 `-show_entries stream=codec_name,tags.language`
+    合并写法不输出 tags（language 恒缺失 -> target 模式永不命中）。
+    探测必须用独立 stream_tags 段。fake ffprobe 复刻该行为并记录 argv：
+    退回合并写法时本测试必失败。"""
+    import os as _os
+    import stat as _stat
+
+    fake = (
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "rec = os.environ.get('FAKE_FFPROBE_ARGV')\n"
+        "if rec:\n"
+        "    open(rec, 'a').write(chr(31).join(argv) + chr(10))\n"
+        "combined = any(a.startswith('stream=') and 'tags.' in a for a in argv)\n"
+        "has_tags_sec = any(a.startswith('stream_tags=') for a in argv)\n"
+        "stream = {'codec_name': 'subrip'}\n"
+        "if has_tags_sec and not combined:\n"
+        "    stream['tags'] = {'language': 'chi'}\n"
+        "print(json.dumps({'streams': [stream]}))\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        fake_bin = tmp / "ffprobe"
+        fake_bin.write_text(fake, encoding="utf-8")
+        fake_bin.chmod(fake_bin.stat().st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+        rec = tmp / "argv.log"
+        video = tmp / "v.mkv"
+        video.write_bytes(b"x")
+        saved_env = _os.environ.get("FAKE_FFPROBE_ARGV")
+        saved = (subprobe._ffprobe_path, subprobe._ffprobe_resolved)
+        _os.environ["FAKE_FFPROBE_ARGV"] = str(rec)
+        subprobe.reset_ffprobe_cache()
+        subprobe._ffprobe_path = str(fake_bin)
+        subprobe._ffprobe_resolved = True
+        subprobe.clear_probe_cache()
+        try:
+            subs = subprobe.probe_embedded_subs(video)
+        finally:
+            subprobe._ffprobe_path, subprobe._ffprobe_resolved = saved
+            subprobe.reset_ffprobe_cache()
+            subprobe.clear_probe_cache()
+            if saved_env is None:
+                _os.environ.pop("FAKE_FFPROBE_ARGV", None)
+            else:
+                _os.environ["FAKE_FFPROBE_ARGV"] = saved_env
+        argv = rec.read_text(encoding="utf-8").strip().split("\x1f")
+        i = argv.index("-show_entries")
+        assert "tags." not in argv[i], f"禁止合并写法: {argv}"
+        assert "stream_tags=language" in argv, f"缺 stream_tags 段: {argv}"
+        assert subs == [{"codec": "subrip", "language": "chi"}], subs
+    print("  test_probe_argv_contract_stream_tags_section OK")
+
+
 def test_should_skip_embedded_from_probe() -> None:
     """组合语义：und 内嵌轨 + target/zh -> 不跳（emby 库实测场景）。"""
     subs = [{"codec": "subrip", "language": None}, {"codec": "ass", "language": None}]

@@ -17,7 +17,7 @@ try {
   await build({ entryPoints: [tsSrc], bundle: true, format: "cjs", outfile: out, logLevel: "silent" });
   const mod = await import(`file://${out}`);
   const m = mod.default ?? mod; // esbuild CJS 打包：命名导出可能挂在 default 下
-  const { normLanguage, shouldSkipEmbedded, parseProbeOutput, embeddedTargets } = m;
+  const { normLanguage, shouldSkipEmbedded, parseProbeOutput, embeddedTargets, probeArgs } = m;
 
   // 语言归一（与服务端 norm_language 对齐）
   assert.equal(normLanguage("chi"), "zh");
@@ -75,6 +75,17 @@ try {
   assert.deepEqual(parseProbeOutput("not json"), []);
   assert.deepEqual(parseProbeOutput(""), []);
   console.log("  parseProbeOutput OK");
+
+  // 探测参数契约：language 必须走独立 stream_tags 段
+  // （ffmpeg 7.x 实测 `-show_entries stream=...,tags.language` 合并写法不输出 tags）
+  const args = probeArgs("/tmp/v.mkv");
+  const si = args.indexOf("-show_entries");
+  assert.ok(!args[si].includes("tags."), `禁止合并写法: ${args.join(" ")}`);
+  assert.ok(args.includes("stream_tags=language"), `缺 stream_tags 段: ${args.join(" ")}`);
+  assert.equal(args[args.length - 3], "-of");
+  assert.equal(args[args.length - 2], "json");
+  assert.equal(args[args.length - 1], "/tmp/v.mkv");
+  console.log("  probeArgs OK");
 
   // 端到端语义：emby 库实测场景（und subrip + und ass）target/zh 不挡
   const emby = parseProbeOutput(sample).filter((x) => !x.language);

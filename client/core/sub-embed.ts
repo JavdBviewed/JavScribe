@@ -68,7 +68,22 @@ interface ProbeStream {
   tags?: { language?: string } | null;
 }
 
-/** 解析 `ffprobe -select_streams s -show_entries stream=codec_name,tags.language -of json` 输出 */
+/** 探测内嵌字幕轨的 ffprobe 参数（纯函数，单测钉契约）。
+
+注意：流标签必须走独立 `stream_tags` 段。ffmpeg 7.x 实测
+`-show_entries stream=codec_name,tags.language` 合并写法不输出 tags
+（language 恒缺失 -> target 模式永不命中），与服务端 subprobe.py 同源。
+*/
+export function probeArgs(file: string): string[] {
+  return [
+    "-v", "error", "-select_streams", "s",
+    "-show_entries", "stream=codec_name",
+    "-show_entries", "stream_tags=language",
+    "-of", "json", file,
+  ];
+}
+
+/** 解析 `ffprobe -select_streams s -show_entries stream=codec_name -show_entries stream_tags=language -of json` 输出 */
 export function parseProbeOutput(jsonText: string): EmbeddedSub[] {
   let data: { streams?: ProbeStream[] };
   try {

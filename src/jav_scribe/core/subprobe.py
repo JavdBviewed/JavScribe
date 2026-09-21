@@ -1,7 +1,8 @@
 """Embedded subtitle track probing (ffprobe) + skip policy.
 
-只读容器头（ffprobe -select_streams s），单文件 100–500ms，适合对
-scan/watch 的稳定候选跑；结果按 (path, size, mtime) 缓存。
+只读容器头（ffprobe -select_streams s，流标签走独立 stream_tags 段——
+实测 ffmpeg 7.x 的 `stream=...tags.language` 合并写法不输出 tags），
+单文件 100–500ms，适合对 scan/watch 的稳定候选跑；结果按 (path, size, mtime) 缓存。
 
 策略（subtitle.skip_embedded）：
   off    - 永不因内嵌轨跳过
@@ -96,7 +97,11 @@ def _run_ffprobe(path: Path) -> list[dict[str, Optional[str]]]:
     try:
         proc = subprocess.run(
             [ff, "-v", "error", "-select_streams", "s",
-             "-show_entries", "stream=codec_name,tags.language",
+             # 流标签必须走独立 stream_tags 段：ffmpeg 7.x 实测
+             # `-show_entries stream=codec_name,tags.language` 合并写法
+             # 不输出 tags（language 恒缺失 -> target 模式永不命中）。
+             "-show_entries", "stream=codec_name",
+             "-show_entries", "stream_tags=language",
              "-of", "json", str(path)],
             capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
         )

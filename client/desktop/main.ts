@@ -28,6 +28,7 @@ import { sanitizeSrtBytes } from "../core/srt-sanitize";
 import {
   type EmbeddedSub,
   parseProbeOutput,
+  probeArgs,
   shouldSkipEmbedded,
 } from "../core/sub-embed";
 
@@ -1764,8 +1765,7 @@ function probeEmbeddedSubsCached(
   return new Promise((resolve) => {
     execFile(
       ff,
-      ["-v", "error", "-select_streams", "s",
-       "-show_entries", "stream=codec_name,tags.language", "-of", "json", file],
+      probeArgs(file), // 参数契约见 sub-embed.probeArgs（单测钉死）
       { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout) => {
         const subs = err ? [] : parseProbeOutput(stdout);
