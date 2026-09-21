@@ -1107,7 +1107,7 @@ function registerIpc(): void {
         entry.url + `/upload?ext=opus&sha1=${sha1}`,
         totalBytes,
         body,
-        { "X-Source-Name": String(args.name || "remote") },
+        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
       return uploadAccept(r.status, r.data);
@@ -1153,7 +1153,7 @@ function registerIpc(): void {
         entry.url + `/upload?ext=${encodeURIComponent(ext)}&sha1=${sha1}`,
         totalBytes,
         fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
-        { "X-Source-Name": String(args.name || "remote") },
+        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
       return uploadAccept(r.status, r.data);

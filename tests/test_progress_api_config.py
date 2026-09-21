@@ -8,10 +8,12 @@ PUT whitelist + type validation, secret keep-on-empty, file persistence
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -63,7 +65,12 @@ class FakeEngine:
         return None
 
     def submit_remote_files(self, _files, source_name=None):
-        raise NotImplementedError
+        self.last_source_name = source_name
+        return _FakeJob()
+
+
+class _FakeJob:
+    id = "job-fake-1"
 
 
 def _http(method: str, url: str, body: dict | None = None, key: str | None = None):
@@ -325,6 +332,57 @@ def test_put_vad_threshold_float() -> None:
             for bad in (0.0, 1.5, "abc", True, -1):
                 code, b4 = _http("PUT", base + "/config", {"values": {"vad.threshold": bad}}, key="k1")
                 assert code == 400 and not b4["ok"], (bad, code, b4)
+        finally:
+            http.stop()
+
+
+def test_upload_source_name_percent_encoded() -> None:
+    """契约回归：客户端对 X-Source-Name 头做 percent-encode(UTF-8)，服务端 unquote。
+    此前三端客户端直接塞原始日文头 -> urllib/httpx latin-1 UnicodeEncodeError 全崩。
+    """
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        file_cfg = copy.deepcopy(BASE_CFG)
+        http, engine, cfg_path = _start(td, cfg, file_cfg)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            ja_name = "離婚しない男―サレ夫と悪嫁の騙し愛― 第1話.mkv"
+            encoded = urllib.parse.quote(ja_name, safe="")
+            assert "%" in encoded and "é" not in encoded and encoded.isascii()
+            # PUT /upload：日文 percent-encode 头 -> 引擎收到原样日文名
+            audio = b"opus-bytes-ja"
+            sha1 = hashlib.sha1(audio).hexdigest()
+            req = urllib.request.Request(
+                f"{base}/upload?ext=opus&sha1={sha1}", data=audio, method="PUT")
+            req.add_header("Content-Type", "application/octet-stream")
+            req.add_header("X-Source-Name", encoded)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = json.loads(resp.read().decode())
+            assert resp.status == 201 and body["ok"], (resp.status, body)
+            assert engine.last_source_name == ja_name, engine.last_source_name
+            # POST /upload/submit（先问后传命中路径）：同一契约
+            sub = urllib.request.Request(
+                f"{base}/upload/submit?sha1={sha1}&ext=opus", method="POST")
+            sub.add_header("X-Source-Name", encoded)
+            with urllib.request.urlopen(sub, timeout=5) as resp2:
+                body2 = json.loads(resp2.read().decode())
+            assert resp2.status == 201 and body2["ok"], (resp2.status, body2)
+            assert engine.last_source_name == ja_name, engine.last_source_name
+            # 纯 ASCII 名（含空格）不受影响
+            ascii_name = "AKDL-342 mkv2"
+            req3 = urllib.request.Request(
+                f"{base}/upload?ext=opus", data=b"other-audio", method="PUT")
+            req3.add_header("X-Source-Name", urllib.parse.quote(ascii_name, safe=""))
+            with urllib.request.urlopen(req3, timeout=5) as resp3:
+                assert resp3.status == 201
+            assert engine.last_source_name == ascii_name, engine.last_source_name
+            # 头缺失时回落 query source（旧客户端兼容）
+            req4 = urllib.request.Request(
+                f"{base}/upload?ext=opus&source=fallback-name", data=b"more", method="PUT")
+            with urllib.request.urlopen(req4, timeout=5) as resp4:
+                assert resp4.status == 201
+            assert engine.last_source_name == "fallback-name", engine.last_source_name
         finally:
             http.stop()
 

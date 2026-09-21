@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -230,7 +231,7 @@ JavScribe server, poll until done, save the returned SRT next to the source."""
 
     audio = audio_tmp.read_bytes()
     q = f"?source={urllib.request.quote(src.stem, safe='')}&ext=opus"
-    code, body = http("PUT", f"{remote}/upload{q}", audio, {"X-Source-Name": src.name})
+    code, body = http("PUT", f"{remote}/upload{q}", audio, {"X-Source-Name": urllib.parse.quote(src.name, safe="")})
     if code != 201:
         print(f"上传失败 HTTP {code}: {body[:300]!r}", file=sys.stderr)
         return 1

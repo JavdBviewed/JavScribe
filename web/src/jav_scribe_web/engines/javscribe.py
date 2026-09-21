@@ -15,7 +15,7 @@ Protocol (JavScribe repo, progress_api.py):
 from __future__ import annotations
 
 import hashlib
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -90,7 +90,7 @@ class JavScribeEngine(EngineAdapter):
                 sub = await client.post(
                     f"{self.url}/upload/submit",
                     params={"sha1": sha1, "ext": "opus"},
-                    headers={"X-Source-Name": source_name},
+                    headers={"X-Source-Name": quote(source_name, safe=""),}
                 )
                 if sub.status_code == 201:
                     d = sub.json()
@@ -102,7 +102,7 @@ class JavScribeEngine(EngineAdapter):
             f"{self.url}/upload",
             params={"ext": "opus", "sha1": sha1},
             content=audio,
-            headers={"X-Source-Name": source_name, "Content-Type": "application/octet-stream"},
+            headers={"X-Source-Name": quote(source_name, safe=""), "Content-Type": "application/octet-stream"},
         )
         if r.status_code != 201:
             raise EngineUploadError(f"service rejected upload: HTTP {r.status_code}")

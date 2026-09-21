@@ -441,7 +441,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not p.is_file():
                 self._send(409, {"ok": False, "error": "not-cached"})
                 return
-            source_name = self.headers.get("X-Source-Name") or (q.get("source") or ["remote"])[0]
+            source_name = urllib.parse.unquote(self.headers.get("X-Source-Name") or "") or (q.get("source") or ["remote"])[0]
             job = self.engine.submit_remote_files([p], source_name=source_name)
             self._send(
                 201,
@@ -500,7 +500,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": "sha1 参数非法（需 40 位十六进制）"})
             return
         source_name = (
-            self.headers.get("X-Source-Name")
+            urllib.parse.unquote(self.headers.get("X-Source-Name") or "")
             or (q.get("source") or ["remote"])[0]
         )
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
