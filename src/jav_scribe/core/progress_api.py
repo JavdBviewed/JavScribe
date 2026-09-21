@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..constants import APP_NAME, APP_VERSION, VIDEO_EXTS
 from . import retention as retentionlib
 from . import scan as scanlib
+from . import metrics as metricslib
 from . import subprobe
 
 if TYPE_CHECKING:
@@ -342,6 +343,11 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if len(parts) == 1 and parts[0] == "metrics":
+            # 与 /jobs 同敏感级：无鉴权、仅内网（暴露文件名与 /jobs 一致）
+            body = self.metrics.render(self.engine)
+            self._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
+            return
         if len(parts) == 1 and parts[0] == "config":
             if not self._check_api_key():
                 return
@@ -350,6 +356,7 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 1 and parts[0] == "scan":
             if not self._check_api_key():
                 return
+            self.metrics.inc_scan_requests()
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             raw = (q.get("path") or [""])[0]
             try:
@@ -487,6 +494,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(500, {"ok": False, "error": f"写入配置文件失败: {ex}"})
                     return
                 apply_config_updates(self.engine.cfg, updates)
+            if updates:
+                self.metrics.inc_config_changes(len(updates))
             self._send(
                 200,
                 {"ok": True, "updated": [f"{s}.{k}" for s, k, _ in updates]},
@@ -549,6 +558,7 @@ class _Handler(BaseHTTPRequestHandler):
                 tmp.unlink(missing_ok=True)
                 self._send(500, {"ok": False, "error": f"落盘失败: {ex}"})
                 return
+        self.metrics.add_upload_bytes(final.stat().st_size)
         job = self.engine.submit_remote_files([final], source_name=source_name)
         self._send(
             201,
@@ -570,11 +580,13 @@ class ProgressHTTP:
         self.profile = profile
         self.inbox_dir = inbox_dir or (Path.home() / ".jav_scribe" / "inbox")
         self.config_path = config_path
+        self.metrics = metricslib.MetricsRegistry()
         h = _Handler
         h.engine = engine
         h.profile = profile
         h.inbox_dir = self.inbox_dir
         h.config_path = config_path
+        h.metrics = self.metrics
         self.server = ThreadingHTTPServer((host, port), h)
         self.thread: threading.Thread | None = None
         self.host, self.port = host, port

@@ -64,6 +64,7 @@ class Engine:
         self.profile = profile
         self.log = log or print
         self.jobs: list[Job] = []
+        self.model_loaded = False  # 当前是否有已加载模型的推理进程（/metrics gauge）
         self._parser = LogParser()
         self._current_task: Task | None = None
         self._runner: ProcRunner | None = None
@@ -389,6 +390,7 @@ class Engine:
                         t.phase_detail = LIVE_PHASES["vad"][3]
             elif evt.kind == "batch_probe":
                 shared["model_loaded"] = True
+                self.model_loaded = True
                 for tt in todo:
                     if tt.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and tt.transcribe_started is None:
                         tt.live_phase = "vad"
@@ -426,9 +428,11 @@ class Engine:
                     t.eta_s = None
             elif evt.kind == "model_load":
                 shared["model_loaded"] = True
+                self.model_loaded = True
                 self.log("  [infer] 模型加载中…")
 
         ok = self._run_command(cmd, cwd=cwd, on_line=on_line)
+        self.model_loaded = False  # 推理进程已退出，模型随进程释放
         if not ok:
             for t in todo:
                 if t.status == TaskStatus.RUNNING:
