@@ -644,13 +644,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
       ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
       : (j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
+    // 取消（运行中/排队）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
+    const cancel = (j.status === "running" || j.status === "pending") && j.job_id
+      ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
+      : "";
     // 换服务重跑（仅 desktop）：终态行复用本地音轨缓存向其他服务提交新任务
     const rerunBtn = (platform.kind === "desktop" && j.file
       && (j.status === "done" || j.status === "error" || j.status === "skipped"))
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb, ss].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
@@ -658,7 +662,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${retry}${rerunBtn}</div>`;
+      <div class="job-actions">${dl}${retry}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -783,6 +787,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (rb && !rb.disabled) {
       if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
       void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "");
+      return;
+    }
+    const cb = (ev.target as HTMLElement).closest(".cancel") as HTMLButtonElement | null;
+    if (cb && !cb.disabled) {
+      const crow = cb.closest(".job-row");
+      const cname = crow?.querySelector(".fn")?.textContent || "";
+      const cjid = cb.dataset.jid || "", ceng = cb.dataset.eng || "";
+      cb.disabled = true; cb.textContent = "取消中…";
+      const ok = window.confirm(
+        `确认取消「${cname}」？\n排队中/未开始的文件立即终止；运行中的将在当前检查点中止，已生成的字幕会保留。`,
+      );
+      if (!ok) { cb.disabled = false; cb.textContent = "\u2715 取消"; refresh(); return; }
+      try {
+        const d = await t.cancelJob(ceng, cjid);
+        toast(d.status === "canceling"
+          ? `「${cname}」正在取消（检查点中止，已生成字幕保留）`
+          : `「${cname}」已取消`, "ok");
+      } catch (e) {
+        toast(`取消失败：${(e as Error).message}`, "err");
+        cb.disabled = false; cb.textContent = "\u2715 取消";
+      }
+      refresh();
       return;
     }
     const b = (ev.target as HTMLElement).closest(".retry") as HTMLButtonElement | null;

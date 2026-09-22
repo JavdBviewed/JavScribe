@@ -127,6 +127,15 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
+    async def cancel(self, job_id: str) -> dict:
+        """取消任务：排队立即收尾，运行中协作中止（已生成字幕保留）。
+
+        返回 {ok, job_id, status}；服务 404/409 时原样抛出 HTTPStatusError。
+        """
+        r = await self._get_client().post(f"{self.url}/jobs/{job_id}/cancel")
+        r.raise_for_status()
+        return r.json()
+
     def _auth_headers(self) -> dict[str, str]:
         return {"X-Api-Key": self.api_key} if self.api_key else {}
 

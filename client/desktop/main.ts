@@ -992,6 +992,17 @@ function registerIpc(): void {
           if (r.status === 409) return { ok: false, error: "无可重新生成的文件（非跳过或已处理）" };
           throw serveError(r.status, r.data);
         }
+        case "cancelJob": {
+          const entry = engineByName(String(a0));
+          const r = await httpJson<any>(
+            entry.url + "/jobs/" + encodeURIComponent(String(a1)) + "/cancel",
+            { method: "POST", body: "", timeoutMs: 15000 },
+          );
+          if (r.status === 200) return { ok: true, data: { status: String((r.data as { status?: string })?.status || "canceled") } };
+          if (r.status === 404) return { ok: false, error: "任务不存在（已过期）" };
+          if (r.status === 409) return { ok: false, error: "任务已结束，无需取消" };
+          throw serveError(r.status, r.data);
+        }
         case "getConfig": {
           const entry = engineByName(String(a0));
           const headers: Record<string, string> = {};

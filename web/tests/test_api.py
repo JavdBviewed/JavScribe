@@ -258,6 +258,42 @@ def test_retry_proxy() -> None:
         del JavScribeEngine.retry  # restore real method
 
 
+def test_cancel_proxy() -> None:
+    """任务取消：代理车间 POST /jobs/<id>/cancel（200/409/404 映射）。"""
+    import httpx
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_cancel(self, job_id: str) -> dict:
+        calls.append((self.name, job_id))
+        if job_id == "j-409":
+            raise httpx.HTTPStatusError("conflict", request=httpx.Request("POST", "http://x"),
+                                        response=httpx.Response(409, request=httpx.Request("POST", "http://x")))
+        if job_id == "j-404":
+            raise httpx.HTTPStatusError("not found", request=httpx.Request("POST", "http://x"),
+                                        response=httpx.Response(404, request=httpx.Request("POST", "http://x")))
+        return {"ok": True, "job_id": job_id, "status": "canceled"}
+
+    orig = JavScribeEngine.cancel
+    JavScribeEngine.cancel = fake_cancel  # type: ignore[method-assign]
+    try:
+        client, _ = make_client()
+        r = client.post("/api/jobs/车间A/j-run/cancel")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "job_id": "j-run", "status": "canceled"}
+        assert calls == [("车间A", "j-run")]
+        # 已结束 -> 409 中文提示
+        r = client.post("/api/jobs/车间A/j-409/cancel")
+        assert r.status_code == 409 and "已结束" in r.json()["detail"], r.text
+        # 任务不存在 -> 404
+        r = client.post("/api/jobs/车间A/j-404/cancel")
+        assert r.status_code == 404 and "不存在" in r.json()["detail"], r.text
+        # 未知车间 -> 404
+        assert client.post("/api/jobs/不存在/j-x/cancel").status_code == 404
+        print("  test_cancel_proxy OK")
+    finally:
+        JavScribeEngine.cancel = orig  # restore real method
+
 
 if __name__ == "__main__":
     test_health_and_engines()
@@ -268,6 +304,7 @@ if __name__ == "__main__":
     test_upload_error_no_audio()
     test_result_proxy_sanitizes_negative_srt()
     test_retry_proxy()
+    test_cancel_proxy()
     print("  test_api OK")
 
 

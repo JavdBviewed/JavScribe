@@ -121,6 +121,7 @@ export const desktopTransport: Transport = {
   },
 
   retryJob: (engine, jobId) => call<{ jobId: string }>("retryJob", engine, jobId),
+  cancelJob: (engine, jobId) => call<{ status: string }>("cancelJob", engine, jobId),
   getConfig: (name) => call<ConfigItem[]>("getConfig", name),
   putConfig: (name, values) => call("putConfig", name, JSON.stringify(values)),
 

@@ -85,6 +85,7 @@ class Job:
     finished: float | None = None
     source_kind: str = "local"  # local | watch | remote
     label: str = ""
+    cancel_requested: bool = False  # 用户取消：排队任务立即收尾，运行任务由各检查点协作中止
 
     @property
     def done(self) -> bool:
@@ -113,6 +114,8 @@ class Job:
             "done": sum(1 for t in self.files if t.status == TaskStatus.DONE),
             "skipped": sum(1 for t in self.files if t.status == TaskStatus.SKIPPED),
             "failed": sum(1 for t in self.files if t.status == TaskStatus.ERROR),
+            "canceled": sum(1 for t in self.files if t.status == TaskStatus.CANCELED),
+            "cancel_requested": self.cancel_requested,
             "state": "running" if not self.done else "finished",
         }
         cur = self.current()

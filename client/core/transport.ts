@@ -52,6 +52,8 @@ export interface Transport {
   getResultData(engine: string, jobId: string): Promise<ArrayBuffer | null>;
   /** 删旧字幕重新生成；失败 throw(detail) */
   retryJob(engine: string, jobId: string): Promise<{ jobId: string }>;
+  /** 取消任务：排队立即收尾 / 运行中协作中止；已结束 throw("任务已结束，无需取消") */
+  cancelJob(engine: string, jobId: string): Promise<{ status: string }>;
   /** 服务端设置项；Key 错误/版本过旧等 throw(detail 或 "HTTP <status>") */
   getConfig(name: string): Promise<ConfigItem[]>;
   /** 保存设置；失败 throw(detail 或 "<status>") */

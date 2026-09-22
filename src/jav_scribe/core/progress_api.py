@@ -6,6 +6,7 @@ Endpoints (all JSON unless noted):
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
   POST /jobs/<id>/retry       -> re-queue SKIPPED files (force regenerate)
+  POST /jobs/<id>/cancel      -> cancel queued (instant) / running (cooperative) job
   PUT  /upload?source=<name>   -> body = audio bytes; stored content-addressed
                                    as inbox/<sha1>.<ext> (same-content dedup,
                                    streaming, in-memory-light), creates a remote
@@ -441,6 +442,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(409, {"ok": False, "error": "no retryable file（无跳过的文件，或任务已过期）"})
             else:
                 self._send(201, {"ok": True, "job_id": job.id})
+            return
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "cancel":
+            if self.engine.job_by_id(parts[1]) is None:
+                self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})
+                return
+            status = self.engine.cancel_job(parts[1])
+            if status == "finished":
+                self._send(409, {"ok": False, "error": "任务已结束，无需取消"})
+            else:
+                self._send(200, {"ok": True, "job_id": parts[1], "status": status})
             return
         if len(parts) == 2 and parts[0] == "upload" and parts[1] == "submit":
             # 先问后传命中路径：无 body，直接以已缓存音轨建任务

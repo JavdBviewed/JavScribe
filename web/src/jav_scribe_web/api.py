@@ -586,6 +586,27 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         finally:
             await eng.close()
 
+    # -- 任务取消 (代理服务 POST /jobs/<id>/cancel) ---------------------------
+
+    @app.post("/api/jobs/{engine}/{job_id}/cancel")
+    async def api_cancel(engine: str, job_id: str) -> dict:
+        entry = store.get(engine)
+        if entry is None:
+            raise HTTPException(404, "engine not found")
+        eng = JavScribeEngine(engine, entry["url"])
+        try:
+            return await eng.cancel(job_id)
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 404:
+                raise HTTPException(404, "任务不存在（已过期）")
+            if ex.response.status_code == 409:
+                raise HTTPException(409, "任务已结束，无需取消")
+            raise HTTPException(502, f"服务请求失败: HTTP {ex.response.status_code}")
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
     # -- 服务设置（代理 /config，X-Api-Key 鉴权在服务侧执行）-----------------
 
     def _map_config_error(ex: httpx.HTTPStatusError) -> HTTPException:

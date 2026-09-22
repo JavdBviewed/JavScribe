@@ -111,6 +111,20 @@ export const webTransport: Transport = {
     throw new TransportError(msg);
   },
 
+  async cancelJob(engine, jobId) {
+    const r = await fetch(
+      `/api/jobs/${encodeURIComponent(engine)}/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+    if (r.ok) {
+      const d = (await r.json()) as { status?: string };
+      return { status: d.status || "canceled" };
+    }
+    let msg = String(r.status);
+    try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch (_e) {}
+    throw new TransportError(msg);
+  },
+
   getConfig: (name) =>
     jgetOrDetail<{ items: ConfigItem[] }>(
       "/api/engines/" + encodeURIComponent(name) + "/config",

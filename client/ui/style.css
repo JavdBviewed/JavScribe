@@ -468,6 +468,9 @@ input:focus, select:focus {
 .dl-btn.retry { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .dl-btn.retry:hover { box-shadow: 0 3px 10px -3px var(--accent); }
 .dl-btn.retry:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
+.dl-btn.cancel { border-color: var(--err); color: var(--err); background: rgba(204, 51, 64, 0.10); }
+.dl-btn.cancel:hover { box-shadow: 0 3px 10px -3px var(--err); }
+.dl-btn.cancel:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
 .dl-btn.rerun { border-color: var(--line-strong); color: var(--muted); }
 .dl-btn.rerun:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 3px 10px -3px var(--accent); }
 .dl-btn.rerun:disabled { opacity: 0.6; cursor: default; box-shadow: none; }

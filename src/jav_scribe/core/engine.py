@@ -157,6 +157,45 @@ class Engine:
         self.log(f"[engine] 任务 {job_id} 重新生成 {len(paths)} 个文件")
         return self.submit(paths, source_kind=job.source_kind, label=job.label)
 
+    # ------------------------------------------------------------------
+    # Cancel（用户主动取消：排队任务立即收尾；运行任务设标志，检查点协作中止）
+    # ------------------------------------------------------------------
+    def cancel_job(self, job_id: str) -> "str | None":
+        """取消任务。返回：None=任务不存在；"finished"=已结束；
+        "canceled"=排队任务已立即取消；"canceling"=运行中，正在协作中止。"""
+        job = self.job_by_id(job_id)
+        if job is None:
+            return None
+        if job.finished is not None:
+            return "finished"
+        if job.cancel_requested:
+            return "canceled" if all(
+                t.status in (TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.ERROR, TaskStatus.CANCELED)
+                for t in job.files) else "canceling"
+        job.cancel_requested = True
+        if any(j is job for j in self._pending_jobs):
+            try:
+                self._pending_jobs.remove(job)
+            except ValueError:
+                # worker 线程并发 drain 已取出该任务 → _run_job 入口检查会兜底收尾
+                pass
+            self._cancel_pending_tasks(job, "已取消")
+            job.finished = time.time()
+            self.log(f"[engine] 任务 {job.id} 已取消（排队中，未占用推理资源）")
+            return "canceled"
+        self.log(f"[engine] 任务 {job.id} 收到取消请求（运行中，将在检查点中止）")
+        return "canceling"
+
+    @staticmethod
+    def _cancel_pending_tasks(job: "Job", msg: str) -> None:
+        now = time.time()
+        for t in job.files:
+            if t.status == TaskStatus.PENDING:
+                t.status = TaskStatus.CANCELED
+                t.message = msg
+                t.finished = now
+                t.eta_s = None
+
     def stop(self) -> None:
         self._stop_evt.set()
         if self._runner is not None:
@@ -166,6 +205,13 @@ class Engine:
     # Job execution
     # ------------------------------------------------------------------
     def _run_job(self, job: Job) -> None:
+        if job.cancel_requested:
+            # 交接窗口：drain 弹出后、开跑前被取消 → 立即收尾，不占推理资源
+            self._cancel_pending_tasks(job, "已取消")
+            job.finished = time.time()
+            self.log(f"[engine] 任务 {job.id} 已取消（开跑前）")
+            self._drain_pending()
+            return
         self.log(f"[engine] ===== 任务 {job.id} 开始（{len(job.files)} 个文件） =====")
         try:
             self._pipeline(job)
@@ -193,7 +239,7 @@ class Engine:
         for task in job.files:
             if task.status != TaskStatus.PENDING:
                 continue
-            if self._stop_evt.is_set():
+            if self._stop_evt.is_set() or job.cancel_requested:
                 task.status = TaskStatus.CANCELED
                 task.message = "已取消"
                 task.finished = time.time()
@@ -243,6 +289,14 @@ class Engine:
         # ---- 批量推理：一次加载模型处理全部预检通过的文件
         for task in ready:
             if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                if job.cancel_requested:
+                    task.status = TaskStatus.CANCELED
+                    task.message = "已取消"
+                    task.finished = time.time()
+                    self.log(f"[engine] 取消：跳过未开始文件 {task.path.name}")
+                    with self._inflight_lock:
+                        self._inflight_files.discard(task.path.resolve())
+                    continue
                 # 前一批次已统一收尾（DONE/ERROR）的文件直接跳过
                 self._process_one(job, task, lang)
             with self._inflight_lock:
@@ -265,7 +319,7 @@ class Engine:
         task.last_progress_at = None
         if self._restore(task):
             self._infer_one(job, task, lang)
-        if self._stop_evt.is_set() and task.status == TaskStatus.RUNNING:
+        if (self._stop_evt.is_set() or job.cancel_requested) and task.status == TaskStatus.RUNNING:
             task.status = TaskStatus.CANCELED
             task.message = "已取消"
         if task.status == TaskStatus.RUNNING:
@@ -431,13 +485,21 @@ class Engine:
                 self.model_loaded = True
                 self.log("  [infer] 模型加载中…")
 
-        ok = self._run_command(cmd, cwd=cwd, on_line=on_line)
+        ok = self._run_command(cmd, cwd=cwd, on_line=on_line,
+                               stop_check=lambda: job.cancel_requested)
         self.model_loaded = False  # 推理进程已退出，模型随进程释放
         if not ok:
             for t in todo:
                 if t.status == TaskStatus.RUNNING:
-                    t.status = TaskStatus.ERROR
-                    t.message = t.message or "引擎退出非零"
+                    if job.cancel_requested:
+                        # 取消时已产出字幕的文件保留：留给 finalize 循环收尾为 DONE
+                        if t.output_files:
+                            continue
+                        t.status = TaskStatus.CANCELED
+                        t.message = "已取消"
+                    else:
+                        t.status = TaskStatus.ERROR
+                        t.message = t.message or "引擎退出非零"
                     t.finished = time.time()
         self._record_rtf(todo, shared["transcribe_started"])
 
@@ -446,9 +508,17 @@ class Engine:
             if t.output_files:
                 self._finalize_task(t, lang, job)
             if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                t.status = TaskStatus.DONE if t.output_files else TaskStatus.ERROR
-                t.message = t.message or ("完成" if t.output_files else "无字幕输出")
-                t.progress = 1.0 if t.status == TaskStatus.DONE else t.progress
+                if t.output_files:
+                    t.status = TaskStatus.DONE
+                    t.message = t.message or "完成"
+                    t.progress = 1.0
+                elif job.cancel_requested:
+                    # 取消时未开始的文件（同批后续项）：不报错，标已取消
+                    t.status = TaskStatus.CANCELED
+                    t.message = "已取消"
+                else:
+                    t.status = TaskStatus.ERROR
+                    t.message = t.message or "无字幕输出"
                 t.eta_s = None
                 t.finished = time.time()
 
@@ -640,6 +710,7 @@ class Engine:
         on_line: Optional[LogFn] = None,
         on_progress: Optional[Callable[[float], None]] = None,
         timeout: float | None = None,
+        stop_check: Optional[Callable[[], bool]] = None,
     ) -> bool:
         self._last_exit_code = None
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -661,6 +732,10 @@ class Engine:
                 self._runner.stop()
                 break
             if self._stop_evt.is_set():
+                self._runner.stop()
+                break
+            if stop_check is not None and stop_check():
+                self.log("[engine] 收到取消，终止子进程")
                 self._runner.stop()
                 break
         self._runner = None
