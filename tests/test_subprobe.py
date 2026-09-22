@@ -23,6 +23,7 @@ from jav_scribe.core.subprobe import (  # noqa: E402
     norm_language,
     should_skip_embedded,
 )
+from jav_scribe import __version__  # noqa: E402
 from jav_scribe.core.task import TaskStatus  # noqa: E402
 from jav_scribe.core.watch import Watcher  # noqa: E402
 
@@ -504,7 +505,7 @@ def test_engine_marker_written_and_marker_off() -> None:
         zh = video.with_name("demo.zh.srt")
         info = javscribe_marker_info(zh.read_text(encoding="utf-8"))
         assert info is not None, "默认 marker=true 应写指纹"
-        assert info["version"] == "0.1.5"
+        assert info["version"] == __version__
         assert info["fields"]["engine"] == "test"
         assert info["fields"]["job"] == job.id
         assert info["fields"]["audio_sha1"] == "-"  # 本地无音轨产物
