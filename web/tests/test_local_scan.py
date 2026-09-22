@@ -61,8 +61,9 @@ def test_cfg_from_items_merges_defaults() -> None:
     # 缺键必须回落到默认规则（不能空集 -> 扫描全空）
     base = localscan.cfg_from_items([])
     assert base == copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
-    exts, pats, recurse = localscan._scan_cfg(base)
-    assert len(exts) >= 10 and ".srt" in pats and recurse is True
+    sc = localscan._scan_cfg(base)
+    assert len(sc["exts"]) >= 10 and ".srt" in sc["pats"] and sc["recurse"] is True
+    assert sc["min_size_mb"] == 200 and sc["naming_c"] == "has_sub"
 
     cfg = localscan.cfg_from_items([
         {"path": "scan.video_exts", "value": ["mkv"]},
@@ -79,8 +80,8 @@ def test_cfg_from_items_merges_defaults() -> None:
     assert cfg["subtitle"]["skip_embedded"] == "off"
     assert "other" not in cfg
     # _scan_cfg 吃合配置后规则可用
-    exts2, _, recurse2 = localscan._scan_cfg(cfg)
-    assert exts2 == {"mkv"} and recurse2 is True
+    sc2 = localscan._scan_cfg(cfg)
+    assert sc2["exts"] == {"mkv"} and sc2["recurse"] is True
 
 
 def test_resolve_scan_root_direct_and_mapped() -> None:
@@ -166,6 +167,69 @@ def test_scan_dir_external_subtitle_recurse_exts() -> None:
         assert [it["name"] for it in localscan.scan_dir(d, cfg_mkv)["items"]] == [
             "b.mkv",
         ]
+
+
+def test_standalone_c_heuristic() -> None:
+    hit = ["SSIS-123-C.mp4", "SSIS-123 C.mp4", "SSIS-123_C.mp4",
+           "SSIS-123 (c).mkv", "C-SSIS-123.mp4", "ssis-123-c.webm", "SSIS-123.C.mp4"]
+    miss = ["SSIS-123C.mp4", "SSIS-123CD2.mp4", "CD1-SSIS-123.mp4", "SSIS-123 1CD.mp4",
+            "SSIS-123C2.mp4", "SSIS-123 Uncut.mp4", "SSIS-123 CUT.mp4",
+            "300MIUM-1266.mp4", ""]
+    for n in hit:
+        assert localscan.standalone_c_in(n), n
+    for n in miss:
+        assert not localscan.standalone_c_in(n), n
+
+
+def test_scan_min_size_and_naming_c() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "SSIS-123-C.mp4").write_bytes(b"x" * 1000)
+        (d / "big.mp4").write_bytes(b"x" * 3 * 1024 * 1024)
+        (d / "tiny.mp4").write_bytes(b"x" * 1000)
+        cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
+        cfg["subtitle"]["skip_embedded"] = "off"
+
+        # 默认 200MB：全部过小；独立 C 默认 has_sub ⇒ named + has_subtitle
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        assert len(by) == 3 and all(i["too_small"] for i in by.values())
+        c = by["SSIS-123-C.mp4"]
+        assert c["name_sub"] is True and c["subtitle_status"] == "named"
+        assert c["has_subtitle"] is True
+
+        # 阈值 1MB：只有 1KB 的过小
+        cfg["scan"]["min_size_mb"] = 1
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        assert by["big.mp4"]["too_small"] is False
+        assert by["tiny.mp4"]["too_small"] is True
+        # 0 = 不忽略
+        cfg["scan"]["min_size_mb"] = 0
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        assert not any(i["too_small"] for i in by.values())
+
+        # no_sub：仅信息标，不改变 has_subtitle / 状态
+        cfg["scan"]["min_size_mb"] = 1
+        cfg["scan"]["naming_c"] = "no_sub"
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        c = by["SSIS-123-C.mp4"]
+        assert c["name_no_sub"] is True and c["name_sub"] is False
+        assert c["has_subtitle"] is False and c["subtitle_status"] == "none"
+
+        # off：不识别
+        cfg["scan"]["naming_c"] = "off"
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        c = by["SSIS-123-C.mp4"]
+        assert c["name_sub"] is False and c["name_no_sub"] is False
+
+        # 优先级：外部 srt > named
+        cfg["scan"]["naming_c"] = "has_sub"
+        (d / "SSIS-123-C.zh.srt").write_text(SRT_OK.decode())
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        c = by["SSIS-123-C.mp4"]
+        assert c["subtitle_status"] == "external" and c["subtitle"] == "SSIS-123-C.zh.srt"
+        # 过小文件显式提交不拦截
+        got = localscan.validate_submit_files([str(d / "tiny.mp4")], cfg)
+        assert got == [d / "tiny.mp4"]
 
 
 def test_validate_submit_files() -> None:
@@ -313,6 +377,64 @@ def _make_video(td: str, name: str = "testvid.mp4") -> Path:
     return p
 
 
+def test_local_scan_api_size_and_naming_overrides() -> None:
+    orig_config = JavScribeEngine.config
+
+    async def fake_unreachable(self):
+        raise httpx.ConnectError("boom")
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            store, _poller = _make_store_and_poller(td)
+            media = Path(td) / "media2"
+            media.mkdir()
+            (media / "SSIS-123-C.mp4").write_bytes(b"x" * 1000)
+            (media / "SSIS-123C.mp4").write_bytes(b"x" * 1000)
+            (media / "big.mp4").write_bytes(b"x" * 3 * 1024 * 1024)
+            JavScribeEngine.config = fake_unreachable  # 内置默认规则
+            client = TestClient(build_app(store, _poller))
+            with client:
+                # 默认 200MB：全部过小；独立 C => named，粘番号 C => none
+                r = client.get(
+                    "/api/scan/local", params={"engine": "车间A", "path": str(media)})
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["min_size_mb"] == 200 and body["naming_c"] == "has_sub"
+                by = {it["name"]: it for it in body["items"]}
+                assert all(it["too_small"] for it in by.values())
+                assert by["SSIS-123-C.mp4"]["name_sub"] is True
+                assert by["SSIS-123-C.mp4"]["subtitle_status"] == "named"
+                assert by["SSIS-123C.mp4"]["name_sub"] is False
+                assert by["SSIS-123C.mp4"]["subtitle_status"] == "none"
+
+                # 覆盖：min_size_mb=1 + naming_c=no_sub
+                r = client.get(
+                    "/api/scan/local",
+                    params={"engine": "车间A", "path": str(media),
+                            "min_size_mb": 1, "naming_c": "no_sub"},
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["min_size_mb"] == 1 and body["naming_c"] == "no_sub"
+                by = {it["name"]: it for it in body["items"]}
+                assert by["big.mp4"]["too_small"] is False
+                assert by["SSIS-123-C.mp4"]["too_small"] is True
+                assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
+                assert by["SSIS-123-C.mp4"]["has_subtitle"] is False
+
+                # 非法值 -> 400
+                assert client.get(
+                    "/api/scan/local",
+                    params={"engine": "车间A", "path": str(media), "min_size_mb": -1},
+                ).status_code == 400
+                assert client.get(
+                    "/api/scan/local",
+                    params={"engine": "车间A", "path": str(media), "naming_c": "weird"},
+                ).status_code == 400
+    finally:
+        JavScribeEngine.config = orig_config
+
+
 def _done_job(job_id: str, status: str = "done") -> dict:
     return {
         "id": job_id, "created": 1000.0, "finished": 1060.0,
@@ -347,7 +469,8 @@ def test_local_submit_pipeline_and_writeback() -> None:
             with client:
                 r = client.post(
                     "/api/scan/local/submit",
-                    json={"engine": "车间A", "files": [str(vid)]},
+                    json={"engine": "车间A", "files": [str(vid)],
+                          "sub_status": {str(vid): "named"}},
                 )
                 assert r.status_code == 200, r.text
                 body = r.json()
@@ -358,6 +481,7 @@ def test_local_submit_pipeline_and_writeback() -> None:
                 assert d["phase"] == "done", d
                 assert d["job_id"] == "job-ls-1"
                 assert d["local_path"] == str(vid)
+                assert d["sub_status"] == "named"
                 assert d["writeback"] is None  # 任务表还没看到该 job
                 name, audio = captured["audio"][0]
                 assert name == "testvid.mp4" and audio[:4] == b"OggS"
@@ -377,6 +501,7 @@ def test_local_submit_pipeline_and_writeback() -> None:
                     if x["job_id"] == "job-ls-1"
                 )
                 assert row["writeback"] == "ok"
+                assert row["sub_status"] == "named"
 
                 # 二次提交同一视频：字幕已存在 -> skipped_exists（不覆盖）
                 r = client.post(

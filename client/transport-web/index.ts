@@ -141,18 +141,26 @@ export const webTransport: Transport = {
   getUpload: (id) => jget<UploadStatus>("/api/uploads/" + id),
 
   // 扫描目录 = 工作台部署所在机器（客户端本机），非服务端机器
-  scan: (name, path) =>
-    jgetOrDetail<ScanResult>(
-      `/api/scan/local?engine=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`,
-    ),
+  scan: (name, path, opts) => {
+    let q = `/api/scan/local?engine=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`;
+    if (opts) {
+      if (opts.min_size_mb != null) q += `&min_size_mb=${encodeURIComponent(String(opts.min_size_mb))}`;
+      if (opts.naming_c) q += `&naming_c=${encodeURIComponent(opts.naming_c)}`;
+    }
+    return jgetOrDetail<ScanResult>(q);
+  },
 
-  async submitScan(name, files) {
+  async submitScan(name: string, files: string[], subStatus?: Record<string, string>) {
     let r: Response;
     try {
       r = await fetch(`/api/scan/local/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ engine: name, files }),
+        body: JSON.stringify({
+          engine: name,
+          files,
+          ...(subStatus && Object.keys(subStatus).length ? { sub_status: subStatus } : {}),
+        }),
       });
     } catch (_e) {
       throw new TransportError("网络错误", true);

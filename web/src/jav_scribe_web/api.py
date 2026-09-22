@@ -33,10 +33,17 @@ LOCAL_EXTRACT_CONCURRENCY = int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", 
 LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放弃并标记 failed
 
 
-def _job_rows(engine: str, job: dict, local_writeback: dict[str, str] | None = None) -> list[dict]:
+def _job_rows(
+    engine: str,
+    job: dict,
+    local_writeback: dict[str, str] | None = None,
+    local_sub_status: dict[str, str] | None = None,
+) -> list[dict]:
     """Flatten one job into dashboard rows (one per file when detailed).
 
     local_writeback: job_id -> 本地扫描任务的回写状态（工作台本机回写专用）。
+    local_sub_status: job_id -> 提交前检测到的字幕状态（external/embedded/named，
+    制作图「已有字幕」提示用；仅本地扫描任务有）。
     """
     base = {
         "engine": engine,
@@ -46,6 +53,7 @@ def _job_rows(engine: str, job: dict, local_writeback: dict[str, str] | None = N
         "created": job.get("created"),
         "finished": job.get("finished"),
         "source_kind": job.get("source_kind"),
+        "sub_status": (local_sub_status or {}).get(job.get("id") or ""),
     }
     files = job.get("files")
     if not files:
@@ -112,6 +120,8 @@ class UploadTask:
     # 「扫描目录」任务专用：视频在工作台部署机上的实际可读路径；完成后字幕
     # 由工作台自动写回该路径旁（浏览器上传任务无此字段，写回由浏览器端做）。
     local_path: str | None = None
+    # 提交前（扫描时）检测到的字幕状态：external / embedded / named；制作图提示用
+    sub_status: str | None = None
     writeback: str | None = None  # None=不适用 / pending / ok / skipped_exists / skipped / failed:…
     wb_fails: int = 0  # 回写连续失败计数（内部，不外发）
 
@@ -130,6 +140,7 @@ class UploadTask:
             "error": self.error,
             "cached": self.cached,
             "local_path": self.local_path,
+            "sub_status": self.sub_status,
             "writeback": self.writeback,
         }
 
@@ -214,12 +225,16 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         rows: list[dict] = []
         # 本地扫描任务回写状态索引：job_id -> writeback
         wb_index: dict[str, str] = {}
+        # 提交前检测到的字幕状态索引：job_id -> external/embedded/named（制作图提示）
+        sub_index: dict[str, str] = {}
         for t in _uploads.values():
             if t.job_id and t.local_path and t.writeback:
                 wb_index[t.job_id] = t.writeback
+            if t.job_id and t.sub_status:
+                sub_index[t.job_id] = t.sub_status
         for name, details in poller.jobs.items():
             for job in details:
-                rows.extend(_job_rows(name, job, wb_index))
+                rows.extend(_job_rows(name, job, wb_index, sub_index))
         rows.sort(
             key=lambda r: (
                 0 if r["status"] == "running" else 1,
@@ -537,10 +552,25 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             await eng.close()
 
     @app.get("/api/scan/local")
-    async def api_local_scan(engine: str, path: str) -> dict:
+    async def api_local_scan(
+        engine: str,
+        path: str,
+        min_size_mb: float | None = None,
+        naming_c: str | None = None,
+    ) -> dict:
         if store.get(engine) is None:
             raise HTTPException(404, "服务不存在")
         cfg, from_engine = await _engine_scan_cfg(engine)
+        # 客户端侧文件属性规则覆盖（扫描面板设置；非法值拒绝而非静默回退）
+        if min_size_mb is not None:
+            if not (min_size_mb >= 0) or min_size_mb == float("inf"):
+                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
+            cfg.setdefault("scan", {})["min_size_mb"] = min_size_mb
+        if naming_c is not None:
+            if naming_c not in localscan.NAMING_C_MODES:
+                raise HTTPException(
+                    400, f"naming_c 需要 {' / '.join(localscan.NAMING_C_MODES)} 之一")
+            cfg.setdefault("scan", {})["naming_c"] = naming_c
         try:
             root, mapped = localscan.resolve_scan_root(path)
         except localscan.ScanError as ex:
@@ -549,8 +579,11 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             result = await asyncio.to_thread(localscan.scan_dir, root, cfg)
         except Exception as ex:  # noqa: BLE001
             raise HTTPException(500, f"扫描失败: {ex}")
+        _sc = localscan._scan_cfg(cfg)
         result["mapped"] = mapped
         result["rules"] = "engine" if from_engine else "defaults"
+        result["min_size_mb"] = _sc["min_size_mb"]
+        result["naming_c"] = _sc["naming_c"]
         return result
 
     @app.post("/api/scan/local/submit")
@@ -566,6 +599,13 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             paths = localscan.validate_submit_files(files, cfg)
         except localscan.ScanError as ex:
             raise HTTPException(400, str(ex))
+        # 提交前检测到的字幕状态（{path: external/embedded/named}）：只做展示提示，
+        # 不影响受理（用户已在扫描确认过）。
+        sub_raw = body.get("sub_status") if isinstance(body, dict) else None
+        sub_map: dict[str, str] = (
+            {str(k): str(v) for k, v in sub_raw.items() if isinstance(v, str)}
+            if isinstance(sub_raw, dict) else {}
+        )
         _prune_uploads()
         created: list[str] = []
         for p in paths:
@@ -575,6 +615,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 name=p.name,
                 size_mb=round(p.stat().st_size / 1048576, 1),
                 local_path=str(p),
+                sub_status=sub_map.get(str(p)),
             )
             _uploads[task.id] = task
             created.append(task.id)

@@ -26,6 +26,8 @@ interface AppState {
   scanMapped: boolean;
   scanResolvedPath: string;
   scanChecked: Set<string>;
+  scanMinSizeMb: number;     // 「忽略小于」阈值（MB，localStorage 持久化）
+  scanNamingC: string;       // 文件名独立 C 语义：has_sub / no_sub / off
   page: number;              // 任务分页：当前页（0 起）
   pageSize: number;          // 任务分页：每页行数
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
@@ -51,6 +53,14 @@ const state: AppState = {
   scanMapped: false,
   scanResolvedPath: "",
   scanChecked: new Set(),
+  scanMinSizeMb: (() => {
+    const v = Number(localStorage.getItem("javweb_scan_minsize"));
+    return Number.isFinite(v) && v >= 0 ? v : 200;
+  })(),
+  scanNamingC: (() => {
+    const v = localStorage.getItem("javweb_scan_namingc");
+    return v === "has_sub" || v === "no_sub" || v === "off" ? v : "has_sub";
+  })(),
   page: 0,
   pageSize: 20,
   _jobs: [],
@@ -614,6 +624,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const wb = j.writeback
       ? `<span class="wb-tag${j.writeback.startsWith("failed") ? " wb-err" : ""}" title="${esc(j.writeback)}">${esc(j.writeback.startsWith("failed") ? "回写失败" : (WB_TAG[j.writeback] || j.writeback))}</span>`
       : "";
+    // 本地扫描任务：提交前检测到的字幕状态（制作图「已有字幕」提示）
+    const SUB_SRC: Record<string, string> = { external: "外部 srt", embedded: "内嵌轨", named: "C 版（名）" };
+    const ss = j.sub_status && SUB_SRC[j.sub_status]
+      ? `<span class="wb-tag sub-exist" title="提交前检测到${SUB_SRC[j.sub_status]}，经确认继续生成">已有字幕</span>`
+      : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
     const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
       ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
@@ -624,11 +639,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb, ss].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span>${wb}</div>
+      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span>${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
@@ -1552,6 +1567,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // ---------- 服务端目录扫描 ----------
+  // 客户端侧扫描规则控件（仅 web 形态；desktop 的 scan 走本地 serve，无这两项）
+  const scanMinSize = $("scan-minsize") as HTMLInputElement;
+  const scanNamingC = $("scan-namingc") as HTMLSelectElement;
+  if (platform.kind === "web") {
+    $("scan-minsize-wrap").hidden = false;
+    $("scan-namingc-wrap").hidden = false;
+    scanMinSize.value = String(state.scanMinSizeMb);
+    scanNamingC.value = state.scanNamingC;
+    scanMinSize.onchange = () => {
+      const v = Number(scanMinSize.value);
+      state.scanMinSizeMb = Number.isFinite(v) && v >= 0 ? v : 0;
+      scanMinSize.value = String(state.scanMinSizeMb);
+      localStorage.setItem("javweb_scan_minsize", String(state.scanMinSizeMb));
+    };
+    scanNamingC.onchange = () => {
+      state.scanNamingC = scanNamingC.value;
+      localStorage.setItem("javweb_scan_namingc", state.scanNamingC);
+    };
+  }
   scanGo.onclick = async () => {
     const engine = engineSelect.value;
     const path = scanPath.value.trim();
@@ -1573,13 +1607,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     $("scan-submit").hidden = false;
     scanSubmit.disabled = true;
     try {
-      const d = await t.scan(engine, path);
+      const d = await t.scan(engine, path, {
+        min_size_mb: state.scanMinSizeMb,
+        naming_c: state.scanNamingC,
+      });
       state.scanItems = d.items || [];
       state.scanMapped = d.mapped === true;
       state.scanResolvedPath = d.path || "";
-      // 默认勾选没有字幕的；有字幕的留待用户强制勾选
+      // 默认勾选：无字幕且不过小；已有字幕 / 过小的留待用户显式勾选
       state.scanChecked = new Set(
-        state.scanItems.filter((i) => !i.has_subtitle).map((i) => i.path)
+        state.scanItems.filter((i) => !i.has_subtitle && !i.too_small).map((i) => i.path)
       );
       renderScanResults(d);
     } catch (err) {
@@ -1611,13 +1648,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <table class="scan-table">
         <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
         <tbody>
-          ${items.map((i) => `
-            <tr class="${i.has_subtitle ? "has-sub" : ""}">
+          ${items.map((i) => {
+            const langs = (i.embedded_langs || []).join("/") || "—";
+            const subCell = i.subtitle_status === "external"
+              ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span>`
+              : i.subtitle_status === "named"
+              ? `<span class="tag subtag" title="文件名含独立 C，按规则视为已压字幕（可在「文件名独立 C」改判）">C 版（名）</span>`
+              : i.subtitle_status === "embedded"
+              ? `<span class="tag subtag" title="视频内嵌字幕轨：${esc(langs)}">内嵌 ${esc(langs)}</span>`
+              : i.name_no_sub
+              ? `<span class="tag subtag ok" title="文件名含独立 C，按规则视为无字幕版">无字幕（名）</span>`
+              : '<span class="muted">—</span>';
+            return `
+            <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
               <td class="col-check"><input type="checkbox" data-path="${esc(i.path)}"${state.scanChecked.has(i.path) ? " checked" : ""}></td>
-              <td class="scan-name mono" title="${esc(i.path)}">${esc(i.name)}</td>
+              <td class="scan-name mono" title="${esc(i.path)}">${esc(i.name)}${i.too_small ? '<span class="tag tinytag" title="低于「忽略小于」阈值，不默认选中；可手动勾选提交">过小</span>' : ""}</td>
               <td class="col-size mono muted">${mb(i.size)} MB</td>
-              <td class="col-sub">${i.has_subtitle ? `<span class="tag subtag">${esc(i.subtitle)}</span>` : '<span class="muted">—</span>'}</td>
-            </tr>`).join("")}
+              <td class="col-sub">${subCell}</td>
+            </tr>`;
+          }).join("")}
         </tbody>
       </table>`;
       $("scan-table").querySelectorAll("input[type=checkbox]").forEach((cb) => {
@@ -1637,23 +1686,33 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function updateScanSummary(truncated?: boolean) {
     const n = state.scanChecked.size;
     const total = state.scanItems.length;
-    let text = total ? `已选 ${n} / ${total} · 已有字幕的默认不勾选` : "";
+    const nSub = state.scanItems.filter((i) => i.has_subtitle).length;
+    const nSmall = state.scanItems.filter((i) => i.too_small && !state.scanChecked.has(i.path)).length;
+    let text = total ? `已选 ${n} / ${total}` : "";
+    if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
+    if (nSmall) text += ` · ${nSmall} 个过小未选`;
     if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
     $("scan-count").textContent = text;
     const b = scanSubmit;
     b.disabled = n === 0 || !engineSelect.value || state.busy;
     b.innerHTML = "&#9654; 开始生成（" + n + " 项）";
+    // 「全选」只覆盖非「忽略」文件：too_small 只能手动勾选
+    const selectable = state.scanItems.filter((i) => !i.too_small).length;
     const all = scanSelectAll;
-    all.checked = total > 0 && state.scanChecked.size === total;
+    all.checked = selectable > 0 && state.scanChecked.size === selectable;
   }
 
   scanSelectAll.onchange = (ev) => {
     const checked = (ev.target as HTMLInputElement).checked;
+    // 过小（忽略）文件不参与全选，保持未选
     state.scanChecked = checked
-      ? new Set(state.scanItems.map((i) => i.path))
+      ? new Set(state.scanItems.filter((i) => !i.too_small).map((i) => i.path))
       : new Set<string>();
     $("scan-table").querySelectorAll("input[type=checkbox]")
-      .forEach((cb) => { (cb as HTMLInputElement).checked = checked; });
+      .forEach((cb) => {
+        const input = cb as HTMLInputElement;
+        input.checked = state.scanChecked.has(input.dataset.path || "");
+      });
     updateScanSummary();
   };
 
@@ -1661,9 +1720,29 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const engine = engineSelect.value;
     const files = [...state.scanChecked];
     if (!engine || !files.length || state.busy) return;
+    // 已有字幕确认：所选含字幕文件（外部 srt / 内嵌轨 / 文件名 C 版）须用户确认
+    const subItems = state.scanItems.filter(
+      (i) => state.scanChecked.has(i.path) && i.has_subtitle,
+    );
+    if (subItems.length) {
+      const cnt = (st: string) => subItems.filter((i) => i.subtitle_status === st).length;
+      const parts = [
+        cnt("external") ? `外部 srt ${cnt("external")}` : "",
+        cnt("embedded") ? `内嵌轨 ${cnt("embedded")}` : "",
+        cnt("named") ? `C 版（名） ${cnt("named")}` : "",
+      ].filter(Boolean).join("、");
+      const ok = window.confirm(
+        `所选 ${subItems.length} 个文件已检测到字幕（${parts}）。\n`
+        + "继续将照常生成字幕并回写本机；影片旁已有同名 .zh.srt 时不会覆盖"
+        + "（标记为「字幕已存在」）。\n是否继续生成？",
+      );
+      if (!ok) return;
+    }
+    const subStatus: Record<string, string> = {};
+    for (const i of subItems) subStatus[i.path] = i.subtitle_status || "embedded";
     scanSubmit.disabled = true;
     try {
-      const d = await t.submitScan(engine, files);
+      const d = await t.submitScan(engine, files, subStatus);
       toast(d.jobId
         ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
         : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`, "ok");

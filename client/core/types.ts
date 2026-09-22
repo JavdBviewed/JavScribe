@@ -40,6 +40,8 @@ export interface JobRow {
   created?: number | null;
   finished?: number | null;
   source_kind?: string | null;
+  /** 本地扫描任务：提交前检测到的字幕状态（external/embedded/named）——制作图「已有字幕」提示 */
+  sub_status?: string | null;
   output_files?: string[];
   /** 本地扫描任务的字幕回写状态（工作台本机回写）：ok / skipped_exists / skipped / failed:… */
   writeback?: string | null;
@@ -62,6 +64,8 @@ export interface UploadStatus {
   cached?: boolean | null;
   /** 「扫描目录」任务：视频在本机（工作台部署机）的实际路径 */
   local_path?: string | null;
+  /** 提交前检测到的字幕状态（external/embedded/named） */
+  sub_status?: string | null;
   /** 本地字幕回写状态：ok / skipped_exists / skipped / failed:… */
   writeback?: string | null;
 }
@@ -84,6 +88,16 @@ export interface ScanItem {
   size: number;
   has_subtitle: boolean;
   subtitle?: string | null;
+  /** 字幕四态：external（外部 srt）/ named（文件名 C 版）/ embedded（内嵌轨）/ none */
+  subtitle_status?: "external" | "named" | "embedded" | "none";
+  /** 内嵌字幕轨语言（归一后，如 ["zh"]） */
+  embedded_langs?: string[];
+  /** 低于 scan.min_size_mb：列表显示但不默认选中（显式勾选仍可提交） */
+  too_small?: boolean;
+  /** 文件名含独立 C、语义判为「已压字幕」（naming_c=has_sub，默认） */
+  name_sub?: boolean;
+  /** 文件名含独立 C、语义设为「无字幕版」（naming_c=no_sub，仅信息标） */
+  name_no_sub?: boolean;
 }
 
 /** 扫描目录响应（web 形态 GET /api/scan/local?engine=&path=；desktop 为本地 serve /scan） */
@@ -92,6 +106,10 @@ export interface ScanResult {
   mapped?: boolean;
   path?: string;
   truncated?: boolean;
+  /** 生效的 scan.min_size_mb（MB；客户端侧规则） */
+  min_size_mb?: number;
+  /** 生效的独立 C 语义：has_sub / no_sub / off */
+  naming_c?: string;
 }
 
 /** GitHub Release 条目（/api/update 版本对比用） */

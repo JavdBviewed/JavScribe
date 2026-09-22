@@ -159,7 +159,8 @@ export const desktopTransport: Transport = {
     return { ...st };
   },
 
-  scan: (name, p) => call<ScanResult>("scan", name, p),
-  submitScan: (name, files) =>
+  // desktop 形态的 scan 走本地 serve /scan（serve 侧规则，本周期无 min_size/naming 项）
+  scan: (name, p, _opts) => call<ScanResult>("scan", name, p),
+  submitScan: (name, files, _sub) =>
     call<{ files: number; jobId: string }>("submitScan", name, JSON.stringify(files)),
 };

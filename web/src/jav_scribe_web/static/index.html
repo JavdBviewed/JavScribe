@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-C7Ljh27L.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-Cr2KhunS.css">
+  <script type="module" crossorigin src="/assets/index-BtIGN5Dg.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DgDc2oo4.css">
 </head>
 <body>
 <header>
@@ -107,6 +107,18 @@
         <label class="field grow">
           <span class="field-label">目录路径</span>
           <input id="scan-path" class="mono" placeholder="/media/jav" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field scan-opts" id="scan-minsize-wrap" hidden>
+          <span class="field-label">忽略小于（MB）</span>
+          <input id="scan-minsize" type="number" min="0" step="10" value="200">
+        </label>
+        <label class="field scan-opts" id="scan-namingc-wrap" hidden>
+          <span class="field-label">文件名独立 C</span>
+          <select id="scan-namingc">
+            <option value="has_sub">视为 C 版（已压字幕）</option>
+            <option value="no_sub">视为无字幕版</option>
+            <option value="off">不识别</option>
+          </select>
         </label>
         <button id="scan-go" class="btn" disabled>扫描</button>
       </div>

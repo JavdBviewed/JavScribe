@@ -36,6 +36,10 @@ MAX_LIST_ITEMS = 200  # 列表配置项上限（与服务端一致）
 _VIDEO_EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
 # ".srt" / ".zh.srt" / ".en.vtt"：点 + 可选语言标签段 + 扩展名段
 _SUB_PATTERN_RE = re.compile(r"^\.(?:[a-z0-9]{1,16}\.)?[a-z0-9]{1,8}$")
+# 独立 C：前后都不是字母数字（行首/行尾、- 空格 _ . [ ] 等分隔均算独立）。
+# 由此天然排除：粘番号（SSIS-123C）、CD 集数（SSIS-123CD2 / CD1 / 1CD）、词内 C（Uncut/CUT）。
+_STANDALONE_C_RE = re.compile(r"(?<![A-Za-z0-9])c(?![A-Za-z0-9])", re.IGNORECASE)
+NAMING_C_MODES = ("has_sub", "no_sub", "off")
 
 # 引擎配置不可达时的兜底规则（与 serve 默认配置一致，loader.py）
 DEFAULT_SCAN_CFG: dict[str, Any] = {
@@ -44,6 +48,11 @@ DEFAULT_SCAN_CFG: dict[str, Any] = {
                        "ts", "m2ts", "mpg", "mpeg"],
         "subtitle_patterns": [".zh.srt", ".srt"],
         "recurse": True,
+        # 客户端侧文件属性规则（不进 serve /config 白名单）：
+        # min_size_mb  低于该值(MB)的文件「忽略」= 列表显示但不默认选中，显式勾选仍可提交
+        # naming_c     文件名独立 C 的语义：has_sub=视为已压字幕 / no_sub=视为无字幕版 / off=不识别
+        "min_size_mb": 200,
+        "naming_c": "has_sub",
     },
     "subtitle": {
         "skip_embedded": "target",
@@ -55,6 +64,15 @@ DEFAULT_SCAN_CFG: dict[str, Any] = {
 
 class ScanError(ValueError):
     """扫描/提交请求被拒绝（路径非法 / 文件列表非法）。"""
+
+
+def standalone_c_in(name: str) -> bool:
+    """文件名是否含「独立 C」（见 _STANDALONE_C_RE 注释；大小写不敏感）。
+
+    命中：SSIS-123-C / SSIS-123 C / SSIS-123_C / SSIS-123 (c) / C-SSIS-123
+    不命中：SSIS-123C（粘番号）/ SSIS-123CD2、CD1、1CD（CD 集数）/ Uncut、CUT（词内）
+    """
+    return bool(_STANDALONE_C_RE.search(name or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +257,9 @@ def normalize_subtitle_patterns(value: Any) -> list[str]:
     return out
 
 
-def _scan_cfg(cfg: dict) -> tuple[set[str], list[str], bool]:
-    s = cfg.get("scan", {})
+def _scan_cfg(cfg: dict) -> dict[str, Any]:
+    """归一化扫描规则；返回 {exts, pats, recurse, min_size_mb, naming_c}。"""
+    s = cfg.get("scan", {}) or {}
     try:
         exts = set(normalize_video_exts(s.get("video_exts") or []))
         pats = normalize_subtitle_patterns(s.get("subtitle_patterns") or [])
@@ -249,7 +268,23 @@ def _scan_cfg(cfg: dict) -> tuple[set[str], list[str], bool]:
         exts = set(s.get("video_exts") or [])
         pats = [p for p in (s.get("subtitle_patterns") or []) if str(p).startswith(".")]
     recurse = bool(s.get("recurse", True))
-    return exts, pats, recurse
+    raw_min = s.get("min_size_mb", DEFAULT_SCAN_CFG["scan"]["min_size_mb"])
+    try:
+        min_size_mb = float(raw_min)
+        if not (min_size_mb >= 0) or min_size_mb == float("inf"):
+            raise ValueError
+    except (TypeError, ValueError):
+        min_size_mb = float(DEFAULT_SCAN_CFG["scan"]["min_size_mb"])
+    naming_c = str(s.get("naming_c", DEFAULT_SCAN_CFG["scan"]["naming_c"]) or "").lower()
+    if naming_c not in NAMING_C_MODES:
+        naming_c = "has_sub"
+    return {
+        "exts": exts,
+        "pats": pats,
+        "recurse": recurse,
+        "min_size_mb": min_size_mb,
+        "naming_c": naming_c,
+    }
 
 
 def cfg_from_items(items: list[dict]) -> dict[str, Any]:
@@ -335,7 +370,10 @@ def validate_submit_files(raw: Any, cfg: dict) -> list[Path]:
     """校验提交列表：存在的、扩展名受支持的视频文件（去重保序）。"""
     if not isinstance(raw, list) or not raw:
         raise ScanError("files 需要非空数组（绝对路径列表）")
-    exts, _pats, _recurse = _scan_cfg(cfg)
+    _c = _scan_cfg(cfg)
+    exts = _c["exts"]
+    # 注意：too_small / naming_c 只是「默认勾选与提示」信号，不拦提交——
+    # 用户显式勾选小文件/已有字幕文件即放行（提交前的确认由前端负责）。
     out: list[Path] = []
     for item in raw:
         if not isinstance(item, str) or not item.strip():
@@ -372,11 +410,17 @@ def _subtitle_for(p: Path, patterns: list[str]) -> Optional[str]:
 def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
     """按扫描规则列出 root 下视频。返回 {path, items, truncated}。
 
-    每项含字幕三态：subtitle_status = external（外部 srt）/ embedded（内嵌轨）/
-    none；has_subtitle 为兼容布尔语义（外部存在 或 内嵌会触发跳过）。
+    每项含字幕四态：subtitle_status = external（外部 srt）/ named（文件名独立 C
+    按 naming_c=has_sub 视为已压字幕）/ embedded（内嵌轨）/ none；
+    has_subtitle = 外部存在 或 内嵌触发跳过 或 named。
+    too_small = 低于 scan.min_size_mb（仅提示用，不拦提交）；
+    name_sub / name_no_sub = 独立 C 命中的语义标记。
     内嵌探测仅 skip_embedded != off 时跑（ffprobe 只读容器头，并行）。
     """
-    exts, pats, recurse = _scan_cfg(cfg)
+    sc = _scan_cfg(cfg)
+    exts, pats, recurse = sc["exts"], sc["pats"], sc["recurse"]
+    min_bytes = sc["min_size_mb"] * 1048576
+    naming_c = sc["naming_c"]
     sub_cfg = cfg.get("subtitle", {}) or {}
     probe_on = str(sub_cfg.get("skip_embedded", "target")).lower() != "off"
     it = root.rglob("*") if recurse else root.glob("*")
@@ -415,15 +459,26 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
         sub = _subtitle_for(f, pats)
         subs = embedded.get(f, [])
         skip, _reason = should_skip_embedded(sub_cfg, [x["language"] for x in subs])
+        # 文件名独立 C（has_sub ⇒ 按已有字幕处理；no_sub ⇒ 仅信息标）
+        name_c = naming_c != "off" and standalone_c_in(f.name)
+        named = naming_c == "has_sub" and name_c
+        no_sub_named = naming_c == "no_sub" and name_c
         items.append(
             {
                 "path": str(f),
                 "name": f.name,
                 "size": size,
-                "has_subtitle": sub is not None or skip,
+                "has_subtitle": sub is not None or skip or named,
                 "subtitle": sub,
-                "subtitle_status": "external" if sub else ("embedded" if subs else "none"),
+                # 优先级：external（确有 srt 文件）> named（命名规则）> embedded（探测轨）
+                "subtitle_status": ("external" if sub
+                                    else "named" if named
+                                    else "embedded" if subs
+                                    else "none"),
                 "embedded_langs": [norm_language(x["language"]) for x in subs],
+                "too_small": min_bytes > 0 and size < min_bytes,
+                "name_sub": named,
+                "name_no_sub": no_sub_named,
             }
         )
     items.sort(key=lambda x: x["name"].lower())

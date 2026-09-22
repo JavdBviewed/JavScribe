@@ -25,6 +25,14 @@ export class TransportError extends Error {
   }
 }
 
+/** 目录扫描选项（web 形态客户端侧文件属性规则；前端 localStorage 持久化） */
+export interface ScanOpts {
+  /** 忽略小于该值（MB）的文件：显示但不默认选中；0=不忽略 */
+  min_size_mb?: number;
+  /** 文件名独立 C 语义：has_sub（默认，视为已压字幕）/ no_sub / off */
+  naming_c?: string;
+}
+
 export interface Transport {
   /** 工作台健康（版本 + 在线数） */
   getHealth(): Promise<Health>;
@@ -57,7 +65,8 @@ export interface Transport {
   /** 版本对比（GitHub 最新 Release vs 当前版本）；失败 throw(detail) */
   getUpdate(): Promise<UpdateInfo>;
   /** 扫描客户端本机目录（web 形态：工作台部署所在机器）；失败 throw(detail) */
-  scan(name: string, path: string): Promise<ScanResult>;
-  /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw */
-  submitScan(name: string, files: string[]): Promise<{ files: number; jobId?: string; uploadIds?: string[] }>;
+  scan(name: string, path: string, opts?: ScanOpts): Promise<ScanResult>;
+  /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw
+   *  subStatus：{path: subtitle_status} 提交前检测到的字幕状态（制作图提示展示用） */
+  submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[] }>;
 }

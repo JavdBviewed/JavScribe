@@ -241,6 +241,7 @@ input:focus, select:focus {
   white-space: nowrap;
 }
 .wb-tag.wb-err { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+.wb-tag.sub-exist { color: var(--skip); border-color: var(--skip); background: transparent; }
 .eng-err {
   width: 100%;
   margin-top: 8px;
@@ -912,6 +913,11 @@ footer {
   border-color: var(--line);
   background: transparent;
 }
+.tag.subtag.ok { color: var(--ok, #2e7d32); border-color: var(--line); background: transparent; }
+.tag.tinytag { margin-left: 6px; font-size: 10px; padding: 2px 6px; }
+.scan-table tr.too-small { opacity: 0.6; }
+.scan-opts { min-width: 132px; }
+#scan-minsize { width: 64px; }
 .scan-actions { margin-top: 12px; }
 
 /* ---------- misc ---------- */
