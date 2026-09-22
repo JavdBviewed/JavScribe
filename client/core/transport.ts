@@ -56,8 +56,8 @@ export interface Transport {
   getUpload(id: string): Promise<UploadStatus>;
   /** 版本对比（GitHub 最新 Release vs 当前版本）；失败 throw(detail) */
   getUpdate(): Promise<UpdateInfo>;
-  /** 扫描服务机器目录；失败 throw(detail) */
+  /** 扫描客户端本机目录（web 形态：工作台部署所在机器）；失败 throw(detail) */
   scan(name: string, path: string): Promise<ScanResult>;
-  /** 扫描结果入队；失败 throw(detail 或 "网络错误") */
-  submitScan(name: string, files: string[]): Promise<{ files: number; jobId: string }>;
+  /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw */
+  submitScan(name: string, files: string[]): Promise<{ files: number; jobId?: string; uploadIds?: string[] }>;
 }

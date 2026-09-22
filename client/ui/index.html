@@ -58,7 +58,7 @@
       <div class="drop-icon">&#9654;</div>
       <div class="drop-main">拖入影片，或点击选择文件</div>
       <div class="muted small">mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class="help" tabindex="0" data-tip="默认在你自己的浏览器里提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片，原片只到所选服务，不出该服务所在机器。">?</span></div>
-      <button type="button" id="pick-folder" class="btn drop-pick" title="一次选中整个文件夹（浏览器本地过滤视频与字幕）">选择文件夹</button>
+      <button type="button" id="pick-folder" class="btn drop-pick" title="在浏览器所在电脑上选择整个文件夹（本地过滤视频与字幕，原片不出该电脑）">选择文件夹</button>
       <input type="file" id="file" hidden accept=".mp4,.mkv,.ts,.m2ts,.avi,.mov,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm">
       <input type="file" id="folder" hidden webkitdirectory>
     </div>
@@ -92,14 +92,14 @@
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
       <label class="chk-row autosave-chk">
         <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
-        <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务机器上的影片旁。">?</span>
+        <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。「扫描目录」任务无需勾选——完成后字幕自动落回本机影片旁（Web 形态即工作台部署机）。">?</span>
       </label>
     </div>
 
     <div id="scan-panel">
       <div class="scan-head">
-        <span class="scan-title">扫描服务机器上的目录</span>
-        <span class="muted small">填「所选服务」所在机器上的目录<span class="help" tabindex="0" data-tip="扫描的是所选服务实际运行的那台服务器（后端所在机，如它的下载落地目录），不是当前访问本页面这台电脑的路径。要批量处理本机的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」上传处理。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
+        <span class="scan-title">扫描目录（本机）</span>
+        <span class="muted small">填本机上的目录路径<span class="help" tabindex="0" id="scan-help" data-tip="扫描的是工作台（本页面服务）部署所在机器上的目录，不是浏览器所在电脑。填该机器上的绝对路径；视频处理完成后，字幕自动落回本机影片旁。要批量处理浏览器电脑上的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">

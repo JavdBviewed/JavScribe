@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import tempfile
@@ -16,7 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, localscan
 from .audio import extract_audio_progress, probe_duration
 from .config import EngineStore
 from .engines.javscribe import JavScribeEngine
@@ -28,10 +29,15 @@ STATIC_DIR = Path(__file__).parent / "static"
 _log = logging.getLogger("jav-scribe-web")
 UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
 UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
+LOCAL_EXTRACT_CONCURRENCY = int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", "2"))
+LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放弃并标记 failed
 
 
-def _job_rows(engine: str, job: dict) -> list[dict]:
-    """Flatten one job into dashboard rows (one per file when detailed)."""
+def _job_rows(engine: str, job: dict, local_writeback: dict[str, str] | None = None) -> list[dict]:
+    """Flatten one job into dashboard rows (one per file when detailed).
+
+    local_writeback: job_id -> 本地扫描任务的回写状态（工作台本机回写专用）。
+    """
     base = {
         "engine": engine,
         "job_id": job.get("id"),
@@ -49,6 +55,7 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
         return [
             {
                 **base,
+                "writeback": (local_writeback or {}).get(job.get("id") or ""),
                 "file": job.get("label") or str(job.get("id")),
                 "status": "done" if finished else "running",
                 "progress": (done / total) if total else (1.0 if finished else 0.0),
@@ -66,6 +73,7 @@ def _job_rows(engine: str, job: dict) -> list[dict]:
         rows.append(
             {
                 **base,
+                "writeback": (local_writeback or {}).get(job.get("id") or ""),
                 "file": t.get("name") or "",
                 "status": t.get("status"),
                 "phase": t.get("phase"),
@@ -101,6 +109,11 @@ class UploadTask:
     job_id: str | None = None
     error: str | None = None
     cached: bool = False  # 服务端命中内容缓存（免上传）
+    # 「扫描目录」任务专用：视频在工作台部署机上的实际可读路径；完成后字幕
+    # 由工作台自动写回该路径旁（浏览器上传任务无此字段，写回由浏览器端做）。
+    local_path: str | None = None
+    writeback: str | None = None  # None=不适用 / pending / ok / skipped_exists / skipped / failed:…
+    wb_fails: int = 0  # 回写连续失败计数（内部，不外发）
 
     def to_dict(self) -> dict:
         return {
@@ -116,6 +129,8 @@ class UploadTask:
             "job_id": self.job_id,
             "error": self.error,
             "cached": self.cached,
+            "local_path": self.local_path,
+            "writeback": self.writeback,
         }
 
 
@@ -137,6 +152,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     def _lock_for(engine_name: str) -> asyncio.Lock:
         return _upload_locks.setdefault(engine_name, asyncio.Lock())
+
+    # 本地扫描音轨提取并发（ffmpeg CPU 密集；派发侧另有 per-engine 串行锁）
+    _local_sem = asyncio.Semaphore(LOCAL_EXTRACT_CONCURRENCY)
 
     def _prune_uploads() -> None:
         cutoff = time.time() - UPLOAD_TTL_S
@@ -194,9 +212,14 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     @app.get("/api/jobs")
     async def api_list_jobs() -> list[dict]:
         rows: list[dict] = []
+        # 本地扫描任务回写状态索引：job_id -> writeback
+        wb_index: dict[str, str] = {}
+        for t in _uploads.values():
+            if t.job_id and t.local_path and t.writeback:
+                wb_index[t.job_id] = t.writeback
         for name, details in poller.jobs.items():
             for job in details:
-                rows.extend(_job_rows(name, job))
+                rows.extend(_job_rows(name, job, wb_index))
         rows.sort(
             key=lambda r: (
                 0 if r["status"] == "running" else 1,
@@ -252,6 +275,35 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     async def _run_audio(task: UploadTask, audio_tmp: Path) -> None:
         try:
             await _dispatch_task(task, audio_tmp)
+        finally:
+            task.finished = time.time()
+            audio_tmp.unlink(missing_ok=True)
+
+    _local_wb: dict[str, UploadTask] = {}  # upload_id -> task（本地扫描且已拿到 job_id）
+
+    async def _run_local(task: UploadTask, video_path: Path) -> None:
+        """本地扫描管线：直接读工作台机器上的视频（不复制、不出本机），
+        提取 opus 后派发给所选服务；完成后由 _local_writeback_tick 写回字幕。
+        """
+        fd, fname = tempfile.mkstemp(suffix=".opus", prefix="javweb_loc_")
+        audio_tmp = Path(fname)
+        os.close(fd)
+        try:
+            async with _local_sem:
+                try:
+                    size = await extract_audio_progress(
+                        video_path,
+                        audio_tmp,
+                        on_progress=lambda frac: setattr(task, "progress", frac),
+                    )
+                    task.audio_mb = round(size / 1048576, 1)
+                except Exception as ex:
+                    task.phase = "error"
+                    task.error = f"提取音频失败: {ex}"
+                    return
+            await _dispatch_task(task, audio_tmp)
+            if task.job_id:
+                _local_wb[task.id] = task
         finally:
             task.finished = time.time()
             audio_tmp.unlink(missing_ok=True)
@@ -467,40 +519,145 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         finally:
             await eng.close()
 
-    # -- 文件夹扫描（代理 /scan + /scan/submit，X-Api-Key 鉴权在服务侧执行）---
+    # -- 本地扫描（扫描工作台部署所在机器的磁盘；服务端只收音轨）----------------
+    # 架构约定：服务端不做文件交互；「扫描目录」= 客户端（本机）路径。
+    # 完成后字幕由工作台自动写回本机影片旁（_local_writeback_tick）。
 
-    @app.get("/api/engines/{name}/scan")
-    async def api_engine_scan(name: str, path: str) -> dict:
+    async def _engine_scan_cfg(name: str) -> tuple[dict, bool]:
+        """取引擎侧扫描规则（与「服务设置」同源）；不可达时退回内置默认。"""
         entry = store.get(name)
-        if entry is None:
-            raise HTTPException(404, "服务不存在")
+        assert entry is not None
         eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
         try:
-            return await eng.scan(path)
-        except httpx.HTTPStatusError as ex:
-            raise _map_config_error(ex)
-        except httpx.HTTPError as ex:
-            raise HTTPException(502, f"服务不可达: {ex}")
+            c = await eng.config()
+            return localscan.cfg_from_items(c.get("items") or []), True
+        except httpx.HTTPError:
+            return copy.deepcopy(localscan.DEFAULT_SCAN_CFG), False
         finally:
             await eng.close()
 
-    @app.post("/api/engines/{name}/scan/submit")
-    async def api_engine_scan_submit(name: str, body: dict) -> dict:
-        entry = store.get(name)
-        if entry is None:
+    @app.get("/api/scan/local")
+    async def api_local_scan(engine: str, path: str) -> dict:
+        if store.get(engine) is None:
             raise HTTPException(404, "服务不存在")
+        cfg, from_engine = await _engine_scan_cfg(engine)
+        try:
+            root, mapped = localscan.resolve_scan_root(path)
+        except localscan.ScanError as ex:
+            raise HTTPException(400, str(ex))
+        try:
+            result = await asyncio.to_thread(localscan.scan_dir, root, cfg)
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(500, f"扫描失败: {ex}")
+        result["mapped"] = mapped
+        result["rules"] = "engine" if from_engine else "defaults"
+        return result
+
+    @app.post("/api/scan/local/submit")
+    async def api_local_scan_submit(body: dict) -> dict:
+        name = body.get("engine") if isinstance(body, dict) else None
         files = body.get("files") if isinstance(body, dict) else None
+        if not name or store.get(name) is None:
+            raise HTTPException(404, "服务不存在")
         if not isinstance(files, list) or not files:
             raise HTTPException(400, "files 需要非空数组（绝对路径列表）")
-        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
+        cfg, _from_engine = await _engine_scan_cfg(name)
         try:
-            return await eng.scan_submit(files)
-        except httpx.HTTPStatusError as ex:
-            raise _map_config_error(ex)
-        except httpx.HTTPError as ex:
-            raise HTTPException(502, f"服务不可达: {ex}")
-        finally:
-            await eng.close()
+            paths = localscan.validate_submit_files(files, cfg)
+        except localscan.ScanError as ex:
+            raise HTTPException(400, str(ex))
+        _prune_uploads()
+        created: list[str] = []
+        for p in paths:
+            task = UploadTask(
+                id=uuid.uuid4().hex[:8],
+                engine=name,
+                name=p.name,
+                size_mb=round(p.stat().st_size / 1048576, 1),
+                local_path=str(p),
+            )
+            _uploads[task.id] = task
+            created.append(task.id)
+            asyncio.create_task(_run_local(task, p))
+        return {"ok": True, "files": len(created), "upload_ids": created}
+
+    async def _local_writeback_tick() -> None:
+        """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。"""
+        for task in list(_local_wb.values()):
+            if task.writeback is not None:
+                _local_wb.pop(task.id, None)
+                continue
+            if not task.local_path or not task.job_id:
+                continue
+            job = next(
+                (j for j in poller.jobs.get(task.engine, [])
+                 if j.get("id") == task.job_id),
+                None,
+            )
+            if job is None:
+                continue  # 任务表里还没出现（或已过期）
+            files = job.get("files") or []
+            fstatus = files[0].get("status") if files else None
+            if job.get("state") != "finished":
+                if fstatus in ("error", "canceled"):
+                    task.writeback = (
+                        "failed: 生成失败" if fstatus == "error"
+                        else "failed: 生成已取消"
+                    )
+                    _local_wb.pop(task.id, None)
+                continue
+            if fstatus == "skipped":
+                task.writeback = "skipped"
+                _local_wb.pop(task.id, None)
+                continue
+            if fstatus in ("error", "canceled"):
+                task.writeback = "failed: 生成失败"
+                _local_wb.pop(task.id, None)
+                continue
+            vid = Path(task.local_path)
+            entry = store.get(task.engine)
+            if entry is None or not vid.is_file():
+                task.writeback = "failed: 视频已不存在"
+                _local_wb.pop(task.id, None)
+                continue
+            eng = JavScribeEngine(task.engine, entry["url"])
+            try:
+                data, suggested = await eng.result(task.job_id)
+            except Exception as ex:  # noqa: BLE001
+                task.wb_fails += 1
+                if task.wb_fails >= LOCAL_WB_MAX_FAILS:
+                    task.writeback = f"failed: 字幕暂不可下载（{ex}）"
+                    _local_wb.pop(task.id, None)
+                continue
+            finally:
+                await eng.close()
+            # 目标文件名：优先服务端 Content-Disposition（与服务端落盘命名一致），
+            # 旧服务占位名 {job_id}.srt 退回 <stem>.zh.srt。
+            name = (suggested if suggested and suggested != f"{task.job_id}.srt"
+                    and Path(suggested).suffix == ".srt"
+                    else vid.stem + ".zh.srt")
+            target = vid.parent / Path(name).name
+            if target.is_file() and target.stat().st_size > 0:
+                task.writeback = "skipped_exists"
+                _local_wb.pop(task.id, None)
+                continue
+            data, _fixed = sanitize_srt_bytes(data, log=_log.warning)
+            try:
+                target.write_bytes(data)
+                task.writeback = "ok"
+                _log.info("[writeback] %s -> %s", vid.name, target)
+            except OSError as ex:
+                task.wb_fails += 1
+                if task.wb_fails >= LOCAL_WB_MAX_FAILS:
+                    task.writeback = f"failed: 写入失败（{ex}）"
+                    _local_wb.pop(task.id, None)
+                continue
+            _local_wb.pop(task.id, None)
+
+    try:
+        poller.set_on_jobs(_local_writeback_tick)
+    except AttributeError:  # 旧版 Poller（测试夹具）无钩子时跳过
+        pass
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

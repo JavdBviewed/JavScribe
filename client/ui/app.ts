@@ -140,6 +140,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const line2 = $("line-2");
   const jobPager = $("job-pager");
   const jobList = $("job-list");
+
+  // 扫描提示按形态区分：HTML 默认 web 文案；桌面形态下「本机」= 本机磁盘
+  if (platform.kind === "desktop") {
+    const sh = $("scan-help") as HTMLElement | null;
+    if (sh) sh.dataset.tip =
+      "扫描本机（本电脑）上的目录：填本机上的绝对路径（如 /media/jav）。视频处理完成后，字幕自动落回本机影片旁。视频范围与字幕判定规则可在「服务设置」里调整。";
+  }
   const modalX = $("modal-x");
   const modalBackdrop = $("modal-backdrop");
 
@@ -602,6 +609,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const dl = j.status === "done" && j.job_id
       ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
       : "";
+    // 本地扫描任务：工作台本机字幕回写状态（ok / skipped_exists / skipped / failed:…）
+    const WB_TAG: Record<string, string> = { ok: "已落回本机", skipped_exists: "字幕已存在，未覆盖", skipped: "生成被跳过" };
+    const wb = j.writeback
+      ? `<span class="wb-tag${j.writeback.startsWith("failed") ? " wb-err" : ""}" title="${esc(j.writeback)}">${esc(j.writeback.startsWith("failed") ? "回写失败" : (WB_TAG[j.writeback] || j.writeback))}</span>`
+      : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
     const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
       ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
@@ -612,11 +624,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span></div>
+      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span>${wb}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
@@ -1550,7 +1562,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return;
     }
     if (/^[a-zA-Z]:[\\/]/.test(path)) {
-      toast("这是 Windows 本地路径（如 D:\\Videos）。服务端扫描只能读服务运行机器上的目录；要批量处理本机文件夹，请用上方「选择文件夹」", "err");
+      toast(platform.kind === "desktop"
+        ? "「扫描目录」需要本机绝对路径（如 /media/jav）；盘符路径（如 D:\\Videos）请改用上方「选择文件夹」"
+        : "这是浏览器电脑的本地路径（如 D:\\Videos）。「扫描目录」只能读工作台部署机器上的目录（如 /media/jav）；要处理浏览器电脑上的文件夹，请用上方「选择文件夹」", "err");
       return;
     }
     scanGo.disabled = true;
@@ -1583,13 +1597,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (state.scanMapped) {
       $("scan-mapped").hidden = false;
       $("scan-mapped").textContent =
-        "已按服务机器实际路径扫描：" + state.scanResolvedPath;
+        (platform.kind === "desktop" ? "已按宿主机实际路径扫描：" : "已按宿主机映射实际路径扫描：")
+        + state.scanResolvedPath;
     } else {
       $("scan-mapped").hidden = true;
     }
     if (!items.length) {
       $("scan-table").innerHTML =
-        '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名；本机文件夹请用上方「选择文件夹」）</div>';
+        '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名'
+      + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
     } else {
       $("scan-table").innerHTML = `
       <table class="scan-table">
@@ -1648,7 +1664,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     scanSubmit.disabled = true;
     try {
       const d = await t.submitScan(engine, files);
-      toast(`已入队 ${d.files} 项 → 任务 ${d.jobId}`, "ok");
+      toast(d.jobId
+        ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
+        : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`, "ok");
       state.scanItems = [];
       state.scanChecked = new Set();
       $("scan-results").hidden = true;

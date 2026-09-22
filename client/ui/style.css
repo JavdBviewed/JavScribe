@@ -230,6 +230,17 @@ input:focus, select:focus {
   background: var(--surface-2);
 }
 .tag.hot { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.wb-tag {
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+.wb-tag.wb-err { color: var(--err); border-color: var(--err); background: var(--err-soft); }
 .eng-err {
   width: 100%;
   margin-top: 8px;

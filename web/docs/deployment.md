@@ -72,38 +72,75 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 工作台代理路由：`GET/PUT /api/engines/{name}/config`（Key 由工作台按服务自动携带）。
 
-## 文件夹扫描（/scan）
+## 文件夹扫描（「扫描目录」）
 
-服务侧（`serve`）提供本机目录扫描与批量入队，鉴权与 `/config` 同级（`X-Api-Key`）：
+**架构契约（2026-09-22 定稿）**：服务端（serve）只负责模型/模型渠道对接与处理
+客户端上传的音轨，**不做任何文件交互**；用户侧文件夹交互全部由客户端承担，
+且分两条路径、分属两台机器：
 
-- 服务侧：`GET /scan?path=/绝对/目录` → 按活动 profile 的 `scan.*` 规则列出视频
-  （`{path, name, size, has_subtitle, subtitle}`，上限 5000 项，超出 `truncated: true`）；
-  「已有字幕」判定 = 同目录存在 `<片名>` + `subtitle_patterns` 之一（如
-  `PJAM-045.mp4` 旁有 `PJAM-045.zh.srt` 或 `PJAM-045.srt`）。
-- 服务侧：`POST /scan/submit {"files": [绝对路径...]}` → 校验后入队为一个任务
-  （label「文件夹扫描 · N 项」），返回 201 `{ok, job_id, files}`。
-  注意：入队即按服务 `subtitle.skip_if_exists` 策略处理——扫描 UI 的「已有字幕」
-  只是提示（可强制勾选提交），**是否真的跳过仍由引擎按既有规则决定**。
+- **选择文件夹** = **浏览器所在机器**（File System Access API 物理约束）；
+  原片不出该电脑，前端本地提取音轨后只上传 opus。
+- **扫描目录** = **工作台（本页面服务）部署所在机器**：服务端按规则列出目录内
+  视频、勾选入队，工作台直接读本机视频提 opus 派发给所选服务，**完成后字幕由
+  工作台自动写回本机影片旁**（不占浏览器下载、不依赖用户在场）。
+
+### Web 形态端点
+
+- `GET /api/scan/local?engine=<服务>&path=<绝对路径>` → 按扫描规则列出视频
+  （`{path, items[…], truncated, mapped, rules}`，上限 5000 项）；每项含字幕
+  三态 `subtitle_status: external / embedded / none`（外部 srt 与内嵌轨都探测，
+  内嵌轨走 ffprobe 并行探测，缺 ffprobe 时自动降级为仅外部判定）。
+  扫描规则优先取所选服务的 `/config`（与「服务设置」同源），服务不可达时退回
+  内置默认（`rules: "engine" | "defaults"` 可辨）。
+- `POST /api/scan/local/submit {"engine": <服务>, "files": [绝对路径...]}` →
+  200 `{ok, files, upload_ids}`；每个文件 = 独立上传任务 + 独立服务端 job
+  （复用音轨上传链路，含 sha1 内容缓存免传）。完成后字幕自动落回影片旁，
+  状态经 `GET /api/jobs` 行的 `writeback` 字段 / 任务表标签展示
+  （`ok` 已落回 / `skipped_exists` 已存在不覆盖 / `skipped` 生成被跳过 /
+  `failed:…` 回写失败）。
+
+### 容器化部署的宿主机路径映射
+
+web 容器默认只能看到挂载卷内的路径。要扫描宿主机目录：
+
+```yaml
+services:
+  web:
+    environment:
+      JAVSCRIBE_HOST_ROOT: "/hostfs"          # 宿主机根只读挂载前缀
+    volumes:
+      - "/:/hostfs:ro"                          # 只读映射：扫描可达
+      - "/home/ryen/emby-test:/home/ryen/emby-test"  # 读写映射：字幕回写可达
+```
+
+- 字面可见的路径永远优先；字面不存在且配置了 `JAVSCRIBE_HOST_ROOT` 时，
+  透明映射到 `<前缀>/<路径>`，前端扫描结果顶部提示实际扫描路径（`mapped: true`）。
+- **只读映射只能扫、不能回写**：要字幕落回本机影片旁，对应目录必须另给读写
+  挂载（如示例中的第二行）。回写连续失败 6 个轮询周期后该任务标记 failed。
+
+### 环境变量（web 容器）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `JAVSCRIBE_HOST_ROOT` | 空 | 宿主机只读挂载前缀（容器化扫描必需，见上） |
+| `JAV_LOCAL_EXTRACT_CONCURRENCY` | `2` | 「扫描目录」音轨提取并发（ffmpeg CPU 密集） |
+
+### 桌面形态（serve 与用户同机）
+
+`serve` 的 `GET /scan` / `POST /scan/submit` 保留给桌面端使用（桌面形态 serve
+就装在用户本机，「扫描目录」扫描的同样是本机磁盘），鉴权与 `/config` 同级
+（`X-Api-Key`），规则、内嵌字幕判定、宿主机映射（serve 容器化部署时
+`JAVSCRIBE_HOST_ROOT`）行为与 web 形态一致。web 工作台**不再代理**这两个端点。
+
 - 规则（活动 profile `scan` 段，均可在工作台「服务设置」热调）：
   - `video_exts`：视频扩展名列表（默认 11 种 mp4/mkv/avi/mov/webm/flv/wmv/ts/m2ts/mpg/mpeg）
   - `subtitle_patterns`：字幕判定后缀（默认 `.zh.srt`、`.srt`）
   - `recurse`：是否递归子目录（默认 true）
-- 工作台代理路由：`GET /api/engines/{name}/scan?path=...`、
-  `POST /api/engines/{name}/scan/submit`（Key 自动携带；错误映射与 /config 一致：
-  未设 Key 403 / Key 不符 401 / 旧镜像无端点 404 均映射为 400 中文提示，路径非法 400）。
-- 容器化部署的宿主机路径映射：serve 跑在容器里时默认只能看到挂载卷内的
-  路径。compose 默认把宿主机根**只读**挂载在容器 `/hostfs`（仅 `/scan`
-  链路可达，且需 API Key）；给服务设置 `JAVSCRIBE_HOST_ROOT=/hostfs`
-  （env 或 compose environment）后，`/scan` 与 `/scan/submit` 对「容器内
-  不存在」的绝对路径会透明映射到 `/hostfs/<路径>`，前端扫描结果顶部会提示
-  实际扫描到的路径。字面可见的路径永远优先，不做映射。
-- 路径属于哪台机器：扫描面板里的路径是**服务运行机器（服务器）**上的路径
-  （Linux 路径，如 `/media/jav`）；浏览器「选择文件夹」才是**本机**
-  （Windows/macOS/Linux 均可）的目录，二者不要混填——填成 `D:\Videos`
-  这类本机盘符路径会被前端直接拦下并提示。
-- 安全定位：`/scan` 能列举服务机器上的**任意目录**（含文件名与大小）并把任意
-  本地文件路径入队处理，敏感性与 `/config` 相当，**不要对外暴露**；
-  浏览器端「选择文件夹」走的是用户本地电脑的 webkitdirectory，与服务端无关。
+
+- 安全定位：`/scan`（桌面）与 `/api/scan/local`（web）都能枚举对应机器上的
+  **任意目录**（含文件名与大小）并把任意本地文件入队处理，敏感性与 `/config`
+  相当，**不要对外暴露**；web 容器读宿主盘同样依赖挂载范围控制（只映射需要的
+  目录，不要把 `/` 整体读写挂进容器）。
 
 其余接口：`GET /api/health`、`GET/POST/PUT/DELETE /api/engines`、`GET /api/jobs`、
 `GET /api/jobs/{engine}/{job_id}/result`（代理服务 srt 下载）、
@@ -114,4 +151,5 @@ docker compose -f docker/docker-compose.yml up -d --build
 本服务**无鉴权**（与服务一致），只应暴露在内网 / VPN。`/api/upload` 可向服务
 派发 GPU 任务，暴露面等同服务的 `/upload`。`/config` 与 `/scan`、`/scan/submit`
 有 `X-Api-Key` 鉴权，但 Key 是服务级共享密钥，不要随意指派给不可信方；
-`/scan` 可枚举服务机器任意目录，泄露即等于交出该机的媒体库清单。
+`/scan` 可枚举（桌面形态）服务机器任意目录，`/api/scan/local` 可枚举（web 形态）
+工作台部署机任意目录，泄露即等于交出对应机器的媒体库清单。

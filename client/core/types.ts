@@ -41,6 +41,8 @@ export interface JobRow {
   finished?: number | null;
   source_kind?: string | null;
   output_files?: string[];
+  /** 本地扫描任务的字幕回写状态（工作台本机回写）：ok / skipped_exists / skipped / failed:… */
+  writeback?: string | null;
 }
 
 /** GET /api/uploads/{id}：提取→派发 两阶段任务 */
@@ -58,6 +60,10 @@ export interface UploadStatus {
   error?: string | null;
   /** 服务端命中内容缓存（免上传；web 链路轮询可见） */
   cached?: boolean | null;
+  /** 「扫描目录」任务：视频在本机（工作台部署机）的实际路径 */
+  local_path?: string | null;
+  /** 本地字幕回写状态：ok / skipped_exists / skipped / failed:… */
+  writeback?: string | null;
 }
 
 export type ConfigType = "bool" | "enum" | "list" | "int" | "float" | "secret" | "text";
@@ -80,7 +86,7 @@ export interface ScanItem {
   subtitle?: string | null;
 }
 
-/** GET /api/engines/{name}/scan?path= 响应 */
+/** 扫描目录响应（web 形态 GET /api/scan/local?engine=&path=；desktop 为本地 serve /scan） */
 export interface ScanResult {
   items: ScanItem[];
   mapped?: boolean;

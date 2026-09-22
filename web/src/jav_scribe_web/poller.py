@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from .config import EngineStore
 from .engines.base import EngineAdapter, EngineInfo
@@ -23,17 +23,23 @@ class Poller:
         interval_s: float = 5.0,
         factory: Optional[Callable[[dict], EngineAdapter]] = None,
         log: Optional[Callable[[str], None]] = None,
+        on_jobs: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._store = store
         self._interval = interval_s
         self._factory = factory or (lambda e: JavScribeEngine(e["name"], e["url"]))
         self._log = log or (lambda _s: None)
+        self._on_jobs = on_jobs
         self._stop = asyncio.Event()
         self.engines: dict[str, EngineInfo] = {}
         self.jobs: dict[str, list[dict]] = {}
 
     def stop(self) -> None:
         self._stop.set()
+
+    def set_on_jobs(self, cb: Optional[Callable[[], Awaitable[None]]]) -> None:
+        """Register a post-snapshot side-effect hook (e.g. local write-back)."""
+        self._on_jobs = cb
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -49,6 +55,12 @@ class Poller:
             if self._store.get(name) is None:
                 del self.engines[name]
                 self.jobs.pop(name, None)
+        if self._on_jobs is not None:
+            # 快照就绪后的本地侧副作用（如本地扫描字幕回写）；失败不阻塞轮询
+            try:
+                await self._on_jobs()
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"[poll] on_jobs 回调失败: {ex}")
 
     async def _refresh_one(self, entry: dict) -> None:
         name, url = entry["name"], entry["url"]
