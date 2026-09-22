@@ -732,8 +732,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             if isinstance(sub_raw, dict) else {}
         )
         _prune_uploads()
-        # 防重：serve 无取消 API，重复任务只能干跑——同一影片在跑/在队（含提取中）
-        # 时跳过，已终态（完成回写 / 提取失败）的允许重新提交。
+        # 防重：同一影片在跑/在队（含提取中）时跳过，已终态（完成回写 / 提取失败）
+        # 的允许重新提交（在跑的任务可先经任务行取消按钮取消，serve v0.1.7+ 支持）。
         active_paths: set[str] = set()
         for t in _uploads.values():
             if not t.local_path or t.phase == "error":
@@ -796,7 +796,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 _local_wb.pop(task.id, None)
                 continue
             if fstatus in ("error", "canceled"):
-                task.writeback = "failed: 生成失败"
+                task.writeback = "failed: 生成失败" if fstatus == "error" else "failed: 生成已取消"
                 _local_wb.pop(task.id, None)
                 continue
             vid = Path(task.local_path)

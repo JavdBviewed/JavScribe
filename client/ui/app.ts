@@ -63,7 +63,7 @@ const state: AppState = {
   })(),
   scanNamingC: (() => {
     const v = localStorage.getItem("javweb_scan_namingc");
-    return v === "has_sub" || v === "no_sub" || v === "off" ? v : "has_sub";
+    return v === "has_sub" || v === "no_sub" || v === "off" ? v : "no_sub";
   })(),
   page: 0,
   pageSize: 20,
@@ -1696,6 +1696,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               ? `<span class="tag subtag" title="文件名含独立 C，按规则视为已压字幕（可在「文件名独立 C」改判）">C 版（名）</span>`
               : i.subtitle_status === "embedded"
               ? `<span class="tag subtag" title="视频内嵌字幕轨：${esc(langs)}">内嵌 ${esc(langs)}</span>`
+              : i.probe_failed
+              ? '<span class="tag subtag warn" title="内嵌字幕探测失败（ffprobe 异常）；本次未检测到不代表视频没有内嵌字幕，请重新扫描">⚠ 探测失败</span>'
               : i.name_no_sub
               ? `<span class="tag subtag ok" title="文件名含独立 C，按规则视为无字幕版">无字幕（名）</span>`
               : '<span class="muted">—</span>';
@@ -1728,9 +1730,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const total = state.scanItems.length;
     const nSub = state.scanItems.filter((i) => i.has_subtitle).length;
     const nSmall = state.scanItems.filter((i) => i.too_small && !state.scanChecked.has(i.path)).length;
+    const nProbeFail = state.scanItems.filter((i) => i.probe_failed).length;
     let text = total ? `已选 ${n} / ${total}` : "";
     if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
     if (nSmall) text += ` · ${nSmall} 个过小未选`;
+    if (nProbeFail) text += ` · ⚠ ${nProbeFail} 个文件内嵌字幕探测失败`;
     if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
     $("scan-count").textContent = text;
     const b = scanSubmit;

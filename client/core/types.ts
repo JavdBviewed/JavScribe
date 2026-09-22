@@ -94,9 +94,11 @@ export interface ScanItem {
   embedded_langs?: string[];
   /** 低于 scan.min_size_mb：列表显示但不默认选中（显式勾选仍可提交） */
   too_small?: boolean;
-  /** 文件名含独立 C、语义判为「已压字幕」（naming_c=has_sub，默认） */
+  /** 内嵌字幕探测失败（ffprobe 异常）：本次未检测到 ≠ 视频没有内嵌字幕，重新扫描会再探测 */
+  probe_failed?: boolean;
+  /** 文件名含独立 C、语义判为「已压字幕」（naming_c=has_sub） */
   name_sub?: boolean;
-  /** 文件名含独立 C、语义设为「无字幕版」（naming_c=no_sub，仅信息标） */
+  /** 文件名含独立 C、语义设为「无字幕版」（naming_c=no_sub，默认；仅信息标） */
   name_no_sub?: boolean;
 }
 

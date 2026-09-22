@@ -917,6 +917,7 @@ footer {
   background: transparent;
 }
 .tag.subtag.ok { color: var(--ok, #2e7d32); border-color: var(--line); background: transparent; }
+.tag.subtag.warn { color: var(--accent, #d96f14); border-color: var(--line); background: transparent; }
 .tag.tinytag { margin-left: 6px; font-size: 10px; padding: 2px 6px; }
 .scan-table tr.too-small { opacity: 0.6; }
 .scan-opts { min-width: 132px; }

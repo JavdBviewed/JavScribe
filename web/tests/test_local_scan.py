@@ -63,7 +63,7 @@ def test_cfg_from_items_merges_defaults() -> None:
     assert base == copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
     sc = localscan._scan_cfg(base)
     assert len(sc["exts"]) >= 10 and ".srt" in sc["pats"] and sc["recurse"] is True
-    assert sc["min_size_mb"] == 200 and sc["naming_c"] == "has_sub"
+    assert sc["min_size_mb"] == 200 and sc["naming_c"] == "no_sub"
 
     cfg = localscan.cfg_from_items([
         {"path": "scan.video_exts", "value": ["mkv"]},
@@ -190,12 +190,12 @@ def test_scan_min_size_and_naming_c() -> None:
         cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
         cfg["subtitle"]["skip_embedded"] = "off"
 
-        # 默认 200MB：全部过小；独立 C 默认 has_sub ⇒ named + has_subtitle
+        # 默认 200MB：全部过小；独立 C 默认 no_sub ⇒ 仅信息标，不触发确认
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         assert len(by) == 3 and all(i["too_small"] for i in by.values())
         c = by["SSIS-123-C.mp4"]
-        assert c["name_sub"] is True and c["subtitle_status"] == "named"
-        assert c["has_subtitle"] is True
+        assert c["name_no_sub"] is True and c["name_sub"] is False
+        assert c["has_subtitle"] is False and c["subtitle_status"] == "none"
 
         # 阈值 1MB：只有 1KB 的过小
         cfg["scan"]["min_size_mb"] = 1
@@ -230,6 +230,57 @@ def test_scan_min_size_and_naming_c() -> None:
         # 过小文件显式提交不拦截
         got = localscan.validate_submit_files([str(d / "tiny.mp4")], cfg)
         assert got == [d / "tiny.mp4"]
+
+
+def test_scan_probe_failure_explicit() -> None:
+    """ffprobe 探测失败 -> 该项 probe_failed=True / probe_errors 含文件名；
+    失败不缓存（恢复后重扫重新探测），探测整体关闭时不探测不报错。"""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "A.mp4").write_bytes(b"x" * 100)
+        (d / "B.mp4").write_bytes(b"x" * 100)
+        cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
+        localscan.clear_probe_cache()
+        real = localscan._run_ffprobe
+
+        def boom(p: Path) -> list:
+            if p.name == "A.mp4":
+                raise localscan.ProbeError("ffprobe 超时（>15s）")
+            return []  # B：探测成功但无内嵌轨
+
+        def ok(p: Path) -> list:
+            return []
+
+        try:
+            localscan._run_ffprobe = boom  # type: ignore[assignment]
+            res = localscan.scan_dir(d, cfg)
+            # 恢复探测后重扫：A 的失败未写缓存 ⇒ 重新探测成功
+            localscan._run_ffprobe = ok  # type: ignore[assignment]
+            res2 = localscan.scan_dir(d, cfg)
+        finally:
+            localscan._run_ffprobe = real  # type: ignore[assignment]
+
+        by = {i["name"]: i for i in res["items"]}
+        by2 = {i["name"]: i for i in res2["items"]}
+        assert res["probe_errors"] == ["A.mp4"], res["probe_errors"]
+        a = by["A.mp4"]
+        assert a["probe_failed"] is True
+        assert a["subtitle_status"] == "none" and a["has_subtitle"] is False
+        assert by["B.mp4"]["probe_failed"] is False
+        assert by["B.mp4"]["subtitle_status"] == "none"
+        assert res2["probe_errors"] == [], res2["probe_errors"]
+        assert by2["A.mp4"]["probe_failed"] is False
+        assert by2["A.mp4"]["subtitle_status"] == "none"
+
+        # 探测整体关闭（skip_embedded=off）：不探测、无错误、无失败标记
+        cfg_off = copy.deepcopy(cfg)
+        cfg_off["subtitle"]["skip_embedded"] = "off"
+        res3 = localscan.scan_dir(d, cfg_off)
+        assert res3["probe_errors"] == []
+        assert all(i["probe_failed"] is False for i in res3["items"])
+
+    # 文件消失（stat 失败）同样 -> None，不抛异常
+    assert localscan.probe_embedded_subs("/no/such/vid.mp4") is None
 
 
 def test_validate_submit_files() -> None:
@@ -394,16 +445,17 @@ def test_local_scan_api_size_and_naming_overrides() -> None:
             JavScribeEngine.config = fake_unreachable  # 内置默认规则
             client = TestClient(build_app(store, _poller))
             with client:
-                # 默认 200MB：全部过小；独立 C => named，粘番号 C => none
+                # 默认 200MB：全部过小；独立 C 默认 no_sub => 信息标，粘番号 C => none
                 r = client.get(
                     "/api/scan/local", params={"engine": "车间A", "path": str(media)})
                 assert r.status_code == 200, r.text
                 body = r.json()
-                assert body["min_size_mb"] == 200 and body["naming_c"] == "has_sub"
+                assert body["min_size_mb"] == 200 and body["naming_c"] == "no_sub"
                 by = {it["name"]: it for it in body["items"]}
                 assert all(it["too_small"] for it in by.values())
-                assert by["SSIS-123-C.mp4"]["name_sub"] is True
-                assert by["SSIS-123-C.mp4"]["subtitle_status"] == "named"
+                assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
+                assert by["SSIS-123-C.mp4"]["name_sub"] is False
+                assert by["SSIS-123-C.mp4"]["subtitle_status"] == "none"
                 assert by["SSIS-123C.mp4"]["name_sub"] is False
                 assert by["SSIS-123C.mp4"]["subtitle_status"] == "none"
 

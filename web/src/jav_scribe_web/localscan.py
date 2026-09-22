@@ -14,8 +14,12 @@
   scan.video_exts         视频扩展名（无点、小写）
   scan.subtitle_patterns  已有字幕判定后缀（带点，".zh.srt"）
   scan.recurse            是否进入子目录
-  subtitle.skip_embedded  内嵌字幕轨跳过策略 off/target/any
-  subtitle.embedded_langs target 模式目标语言
+  subtitle.skip_embedded  本模块仅用作内嵌探测开关（off=不探测、不提示；
+                          target/any=探测）。注意与 serve 侧语义分叉：
+                          serve 用它决定 watch 管线是否跳过，本模块的
+                          扫描提示（has_subtitle）与跳过策略解耦——
+                          只要探测到内嵌字幕轨（任何语言）就提示用户确认。
+  subtitle.embedded_langs 内嵌轨语言展示（norm_language 归一）
 """
 from __future__ import annotations
 
@@ -51,8 +55,9 @@ DEFAULT_SCAN_CFG: dict[str, Any] = {
         # 客户端侧文件属性规则（不进 serve /config 白名单）：
         # min_size_mb  低于该值(MB)的文件「忽略」= 列表显示但不默认选中，显式勾选仍可提交
         # naming_c     文件名独立 C 的语义：has_sub=视为已压字幕 / no_sub=视为无字幕版 / off=不识别
+        #               默认 no_sub：JAV 命名里独立 C（-C-/C 不粘番号、不粘 CD 集数）= 无字幕版
         "min_size_mb": 200,
-        "naming_c": "has_sub",
+        "naming_c": "no_sub",
     },
     "subtitle": {
         "skip_embedded": "target",
@@ -66,6 +71,10 @@ class ScanError(ValueError):
     """扫描/提交请求被拒绝（路径非法 / 文件列表非法）。"""
 
 
+class ProbeError(Exception):
+    """ffprobe 不可用或执行失败（区别于「探测成功但无字幕轨」；失败不缓存）。"""
+
+
 def standalone_c_in(name: str) -> bool:
     """文件名是否含「独立 C」（见 _STANDALONE_C_RE 注释；大小写不敏感）。
 
@@ -76,7 +85,8 @@ def standalone_c_in(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 内嵌字幕轨探测（ffprobe，只读容器头；失败一律按「无内嵌字幕」处理）
+# 内嵌字幕轨探测（ffprobe，只读容器头）。探测失败抛 ProbeError：
+# 「探测失败」与「探测成功但无轨」必须可区分，且失败不写缓存（瞬态故障重扫可恢复）。
 # ---------------------------------------------------------------------------
 SUBTITLE_CODECS = frozenset({
     "subrip", "srt", "ass", "ssa", "mov_text", "webvtt",
@@ -123,10 +133,10 @@ def norm_language(lang: Optional[str]) -> str:
 
 
 def _run_ffprobe(path: Path) -> list[dict[str, Optional[str]]]:
-    """跑一次 ffprobe，返回 [{codec, language}]；任何失败 -> []。"""
+    """跑一次 ffprobe，返回 [{codec, language}]（可能为空列表）；失败 -> 抛 ProbeError。"""
     ff = _resolve_ffprobe()
     if not ff:
-        return []
+        raise ProbeError("ffprobe 不可用")
     try:
         proc = subprocess.run(
             [ff, "-v", "error", "-select_streams", "s",
@@ -136,14 +146,16 @@ def _run_ffprobe(path: Path) -> list[dict[str, Optional[str]]]:
              "-of", "json", str(path)],
             capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
+    except subprocess.TimeoutExpired as e:
+        raise ProbeError(f"ffprobe 超时（>{_PROBE_TIMEOUT_S}s）") from e
+    except OSError as e:
+        raise ProbeError(f"ffprobe 执行失败: {type(e).__name__}") from e
     if proc.returncode != 0:
-        return []
+        raise ProbeError(f"ffprobe 退出码 {proc.returncode}")
     try:
         data = json.loads(proc.stdout or "{}")
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as e:
+        raise ProbeError("ffprobe 输出不是合法 JSON") from e
     out: list[dict[str, Optional[str]]] = []
     for s in data.get("streams") or []:
         codec = s.get("codec_name")
@@ -156,50 +168,32 @@ def _run_ffprobe(path: Path) -> list[dict[str, Optional[str]]]:
 
 def probe_embedded_subs(
     path: Path | str,
-) -> list[dict[str, Optional[str]]]:
-    """探测视频内嵌字幕轨；(path, size, mtime) 缓存；失败 -> []。"""
+) -> Optional[list[dict[str, Optional[str]]]]:
+    """探测视频内嵌字幕轨；(path, size, mtime) 缓存。
+
+    文件消失或探测失败（ProbeError）-> None：失败不写缓存，瞬态故障
+    （I/O 风暴 / 超时）不会被永久当成「无内嵌字幕」，重新扫描会再探测。
+    """
     p = Path(path)
     try:
         st = p.stat()
     except OSError:
-        return []
+        return None
     key = (str(p), st.st_size, st.st_mtime)
     with _cache_lock:
         hit = _cache.get(key)
     if hit is not None:
         return hit
-    res = _run_ffprobe(p)
+    try:
+        res = _run_ffprobe(p)
+    except ProbeError:
+        return None
     with _cache_lock:
         if len(_cache) >= _CACHE_MAX:
             _cache.clear()
         _cache[key] = res
     return res
 
-
-def embedded_targets(sub_cfg: dict) -> list[str]:
-    """target 模式的有效目标语言：embedded_langs（非空）否则 [lang_tag]。"""
-    langs = sub_cfg.get("embedded_langs")
-    if isinstance(langs, list):
-        items = [norm_language(x) for x in langs if str(x).strip()]
-        if items:
-            return items
-    return [norm_language(sub_cfg.get("lang_tag") or "zh")]
-
-
-def should_skip_embedded(sub_cfg: dict, langs: list[str]) -> tuple[bool, str]:
-    """内嵌轨语言列表 `langs` 是否触发跳过；返回 (skip, reason)。"""
-    mode = str(sub_cfg.get("skip_embedded", "target") or "target").lower()
-    if mode == "off" or not langs:
-        return False, ""
-    if mode == "any":
-        return True, f"视频已内嵌 {len(langs)} 条字幕轨（不区分语言）"
-    if mode != "target":
-        return False, ""  # 未知值按 off 处理，不挡流程
-    targets = embedded_targets(sub_cfg)
-    hit = sorted({norm_language(l) for l in langs if norm_language(l) in targets})
-    if hit:
-        return True, f"视频已内嵌 {'/'.join(hit)} 字幕轨"
-    return False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +406,12 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
 
     每项含字幕四态：subtitle_status = external（外部 srt）/ named（文件名独立 C
     按 naming_c=has_sub 视为已压字幕）/ embedded（内嵌轨）/ none；
-    has_subtitle = 外部存在 或 内嵌触发跳过 或 named。
+    has_subtitle = 外部存在 或 内嵌轨存在（探测开启时，任何语言）或 named。
     too_small = 低于 scan.min_size_mb（仅提示用，不拦提交）；
     name_sub / name_no_sub = 独立 C 命中的语义标记。
-    内嵌探测仅 skip_embedded != off 时跑（ffprobe 只读容器头，并行）。
+    内嵌探测仅 skip_embedded != off 时跑（ffprobe 只读容器头，并行）；
+    探测失败的文件该项 probe_failed=True，且返回 probe_errors（文件名列表，
+    已排序）——「没探测到内嵌字幕」不再与「探测失败」混同。
     """
     sc = _scan_cfg(cfg)
     exts, pats, recurse = sc["exts"], sc["pats"], sc["recurse"]
@@ -447,18 +443,29 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
         pass
 
     embedded: dict[Path, list[dict[str, Any]]] = {}
+    probe_errors: list[Path] = []
     if probe_on and candidates:
         workers = min(8, max(2, len(candidates) // 32))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(probe_embedded_subs, f): f for f, _ in candidates}
             for fut in as_completed(futs):
-                embedded[futs[fut]] = fut.result()
+                f = futs[fut]
+                try:
+                    r = fut.result()
+                except Exception:  # 理论上 probe_embedded_subs 内部已吞异常
+                    r = None
+                if r is None:
+                    probe_errors.append(f)
+                else:
+                    embedded[f] = r
+    err_names = {f.name for f in probe_errors}
 
     items: list[dict[str, Any]] = []
     for f, size in candidates:
         sub = _subtitle_for(f, pats)
         subs = embedded.get(f, [])
-        skip, _reason = should_skip_embedded(sub_cfg, [x["language"] for x in subs])
+        # 提示语义与 skip 策略解耦：只要探测到内嵌字幕轨（任何语言，含 und/ja）
+        # 就在扫描/提交环节给用户确认；serve 侧 watch 管线仍按 skip_embedded 自行决定。
         # 文件名独立 C（has_sub ⇒ 按已有字幕处理；no_sub ⇒ 仅信息标）
         name_c = naming_c != "off" and standalone_c_in(f.name)
         named = naming_c == "has_sub" and name_c
@@ -468,7 +475,7 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
                 "path": str(f),
                 "name": f.name,
                 "size": size,
-                "has_subtitle": sub is not None or skip or named,
+                "has_subtitle": sub is not None or bool(subs) or named,
                 "subtitle": sub,
                 # 优先级：external（确有 srt 文件）> named（命名规则）> embedded（探测轨）
                 "subtitle_status": ("external" if sub
@@ -479,7 +486,9 @@ def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
                 "too_small": min_bytes > 0 and size < min_bytes,
                 "name_sub": named,
                 "name_no_sub": no_sub_named,
+                "probe_failed": f.name in err_names,
             }
         )
     items.sort(key=lambda x: x["name"].lower())
-    return {"path": str(root), "items": items, "truncated": truncated}
+    return {"path": str(root), "items": items, "truncated": truncated,
+            "probe_errors": sorted(f.name for f in probe_errors)}
