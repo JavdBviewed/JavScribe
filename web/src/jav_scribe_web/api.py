@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import tempfile
@@ -145,7 +146,8 @@ class UploadTask:
         }
 
 
-def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None = None, lifespan=None) -> FastAPI:
+def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None = None, lifespan=None,
+            data_dir: str | os.PathLike = "/data") -> FastAPI:
     app = FastAPI(title="JavScribe-Web", version=__version__, lifespan=lifespan)
 
     @app.middleware("http")
@@ -160,6 +162,66 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     _uploads: dict[str, UploadTask] = {}
     _upload_locks: dict[str, asyncio.Lock] = {}
+    # 本地管线状态落盘（<data_dir>/uploads.json）：_uploads/_local_wb 是内存态，
+    # 工作台重启/重部署即丢——不持久化的话，已在 serve 排队的「扫描目录」任务
+    # 会失去字幕回写跟踪（字幕不再自动落回本机影片旁），提取阶段失败行也消失。
+    # 重启恢复语义：
+    #   - 已拿到 job_id 且回写未完成 → 继续回写跟踪；
+    #   - 提取/派发中途中断（无 job_id）→ 标记失败并显示行，用户可重新提交；
+    #   - 服务已删除 → 丢弃。
+    _state_path = Path(data_dir) / "uploads.json"
+
+    def _save_uploads_state() -> None:
+        try:
+            payload = {"uploads": [t.to_dict() for t in _uploads.values()]}
+            tmp = _state_path.with_name(_state_path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_state_path)
+        except OSError:
+            pass  # 状态落盘失败不阻塞主管线
+
+    def _load_uploads_state() -> None:
+        try:
+            raw = json.loads(_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        entries = raw.get("uploads") if isinstance(raw, dict) else None
+        if not isinstance(entries, list):
+            return
+        now = time.time()
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("id"):
+                continue
+            try:
+                t = UploadTask(
+                    id=str(e["id"]),
+                    engine=str(e.get("engine") or ""),
+                    name=str(e.get("name") or ""),
+                    size_mb=float(e.get("size_mb") or 0.0),
+                    phase=str(e.get("phase") or "extracting"),
+                    progress=float(e.get("progress") or 0.0),
+                    created=float(e.get("created") or now),
+                    finished=float(e["finished"]) if e.get("finished") is not None else None,
+                    audio_mb=float(e["audio_mb"]) if e.get("audio_mb") is not None else None,
+                    job_id=str(e["job_id"]) if e.get("job_id") else None,
+                    error=e.get("error"),
+                    cached=bool(e.get("cached")),
+                    local_path=e.get("local_path"),
+                    sub_status=e.get("sub_status"),
+                    writeback=e.get("writeback"),
+                )
+            except (TypeError, ValueError):
+                continue
+            if store.get(t.engine) is None:
+                continue  # 服务已删除：无轮询目标，行会永远滞留
+            if not t.job_id:
+                t.phase = "error"
+                t.error = t.error or "工作台重启，任务中断（可重新提交）"
+                t.finished = t.finished or now
+            _uploads[t.id] = t
+            if t.local_path and t.job_id and not t.writeback:
+                _local_wb[t.id] = t
+        _prune_uploads()
 
     def _lock_for(engine_name: str) -> asyncio.Lock:
         return _upload_locks.setdefault(engine_name, asyncio.Lock())
@@ -235,6 +297,46 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         for name, details in poller.jobs.items():
             for job in details:
                 rows.extend(_job_rows(name, job, wb_index, sub_index))
+        # 本机上传管线在「服务端任务出现之前」的阶段（提取音轨 / 派发 / 失败）
+        # 也渲染成任务行——否则提交后任务表空白，用户会以为没提交成功而重复提交。
+        live_job_ids = {
+            job.get("id") for details in poller.jobs.values() for job in details
+        }
+        now = time.time()
+        for t in _uploads.values():
+            if t.phase not in ("extracting", "dispatching", "error"):
+                continue
+            if t.phase == "error" and t.finished and now - t.finished > UPLOAD_TTL_S:
+                continue
+            if t.job_id and t.job_id in live_job_ids:
+                continue  # 服务端任务行已出现，避免双行
+            rows.append(
+                {
+                    "engine": t.engine,
+                    "job_id": t.job_id or "",
+                    "label": t.name,
+                    "state": "error" if t.phase == "error" else "running",
+                    "created": t.created,
+                    "finished": t.finished,
+                    "source_kind": "upload",
+                    "sub_status": t.sub_status,
+                    "writeback": None,
+                    "file": t.name,
+                    "status": "error" if t.phase == "error" else "running",
+                    "phase": t.phase,
+                    "progress": t.progress,
+                    "position": "",
+                    "duration_s": None,
+                    "position_s": None,
+                    "phase_detail": {
+                        "extracting": "提取音轨（本机）",
+                        "dispatching": "派发到服务",
+                    }.get(t.phase, ""),
+                    "eta_s": None,
+                    "message": t.error or "",
+                    "output_files": [],
+                }
+            )
         rows.sort(
             key=lambda r: (
                 0 if r["status"] == "running" else 1,
@@ -353,6 +455,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             size_mb=round(received / 1048576, 1),
         )
         _uploads[task.id] = task
+        _save_uploads_state()
         asyncio.create_task(_run_upload(task, tmp))
         return {
             "ok": True,
@@ -400,6 +503,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             audio_mb=round(received / 1048576, 1),
         )
         _uploads[task.id] = task
+        _save_uploads_state()
         asyncio.create_task(_run_audio(task, tmp))
         return {
             "ok": True,
@@ -607,8 +711,20 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             if isinstance(sub_raw, dict) else {}
         )
         _prune_uploads()
-        created: list[str] = []
+        # 防重：serve 无取消 API，重复任务只能干跑——同一影片在跑/在队（含提取中）
+        # 时跳过，已终态（完成回写 / 提取失败）的允许重新提交。
+        active_paths: set[str] = set()
+        for t in _uploads.values():
+            if not t.local_path or t.phase == "error":
+                continue
+            if not t.finished or t.id in _local_wb:
+                active_paths.add(str(Path(t.local_path).resolve()))
+        skip: list[str] = []
+        fresh: list[Path] = []
         for p in paths:
+            (skip if str(p) in active_paths else fresh).append(p)
+        created: list[str] = []
+        for p in fresh:
             task = UploadTask(
                 id=uuid.uuid4().hex[:8],
                 engine=name,
@@ -619,11 +735,18 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             )
             _uploads[task.id] = task
             created.append(task.id)
+            _save_uploads_state()
             asyncio.create_task(_run_local(task, p))
-        return {"ok": True, "files": len(created), "upload_ids": created}
+        return {
+            "ok": True,
+            "files": len(created),
+            "upload_ids": created,
+            "skipped": [p.name for p in skip],
+        }
 
     async def _local_writeback_tick() -> None:
         """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。"""
+        _prune_uploads()
         for task in list(_local_wb.values()):
             if task.writeback is not None:
                 _local_wb.pop(task.id, None)
@@ -694,11 +817,16 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     _local_wb.pop(task.id, None)
                 continue
             _local_wb.pop(task.id, None)
+        _save_uploads_state()
 
     try:
         poller.set_on_jobs(_local_writeback_tick)
     except AttributeError:  # 旧版 Poller（测试夹具）无钩子时跳过
         pass
+
+    # 从磁盘恢复本地管线状态（重启恢复：回写跟踪 / 失败行可见）
+    _load_uploads_state()
+    _save_uploads_state()
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

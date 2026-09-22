@@ -54,7 +54,11 @@ const state: AppState = {
   scanResolvedPath: "",
   scanChecked: new Set(),
   scanMinSizeMb: (() => {
-    const v = Number(localStorage.getItem("javweb_scan_minsize"));
+    // 注意 Number(null) === 0：新浏览器（无持久化值）必须落到默认 200，
+    // 否则阈值静默变 0，过小/坏文件会被默认勾选并提交（QA 5.5b 暴露）
+    const raw = localStorage.getItem("javweb_scan_minsize");
+    if (raw == null || raw.trim() === "") return 200;
+    const v = Number(raw);
     return Number.isFinite(v) && v >= 0 ? v : 200;
   })(),
   scanNamingC: (() => {
@@ -613,9 +617,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         eta = el > 5 ? `剩 ~${fmtDuration(el * (1 - prog) / prog)}` : "";
       }
     }
+    // 主名：远端/上传任务 file 是 opus 内容寻址 hash（<sha1>.opus），
+    // label 才是上传时的原始视频名——此时用视频名当主名（hash 泄漏进任务表即 F2 投诉）；
+    // 本地任务 label 与 file 同值、或「文件夹扫描 · N 项」批量占位 → 主名仍用 file。
+    const labBase = (j.label || "").replace(/.*[\\/]/, "");
+    const labelMain = !!j.label && !j.label.startsWith("文件夹扫描")
+      && labBase !== j.file && VIDEO_EXT_RE.test(labBase);
+    const primary = labelMain ? labBase : (j.file || "");
     // 跳过行优先显示 message（含已存在字幕的完整路径）
     const sub = j.status === "skipped" && j.message ? j.message
-      : (j.label && j.label !== j.file) ? j.label : (j.message || "");
+      : (!labelMain && j.message) ? j.message : "";
     const dl = j.status === "done" && j.job_id
       ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
       : "";
@@ -642,7 +653,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb, ss].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
-      <div class="job-name"><div class="fn">${esc(j.file)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
+      <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span>${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
@@ -725,7 +736,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function visibleRows(rows: JobRow[]) {
     return rows.filter((r) =>
       state.filter === "all" ? true :
-      state.filter === "running" ? r.status === "running" : r.status !== "running");
+      // 进行中 = 运行中 + 排队（serve pending）；已完成 = 全部终态（done/失败/跳过/已取消）
+      state.filter === "running"
+        ? r.status === "running" || r.status === "pending"
+        : r.status !== "running" && r.status !== "pending");
   }
 
   function renderPager(total: number) {
@@ -1743,9 +1757,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     scanSubmit.disabled = true;
     try {
       const d = await t.submitScan(engine, files, subStatus);
-      toast(d.jobId
-        ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
-        : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`, "ok");
+      if (d.skipped && d.skipped.length) {
+        const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
+        toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
+      }
+      if (d.files > 0) {
+        toast(d.jobId
+          ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
+          : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`, "ok");
+      }
       state.scanItems = [];
       state.scanChecked = new Set();
       $("scan-results").hidden = true;

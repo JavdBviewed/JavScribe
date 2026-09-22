@@ -166,8 +166,8 @@ export const webTransport: Transport = {
       throw new TransportError("网络错误", true);
     }
     if (r.ok) {
-      const d = (await r.json()) as { files: number; upload_ids: string[] };
-      return { files: d.files, uploadIds: d.upload_ids };
+      const d = (await r.json()) as { files: number; upload_ids: string[]; skipped?: string[] };
+      return { files: d.files, uploadIds: d.upload_ids, skipped: d.skipped };
     }
     let msg = String(r.status);
     try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch (_e) {}

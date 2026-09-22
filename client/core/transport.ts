@@ -68,5 +68,5 @@ export interface Transport {
   scan(name: string, path: string, opts?: ScanOpts): Promise<ScanResult>;
   /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw
    *  subStatus：{path: subtitle_status} 提交前检测到的字幕状态（制作图提示展示用） */
-  submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[] }>;
+  submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
 }

@@ -91,7 +91,7 @@ def main() -> None:
             update_task.cancel()
             await asyncio.gather(task, update_task, return_exceptions=True)
 
-    app = build_app(store, poller, updater=updater, lifespan=lifespan)
+    app = build_app(store, poller, updater=updater, lifespan=lifespan, data_dir=data_dir)
     servers = [uvicorn.Server(uvicorn.Config(
         app, host="0.0.0.0", port=port, log_level="warning"))]
     if tls_port > 0:
