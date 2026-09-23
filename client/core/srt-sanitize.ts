@@ -21,6 +21,10 @@
 /** 超长 cue 阈值：正常对话字幕时长 p90 ≈ 9s（PJAM-045 实测），30s ≈ 3×p90 */
 const LONG_CUE_MS = 30_000;
 
+// JavScribe 指纹 cue（srt 尾部 0 时长 cue + 单行 HTML 注释，见 serve core/finalize.py）。
+// 重排前摘除、输出时重挂尾部（理由同 web 版 srt_sanitizer.py）。
+const MARKER_PREFIX = "<!-- jav-scribe";
+
 const TS_LINE_RE = /^\s*(-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})\s*$/;
 
 /** '1:02:03,456'（可带负号）-> 毫秒（可为负） */
@@ -100,19 +104,22 @@ export function sanitizeSrtBytes(data: Uint8Array): Uint8Array {
       fixed++;
     }
   }
+  // 指纹 cue 在排序/重叠逻辑之前摘除（设计位置=尾部，见 MARKER_PREFIX 注释）
+  const marker = blocks.find((b) => b.text.trimStart().startsWith(MARKER_PREFIX)) ?? null;
+  const content = marker ? blocks.filter((b) => b !== marker) : blocks;
   // start 升序；同 start 时长 cue 在前（同起点重叠时长的被截/删，保留细粒度）
-  blocks.sort((a, b) => a.start - b.start || b.end - a.end);
+  content.sort((a, b) => a.start - b.start || b.end - a.end);
 
   // 防御二a：超长 cue（>30s）且区间内有其他 cue 起点 → 删除。
   // 排序后只需看相邻：前一个同 start（同起点组）或后一个 start 落在本条区间内。
   const keep: Block[] = [];
   let dropped = 0;
-  for (let i = 0; i < blocks.length; i++) {
-    const b = blocks[i];
+  for (let i = 0; i < content.length; i++) {
+    const b = content[i];
     const covered =
       b.end - b.start > LONG_CUE_MS &&
-      ((i > 0 && blocks[i - 1].start === b.start) ||
-        (i + 1 < blocks.length && blocks[i + 1].start < b.end));
+      ((i > 0 && content[i - 1].start === b.start) ||
+        (i + 1 < content.length && content[i + 1].start < b.end));
     if (covered) dropped++;
     else keep.push(b);
   }
@@ -137,6 +144,11 @@ export function sanitizeSrtBytes(data: Uint8Array): Uint8Array {
     const b = outBlocks[idx];
     const ts = b.newTs ?? `${msToTs(b.start)} --> ${msToTs(b.end)}`;
     out += `${idx + 1}\n${ts}\n${b.text}\n\n`;
+  }
+  if (marker) {
+    // 指纹重挂尾部：序号=内容 cue 数+1
+    const ts = `${msToTs(Math.max(0, marker.start))} --> ${msToTs(Math.max(0, marker.end))}`;
+    out += `${outBlocks.length + 1}\n${ts}\n${marker.text}\n\n`;
   }
   if (out === text) return data; // 完全合法（含已按序）：原样返回
   return new TextEncoder().encode(out);

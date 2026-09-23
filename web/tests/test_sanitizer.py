@@ -114,6 +114,46 @@ def test_overlap_idempotent() -> None:
     print("  test_overlap_idempotent OK")
 
 
+MARKER = "<!-- jav-scribe v0.1.7 | engine=server | job=x | ts | audio_sha1=f -->"
+
+
+def test_marker_stays_at_tail() -> None:
+    # 乱序 cue + 尾部指纹（serve 格式）→ 重排后指纹仍在尾部、序号最后
+    text = (
+        "1\n00:00:05,000 --> 00:00:08,000\n乙\n\n"
+        "2\n00:00:01,000 --> 00:00:04,000\n甲\n\n"
+        f"3\n00:00:00,000 --> 00:00:00,000\n{MARKER}\n"
+    )
+    out, _ = sanitize_srt_text(text)
+    assert out.index("甲") < out.index("乙") < out.index(MARKER), out
+    lines = [l for l in out.split("\n") if l.strip()]
+    assert lines[-1] == MARKER and lines[-3] == "3", out
+    print("  test_marker_stays_at_tail OK")
+
+
+def test_marker_not_eaten_by_zero_start_overlap() -> None:
+    # 回归：真实首 cue 从 0ms 开始时，指纹不得触发重叠截断把该 cue 删掉
+    text = (
+        "1\n00:00:00,000 --> 00:00:03,000\n开头句\n\n"
+        "2\n00:00:04,000 --> 00:00:06,000\n第二句\n\n"
+        f"3\n00:00:00,000 --> 00:00:00,000\n{MARKER}\n"
+    )
+    out, fixed = sanitize_srt_text(text)
+    assert "开头句" in out and "第二句" in out, out
+    assert fixed == 0, out
+    assert out.rstrip().split("\n")[-1] == MARKER, out
+    print("  test_marker_not_eaten_by_zero_start_overlap OK")
+
+
+def test_marker_only_file() -> None:
+    text = f"1\n00:00:00,000 --> 00:00:00,000\n{MARKER}\n"
+    out, fixed = sanitize_srt_text(text)
+    assert MARKER in out and fixed == 0, out
+    out2, _ = sanitize_srt_text(out)
+    assert out2 == out  # 幂等
+    print("  test_marker_only_file OK")
+
+
 if __name__ == "__main__":
     test_negative_start_clamped()
     test_valid_passthrough()
@@ -123,4 +163,7 @@ if __name__ == "__main__":
     test_long_isolated_kept()
     test_overlap_truncated()
     test_overlap_idempotent()
+    test_marker_stays_at_tail()
+    test_marker_not_eaten_by_zero_start_overlap()
+    test_marker_only_file()
     print("SANITIZER TESTS PASSED")

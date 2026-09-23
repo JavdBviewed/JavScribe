@@ -71,6 +71,23 @@ try {
     eq(sanitizeSrtBytes(enc(bad)), enc(bad), `passthrough: ${JSON.stringify(bad)}`);
   }
 
+  // 7. JavScribe 指纹 cue（尾部 0 时长 + HTML 注释）：重排后保持尾部；
+  //    内容首 cue 从 0ms 开始时不被重叠逻辑截删
+  const MK = "<!-- jav-scribe v0.1.7 | engine=server | job=x | audio_sha1=f -->";
+  const MR =
+    "1\n00:00:05,000 --> 00:00:08,000\n乙\n\n" +
+    "2\n00:00:01,000 --> 00:00:04,000\n甲\n\n" +
+    `3\n00:00:00,000 --> 00:00:00,000\n${MK}\n`;
+  const oMr = dec(sanitizeSrtBytes(enc(MR)));
+  assert.ok(oMr.indexOf("甲") < oMr.indexOf("乙") && oMr.indexOf("乙") < oMr.indexOf(MK), "marker stays at tail");
+  const MR2 =
+    "1\n00:00:00,000 --> 00:00:03,000\n开头句\n\n" +
+    "2\n00:00:04,000 --> 00:00:06,000\n第二句\n\n" +
+    `3\n00:00:00,000 --> 00:00:00,000\n${MK}\n`;
+  const oMr2 = dec(sanitizeSrtBytes(enc(MR2)));
+  assert.ok(oMr2.includes("开头句"), "zero-start cue not eaten");
+  assert.ok(oMr2.trimEnd().endsWith(MK), "marker at tail after re-sort");
+
   console.log("  srt-sanitize unit tests PASSED");
 } finally {
   await rm(tmp, { recursive: true, force: true });

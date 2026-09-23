@@ -32,6 +32,12 @@ LogFn = Callable[[str], None]
 # 超长 cue 阈值：正常对话字幕时长 p90 ≈ 9s（PJAM-045 实测），30s ≈ 3×p90
 LONG_CUE_MS = 30_000
 
+# JavScribe 指纹 cue（srt 尾部 0 时长 cue + 单行 HTML 注释，
+# 见 jav_scribe/core/finalize.py append_javscribe_marker）。重排时必须摘除
+# 并保持在尾部：0 起点会被排序提到队首变成 cue #1（注释行被播放器/编辑
+# 器当 cue 文本），且真实首 cue 从 0ms 开始时会被重叠逻辑截成零长误删。
+MARKER_PREFIX = "<!-- jav-scribe"
+
 
 _TS = r"(?:-?\d{1,2}:\d{2}:\d{2}[,.]\d{3})"
 TS_LINE_RE = re.compile(rf"^\s*({_TS})\s*-->\s*({_TS})\s*$")
@@ -102,6 +108,14 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
     except ValueError as ex:
         return text, 0
 
+    # 指纹 cue 在排序/重叠逻辑之前摘除（设计位置=尾部，见 MARKER_PREFIX 注释）
+    marker = None
+    for b in list(blocks):
+        if b["text"].lstrip().startswith(MARKER_PREFIX):
+            marker = b
+            blocks.remove(b)
+            break
+
     fixed = 0
     for b in blocks:
         new_start = max(0, b["start"])
@@ -113,7 +127,7 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
 
     # start 升序；同 start 时长 cue 在前（同起点重叠时长的被截/删，保留细粒度）
     blocks.sort(key=lambda b: (b["start"], -b["end"]))
-    total = len(blocks)
+    total = len(blocks) + (1 if marker is not None else 0)
 
     dropped = 0
     # 防御二a：超长 cue（>30s）且区间内有其他 cue 起点 → 删除。
@@ -156,6 +170,9 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
     for idx, b in enumerate(blocks, 1):
         ts = b.get("new_ts", f"{_ms_to_ts(b['start'])} --> {_ms_to_ts(b['end'])}")
         out.append(f"{idx}\n{ts}\n{b['text']}\n\n")
+    if marker is not None:  # 指纹重挂尾部：序号=内容 cue 数+1
+        mts = f"{_ms_to_ts(max(0, marker['start']))} --> {_ms_to_ts(max(0, marker['end']))}"
+        out.append(f"{len(blocks) + 1}\n{mts}\n{marker['text']}\n\n")
     new_text = "".join(out)
     if new_text == text:
         return text, 0
