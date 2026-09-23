@@ -20,6 +20,10 @@ class TaskStatus(Enum):
     CANCELED = "canceled"
 
 
+# 终态集合：done/skipped/error/canceled——任务（job）不再变化。
+TERMINAL_STATUSES = (TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.ERROR, TaskStatus.CANCELED)
+
+
 class TaskPhase(Enum):
     QUEUED = "queued"
     RESTORING = "restoring"
@@ -89,7 +93,8 @@ class Job:
 
     @property
     def done(self) -> bool:
-        return all(t.status in (TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.CANCELED) for t in self.files)
+        # 全终态（含 error）才算结束——全失败任务也要显示「已完成/失败」，不再卡 running
+        return all(t.status in TERMINAL_STATUSES for t in self.files)
 
     @property
     def finished_ts(self) -> float | None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -36,7 +37,7 @@ from .log_parser import LogParser
 from .polish import PolishConfig, polish_srt
 from .proc_runner import ProcRunner
 from .rtf import RtfHistory
-from .task import Job, Task, TaskPhase, TaskStatus, new_job_id
+from .task import TERMINAL_STATUSES, Job, Task, TaskPhase, TaskStatus, new_job_id
 
 LogFn = Callable[[str], None]
 
@@ -50,6 +51,51 @@ LIVE_PHASES: dict[str, tuple[float, float, float | None, str]] = {
     "transcribing": (0.40, 0.95, None, "转写中"),
     "finalizing": (0.95, 1.00, 20.0, "合并写入字幕"),
 }
+
+
+# ---------------------------------------------------------------------------
+# 任务历史持久化（<data_dir>/jobs.json）
+# serve 重建/重启会丢内存任务表，历史任务（含已完成）从此文件恢复。
+# 只恢复「全终态」任务——未完成任务的 worker 进程已不存在，恢复会误导用户，
+# 由用户重新提交（客户端 uploads.json 保留本地提交/回写跟踪）。
+# ---------------------------------------------------------------------------
+JOBS_HISTORY_NAME = "jobs.json"
+JOBS_HISTORY_MAX = 500  # 磁盘上限（内存表仍为 200，save 时一并修剪）
+
+
+def job_from_dict(d: dict) -> "Job | None":
+    """jobs.json 条目 → Job。字段缺失/非法返回 None（跳过该条，不炸启动）。"""
+    try:
+        files: list[Task] = []
+        for f in d.get("files", []):
+            files.append(
+                Task(
+                    path=Path(str(f.get("path", ""))),
+                    status=TaskStatus(str(f.get("status", "pending"))),
+                    phase=TaskPhase(str(f.get("phase", "queued"))),
+                    progress=float(f.get("progress", 0.0) or 0.0),
+                    message=str(f.get("message", "") or ""),
+                    output_files=[Path(str(x)) for x in f.get("output_files", [])],
+                    duration_s=f.get("duration_s"),
+                    speech_s=f.get("speech_s"),
+                    position_s=f.get("position_s"),
+                    started=f.get("started"),
+                    finished=f.get("finished"),
+                )
+            )
+        if not files or "id" not in d:
+            return None
+        return Job(
+            id=str(d["id"]),
+            files=files,
+            created=float(d.get("created") or time.time()),
+            finished=d.get("finished"),
+            source_kind=str(d.get("source_kind", "local")),
+            label=str(d.get("label", "") or ""),
+            cancel_requested=bool(d.get("cancel_requested", False)),
+        )
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 class Engine:
@@ -76,6 +122,10 @@ class Engine:
         self._force_embedded: set[Path] = set()
         self._inflight_lock = threading.Lock()
         self._rtf = RtfHistory(Path(data_dir) / "rtf-history.json") if data_dir else None
+        # 任务历史持久化：serve 重建后「已完成」任务仍在任务表可见
+        self._jobs_path = Path(data_dir) / JOBS_HISTORY_NAME if data_dir else None
+        self._jobs_lock = threading.Lock()
+        self._restore_job_history()
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
         self._live_thread.start()
 
@@ -114,6 +164,7 @@ class Engine:
         self.jobs.append(job)
         if len(self.jobs) > 200:
             self.jobs.pop(0)
+        self._save_jobs()
         if run_in_thread:
             if self._job_thread is not None and self._job_thread.is_alive():
                 # queue behind the running job
@@ -181,6 +232,7 @@ class Engine:
                 pass
             self._cancel_pending_tasks(job, "已取消")
             job.finished = time.time()
+            self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（排队中，未占用推理资源）")
             return "canceled"
         self.log(f"[engine] 任务 {job.id} 收到取消请求（运行中，将在检查点中止）")
@@ -196,6 +248,42 @@ class Engine:
                 t.finished = now
                 t.eta_s = None
 
+    def _restore_job_history(self) -> None:
+        if self._jobs_path is None or not self._jobs_path.exists():
+            return
+        try:
+            raw = json.loads(self._jobs_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            self.log(f"[engine] 任务历史读取失败（忽略）: {e}")
+            return
+        if not isinstance(raw, list):
+            return
+        restored = 0
+        for d in raw[-JOBS_HISTORY_MAX:]:
+            if not isinstance(d, dict):
+                continue
+            job = job_from_dict(d)
+            if job is None or not job.done:
+                continue  # 未完成任务不恢复（worker 已随进程消亡，重新提交即可）
+            self.jobs.append(job)
+            restored += 1
+        if self.jobs:
+            self.jobs = self.jobs[-200:]
+        if restored:
+            self.log(f"[engine] 已恢复历史任务 {restored} 个（{self._jobs_path.name}）")
+
+    def _save_jobs(self) -> None:
+        if self._jobs_path is None:
+            return
+        with self._jobs_lock:
+            try:
+                payload = [j.to_dict(detail=True) for j in self.jobs[-JOBS_HISTORY_MAX:]]
+                tmp = self._jobs_path.with_name(self._jobs_path.name + ".tmp")
+                tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, self._jobs_path)
+            except OSError as e:
+                self.log(f"[engine] 任务历史写入失败（忽略）: {e}")
+
     def stop(self) -> None:
         self._stop_evt.set()
         if self._runner is not None:
@@ -209,6 +297,7 @@ class Engine:
             # 交接窗口：drain 弹出后、开跑前被取消 → 立即收尾，不占推理资源
             self._cancel_pending_tasks(job, "已取消")
             job.finished = time.time()
+            self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（开跑前）")
             self._drain_pending()
             return
@@ -217,6 +306,7 @@ class Engine:
             self._pipeline(job)
         finally:
             job.finished = time.time()
+            self._save_jobs()
             self.log(f"[engine] ===== 任务 {job.id} 结束 =====")
             self._drain_pending()
 

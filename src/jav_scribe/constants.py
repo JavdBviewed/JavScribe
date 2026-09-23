@@ -1,6 +1,6 @@
 APP_NAME = "JavScribe"
 APP_ORG = "JavScribe"
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.2.0"
 
 AUDIO_EXTS = ["mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "mka"]
 VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"]
