@@ -147,7 +147,9 @@ def finalize_one(
 #   - 超长 cue（>30s）且区间内有其他 cue 起点 -> 删除（VAD 全量覆盖 fallback 产物）
 #   - 相邻 cue 重叠        -> 前一条 end 截到后一条 start（截成零长则删除）
 #   - 按 (start 升序, end 降序) 稳定排序并重编号
-# 只改时间戳、不动文本（删除除外：被删 cue 是 fallback 冗余产物）；
+#   - 重复幻觉折叠（collapse_repeat_loops）: whisper 在低信息音频（JAV 喘息/
+#     噪声占比高）会把同一短语复读成串，只折叠「连续」重复，时间码不动
+# 时间戳只按上述规则修正，文本只动重复幻觉（删除除外：被删 cue 是 fallback 冗余产物）；
 # 无法完整解析的文件原样保留（宁可不动，不可改坏）。
 #
 # 超长 cue 背景（2026-09-09 PJAM-045 取证，任务线 09-09-srt-overlap-long-cues）：
@@ -221,6 +223,141 @@ def _parse_srt_blocks(text: str) -> list[dict]:
     return blocks
 
 
+# ---------------------------------------------------------------------------
+# ASR 重复幻觉折叠（repetition-loop collapse）
+#
+# whisper 系模型在低信息音频（喘息/噪声/音乐）上会复读同一短语。2026-09-23
+# 取证（10 个存量生成 srt 中 9 个命中，最长单 cue 复读 68 次）两种形态：
+#   1. 无空格连写: "要射了吗？要射了吗？要射出来了吗？要射了吗？..."（一个 token）
+#   2. 空格分隔:   "要去了 要去了 要去了 要去了" / "来吧来吧 把鸡巴插进来" x3
+# 规则（保守——只碰「连续」重复；正常对话里分散的重复如「同学」x5 不动）：
+#   a. token 连跑: 同一 k-token(k∈1..3)模式连续重复 R>=3 次 -> 只留首份
+#   b. token 内精确: token = U^N(N>=3,|U|>=2) 或 U^N+U 前缀 -> 只留首份 U
+#   c. token 内主导周期: |norm|>=12 且 norm[0:p](2<=p<=10) 非重叠出现 >=4 次
+#      且覆盖 >=40% -> 只留首个分句（语气词扩展 <=4 字）
+# 纯文本、幂等、不动时间码；HTML 注释行（指纹 cue）跳过。
+# ---------------------------------------------------------------------------
+
+_PUNCT_RE = re.compile(r"[^\w]", re.UNICODE)
+_PARTICLES = set("吗呢吧啊哦么了呀嘛")
+_TERMINAL = set("？。！~～")
+_MIN_LOOP_TOKEN = 12  # 规则 c 的最小 token 长度（norm 后）
+
+
+def _norm_tok(tok: str) -> str:
+    """token 归一化：去标点/空白、casefold（仅用于比较）。"""
+    return _PUNCT_RE.sub("", tok).casefold()
+
+
+def _first_unit_display(tok: str, p: int) -> str:
+    """首份单元的展示文本：norm 前 p 字对应的原文 + 语气词扩展（<=4 字，
+    吃到句末标点为止），使 "要射了吗？要射了吗？..." 折成 "要射了吗？" 而非 "要射"。"""
+    norm_idx = 0
+    q = -1
+    for i, ch in enumerate(tok):
+        if not _PUNCT_RE.match(ch):
+            norm_idx += 1
+            if norm_idx == p:
+                q = i
+                break
+    if q < 0:
+        return tok
+    ext = 0
+    while q + 1 < len(tok) and ext < 4:
+        c = tok[q + 1]
+        if c in _TERMINAL:
+            q += 1
+            ext += 1
+            break
+        if c in _PARTICLES:
+            q += 1
+            ext += 1
+            continue
+        break
+    return tok[: q + 1]
+
+
+def _collapse_in_token(tok: str) -> str:
+    """规则 b/c：token 内重复折叠。"""
+    norm = _norm_tok(tok)
+    L = len(norm)
+    if L < 6:
+        return tok
+    for p in range(2, L // 3 + 1):  # 精确 U^N / U^N+前缀
+        u = norm[:p]
+        n_full, r = divmod(L, p)
+        if n_full >= 3 and norm == u * n_full + u[:r]:
+            return _first_unit_display(tok, p)
+    if L >= _MIN_LOOP_TOKEN:  # 主导周期（容忍变体插桩：要射出来了吗）
+        for p in range(2, min(10, L) + 1):
+            u = norm[:p]
+            cnt, i = 0, 0
+            while i + p <= L:
+                if norm[i : i + p] == u:
+                    cnt += 1
+                    i += p
+                else:
+                    i += 1
+            if cnt >= 4 and cnt * p >= 0.4 * L:
+                return _first_unit_display(tok, p)
+    return tok
+
+
+def _collapse_token_runs(tokens: list[str]) -> list[str]:
+    """规则 a：连续 k-token 模式复读 R>=3 -> 只留首份。"""
+    n = len(tokens)
+    if n < 3:
+        return tokens
+    norms = [_norm_tok(t) for t in tokens]
+    out: list[str] = []
+    i = 0
+    while i < n:
+        best = None  # (R*k, R, k)
+        for k in (1, 2, 3):
+            if i + k > n:
+                continue
+            pat = norms[i : i + k]
+            if any(not x for x in pat):
+                continue
+            R = 1
+            j = i + k
+            while j + k <= n and all(norms[j + m] == pat[m] for m in range(k)):
+                R += 1
+                j += k
+            if R >= 3:
+                score = (R * k, R)
+                if best is None or score > best[0]:
+                    best = (score, R, k)
+        if best is not None:
+            _, R, k = best
+            out.extend(tokens[i : i + k])
+            i += R * k
+        else:
+            out.append(tokens[i])
+            i += 1
+    return out
+
+
+def collapse_repeat_loops(text: str) -> str:
+    """折叠 SRT cue 文本里的 ASR 重复幻觉。逐行处理，幂等；无变化原样返回。"""
+    lines = text.split("\n")
+    out_lines = []
+    changed = False
+    for ln in lines:
+        if ln.lstrip().startswith("<!--"):  # 指纹注释行不碰
+            out_lines.append(ln)
+            continue
+        toks = ln.split()
+        new_toks = _collapse_token_runs(toks)
+        new_toks = [_collapse_in_token(t) for t in new_toks]
+        if new_toks != toks:
+            changed = True
+            out_lines.append(" ".join(new_toks))
+        else:
+            out_lines.append(ln)
+    return "\n".join(out_lines) if changed else text
+
+
 def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]:
     """返回 (清洗后的 srt 文本, 修正的 cue 数)。完全合法的文件原样返回、计数 0。"""
     logf = log or (lambda _s: None)
@@ -281,18 +418,29 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
     blocks = out_blocks
 
     out = []
+    collapsed = 0
     for idx, b in enumerate(blocks, 1):
         ts = b.get("new_ts", f"{_ms_to_ts(b['start'])} --> {_ms_to_ts(b['end'])}")
-        out.append(f"{idx}\n{ts}\n{b['text']}\n\n")
+        body = collapse_repeat_loops(b["text"])
+        if body != b["text"]:
+            collapsed += 1
+            logf(
+                f"[sanitize] 第{idx}条重复幻觉折叠: {b['text'].splitlines()[0][:40]}"
+            )
+        out.append(f"{idx}\n{ts}\n{body}\n\n")
     new_text = "".join(out)
     if new_text == text:
         return text, 0
     for idx, b in enumerate(blocks, 1):
         if "new_ts" in b:
             logf(f"[sanitize] 第{idx}条时间戳修正: {b['orig_ts']} → {b['new_ts']}")
-    if fixed:
-        logf(f"[sanitize] 共修正 {fixed}/{total} 条 cue（负值/倒挂/重叠截断，另删除 fallback 长 cue {dropped} 条）")
-    return new_text, fixed
+    if fixed or collapsed:
+        logf(
+            f"[sanitize] 共修正 {fixed + collapsed}/{total} 条 cue"
+            f"（时间戳/重叠修正 {fixed}，重复幻觉折叠 {collapsed}，"
+            f"另删除 fallback 长 cue {dropped} 条）"
+        )
+    return new_text, fixed + collapsed
 
 
 def sanitize_srt_file(path: Path, log: Optional[LogFn] = None) -> int:

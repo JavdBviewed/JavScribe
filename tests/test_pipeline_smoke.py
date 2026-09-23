@@ -330,7 +330,11 @@ def test_finalize_skip_removes_raw() -> None:
 # SRT 防御性清洗（负时间戳/乱序兜底）
 # ---------------------------------------------------------------------------
 
-from jav_scribe.core.finalize import sanitize_srt_file, sanitize_srt_text  # noqa: E402
+from jav_scribe.core.finalize import (  # noqa: E402
+    collapse_repeat_loops,
+    sanitize_srt_file,
+    sanitize_srt_text,
+)
 
 # 取证样本：PJAM-045 首部 2 条负 start（faster-whisper translate 首段无起始时间戳）
 EVIDENCE_HEAD = (
@@ -480,6 +484,48 @@ def test_sanitize_overlap_idempotent() -> None:
     print("  test_sanitize_overlap_idempotent OK")
 
 
+def test_collapse_token_runs() -> None:
+    """token 间连续复读 R>=3 → 只留首份；分散重复（正常对话）不动。"""
+    assert collapse_repeat_loops("辛苦了 辛苦了 辛苦了 辛苦了") == "辛苦了"
+    assert collapse_repeat_loops("要去了 要去了 要去了 要去了 要去了") == "要去了"
+    # 双 token 模式 x3
+    assert (
+        collapse_repeat_loops("来吧来吧 把鸡巴插进来 来吧来吧 把鸡巴插进来 来吧来吧 把鸡巴插进来")
+        == "来吧来吧 把鸡巴插进来"
+    )
+    # 分散重复（非连续）不动
+    t = "是同班同学吗？同班同学 同年级的同学 我们是排球部的同学"
+    assert collapse_repeat_loops(t) == t
+    # 仅连续 2 次 → 不动（R<3）
+    assert collapse_repeat_loops("不要 不要") == "不要 不要"
+    print("  test_collapse_token_runs OK")
+
+
+def test_collapse_in_token() -> None:
+    """无空格连写：精确 U^N 与主导周期（容忍变体插桩）。"""
+    assert collapse_repeat_loops("又要去了又要去了又要去了又要去了") == "又要去了"
+    t = "要射了吗？要射了吗？要射出来了吗？" + "要射了吗？" * 26  # 取证样本形态
+    assert collapse_repeat_loops(t) == "要射了吗？", collapse_repeat_loops(t)
+    print("  test_collapse_in_token OK")
+
+
+def test_collapse_srt_integration_idempotent() -> None:
+    """sanitize 集成：重复折叠生效、指纹行不动、二跑幂等。"""
+    text = (
+        "1\n00:00:01,000 --> 00:00:03,000\n辛苦了 辛苦了 辛苦了 辛苦了 辛苦了\n\n"
+        "2\n00:00:04,000 --> 00:00:05,000\n要射了吗？要射了吗？要射出来了吗？要射了吗？要射了吗？\n\n"
+        "3\n00:00:00,000 --> 00:00:00,000\n<!-- jav-scribe v0.1.7 | engine=server -->\n"
+    )
+    new1, fixed1 = sanitize_srt_text(text)
+    assert fixed1 == 2, (fixed1, new1)
+    assert new1.count("辛苦了") == 1
+    assert new1.count("要射了吗") == 1 and "要射出来了吗" not in new1
+    assert "<!-- jav-scribe v0.1.7 | engine=server -->" in new1
+    new2, fixed2 = sanitize_srt_text(new1)
+    assert fixed2 == 0 and new2 == new1
+    print("  test_collapse_srt_integration_idempotent OK")
+
+
 def test_sanitize_file_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / "a.srt"
@@ -566,6 +612,9 @@ if __name__ == "__main__":
     test_sanitize_same_start_keeps_finer()
     test_sanitize_same_start_short_truncates_to_drop()
     test_sanitize_overlap_idempotent()
+    test_collapse_token_runs()
+    test_collapse_in_token()
+    test_collapse_srt_integration_idempotent()
     test_run_finalize_sanitizes_negative()
     test_watch_stability()
     test_batch_two_files_no_skip_overwrite()
