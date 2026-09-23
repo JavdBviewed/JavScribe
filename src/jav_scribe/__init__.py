@@ -1,5 +1,5 @@
 APP_NAME = "JavScribe"
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 from .cli import main  # noqa: E402
 

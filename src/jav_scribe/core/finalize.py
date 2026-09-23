@@ -149,13 +149,16 @@ def finalize_one(
 #   - 按 (start 升序, end 降序) 稳定排序并重编号
 #   - 重复幻觉折叠（collapse_repeat_loops）: whisper 在低信息音频（JAV 喘息/
 #     噪声占比高）会把同一短语复读成串，只折叠「连续」重复，时间码不动
-# 时间戳只按上述规则修正，文本只动重复幻觉（删除除外：被删 cue 是 fallback 冗余产物）；
+#   - 长 cue 智能切分（_split_cue）: 单条文本 >22 字（连续独白产出大字墙）按
+#     句末 > 分句 > 空格 > 硬切 拆段，时长按字数比例分配，原 start/end 不变
+# 时间戳只按上述规则修正，文本只动重复幻觉与长 cue 切分（删除除外：被删 cue 是 fallback 冗余产物）；
 # 无法完整解析的文件原样保留（宁可不动，不可改坏）。
 #
 # 超长 cue 背景（2026-09-09 PJAM-045 取证，任务线 09-09-srt-overlap-long-cues）：
 # 引擎 VAD 空结果时走「整段覆盖」fallback，产出 chunk 全长 + 一两句的长 cue，
 # 与同区域细粒度 cue 时间重叠（两路分段流），播放器表现为旧文本滞留叠压。
-# 孤立长 cue（区间内无其他 cue 起点，如 40s 连续独白）是该时段唯一字幕，保留。
+# 孤立长 cue（区间内无其他 cue 起点，如 40s 连续独白）是该时段唯一字幕，保留，
+# v0.1.9 起再按字数拆成播放器可读的短段（_split_cue，幂等）。
 # ---------------------------------------------------------------------------
 
 # 超长 cue 阈值：正常对话字幕时长 p90 ≈ 9s（PJAM-045 实测），30s ≈ 3×p90
@@ -358,6 +361,115 @@ def collapse_repeat_loops(text: str) -> str:
     return "\n".join(out_lines) if changed else text
 
 
+# ---------------------------------------------------------------------------
+# 长 cue 智能切分
+#
+# 引擎 VAD 分段在连续独白/快语速上会产出 10~30s 单条 cue，播放器侧是一整块
+# 大字墙（2026-09-23 取证：300MIUM-1266 09:17-09:49 32s 82 字、09:49-10:12
+# 23s 82 字）。规则：
+#   触发: body 字符数 > SPLIT_MAX_CHARS（含空格）。纯字数触发保证幂等——
+#     拆完后每段 <=22 字，二跑不会再触发（时长不参与触发，避免二跑再拆）。
+#   边界优先级: 句末（。！？!?~～）> 分句（，、,;）> 空格 > 硬切
+#   时间: [start, end] 按字数比例分配，保留原 start/end，子 cue 零重叠且
+#     严格递增（放不下则放弃切分，保持原条）
+# 仅处理单行 cue；0 时长指纹 cue / <2s cue 不切。
+# ---------------------------------------------------------------------------
+
+SPLIT_MAX_CHARS = 22
+SPLIT_MIN_DUR_MS = 2_000
+_SPLIT_END = set("。！？!?~～")
+_SPLIT_MID = "，、,;；"
+
+
+def _subsplit_long_seg(text: str) -> list[str]:
+    """单句超限时按 分句 > 空格 > 硬切 继续切，每段 <= SPLIT_MAX_CHARS。"""
+    out: list[str] = []
+    while len(text) > SPLIT_MAX_CHARS:
+        window = text[:SPLIT_MAX_CHARS]
+        cut = -1
+        for i in range(len(window) - 1, 3, -1):  # 避免首段 <4 字
+            if window[i] in _SPLIT_MID or window[i] == " ":
+                cut = i + 1
+                break
+        if cut <= 3:
+            cut = SPLIT_MAX_CHARS  # 完全无边界，硬切
+        out.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        out.append(text)
+    return out
+
+
+def _split_cue(
+    body: str, start_ms: int, end_ms: int
+) -> tuple[list[str], list[tuple[int, int]]]:
+    """超限的单条 cue body 拆成多个子 cue。
+
+    返回 (子文本列表, 子时间戳列表 [(s_ms, e_ms), ...])；不切则
+    ([body], [(start_ms, end_ms)])。幂等：子文本字数 <= SPLIT_MAX_CHARS，
+    二次调用不会再拆。"""
+    if (
+        "\n" in body
+        or len(body) <= SPLIT_MAX_CHARS
+        or end_ms - start_ms < SPLIT_MIN_DUR_MS
+    ):
+        return [body], [(start_ms, end_ms)]
+
+    # 1) 句末标点先切（标点随前段）
+    segs: list[str] = []
+    buf = ""
+    for ch in body:
+        buf += ch
+        if ch in _SPLIT_END:
+            segs.append(buf)
+            buf = ""
+    if buf:
+        segs.append(buf)
+
+    # 2) 单句仍超限按 分句/空格/硬切 再切
+    parts = [p for s in segs for p in _subsplit_long_seg(s)]
+
+    # 3) 相邻短段拼到上限，提高显示密度。两端均无标点时以空格连接——
+    #    既避免 "…按摩一"+"样的…" 硬切段粘连，也让回拼长度核算真实
+    #    （空格边界切割会吃掉一个空格，不计回会超限回拼、白切）。
+    packed: list[str] = []
+    buf = ""
+    _punct = _SPLIT_END | set(_SPLIT_MID)
+    for s in (p.strip() for p in parts):
+        if not s:
+            continue
+        if not buf:
+            buf = s
+            continue
+        sep = ""
+        if buf[-1] not in _punct and s[0] not in _punct:
+            sep = " "
+        if len(buf) + len(sep) + len(s) <= SPLIT_MAX_CHARS:
+            buf += sep + s
+        else:
+            packed.append(buf)
+            buf = s
+    if buf:
+        packed.append(buf)
+    if len(packed) < 2:
+        return [body], [(start_ms, end_ms)]
+
+    # 4) 时长按字数比例分配，保留原 start/end
+    total = sum(len(p) for p in packed)
+    bounds = [start_ms]
+    acc = 0
+    for p in packed[:-1]:
+        acc += len(p)
+        bounds.append(round(start_ms + (end_ms - start_ms) * acc / total))
+    bounds.append(end_ms)
+    for i in range(1, len(bounds)):  # 强制严格递增
+        if bounds[i] <= bounds[i - 1]:
+            bounds[i] = bounds[i - 1] + 1
+    if bounds[-2] >= end_ms:  # 放不下，放弃切分
+        return [body], [(start_ms, end_ms)]
+    return packed, [(bounds[i], bounds[i + 1]) for i in range(len(packed))]
+
+
 def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]:
     """返回 (清洗后的 srt 文本, 修正的 cue 数)。完全合法的文件原样返回、计数 0。"""
     logf = log or (lambda _s: None)
@@ -419,7 +531,10 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
 
     out = []
     collapsed = 0
-    for idx, b in enumerate(blocks, 1):
+    split_cnt = 0
+    idx = 0
+    for b in blocks:
+        idx += 1
         ts = b.get("new_ts", f"{_ms_to_ts(b['start'])} --> {_ms_to_ts(b['end'])}")
         body = collapse_repeat_loops(b["text"])
         if body != b["text"]:
@@ -427,20 +542,32 @@ def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]
             logf(
                 f"[sanitize] 第{idx}条重复幻觉折叠: {b['text'].splitlines()[0][:40]}"
             )
-        out.append(f"{idx}\n{ts}\n{body}\n\n")
+        sub_bodies, sub_ts = _split_cue(body, b["start"], b["end"])
+        if len(sub_bodies) > 1:
+            split_cnt += 1
+            logf(
+                f"[sanitize] 第{idx}条长 cue 切分 {len(sub_bodies)} 段"
+                f"（{(b['end'] - b['start']) / 1000:.1f}s/{len(body)}字）: {body[:30]}"
+            )
+            for n, (sb, (s, e)) in enumerate(zip(sub_bodies, sub_ts), idx):
+                out.append(f"{n}\n{_ms_to_ts(s)} --> {_ms_to_ts(e)}\n{sb}\n\n")
+            idx += len(sub_bodies) - 1
+        else:
+            out.append(f"{idx}\n{ts}\n{body}\n\n")
     new_text = "".join(out)
     if new_text == text:
         return text, 0
     for idx, b in enumerate(blocks, 1):
         if "new_ts" in b:
             logf(f"[sanitize] 第{idx}条时间戳修正: {b['orig_ts']} → {b['new_ts']}")
-    if fixed or collapsed:
+    changed_total = fixed + collapsed + split_cnt
+    if changed_total:
         logf(
-            f"[sanitize] 共修正 {fixed + collapsed}/{total} 条 cue"
+            f"[sanitize] 共修正 {changed_total}/{total} 条 cue"
             f"（时间戳/重叠修正 {fixed}，重复幻觉折叠 {collapsed}，"
-            f"另删除 fallback 长 cue {dropped} 条）"
+            f"长 cue 切分 {split_cnt}，另删除 fallback 长 cue {dropped} 条）"
         )
-    return new_text, fixed + collapsed
+    return new_text, changed_total
 
 
 def sanitize_srt_file(path: Path, log: Optional[LogFn] = None) -> int:

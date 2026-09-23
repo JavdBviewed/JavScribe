@@ -331,6 +331,7 @@ def test_finalize_skip_removes_raw() -> None:
 # ---------------------------------------------------------------------------
 
 from jav_scribe.core.finalize import (  # noqa: E402
+    _split_cue,
     collapse_repeat_loops,
     sanitize_srt_file,
     sanitize_srt_text,
@@ -526,6 +527,58 @@ def test_collapse_srt_integration_idempotent() -> None:
     print("  test_collapse_srt_integration_idempotent OK")
 
 
+def test_split_cue_units() -> None:
+    """切分单元：边界优先级、零重叠分配、不切条件、幂等（二跑不拆）。"""
+    # 取证形态：32s 82 字（300MIUM-1266 09:17）
+    body = (
+        "诶 感觉很棒呢不不不 我想要听你具体说说怎么做的感觉像是按摩一样的感觉油按摩？"
+        "对对对油按摩然后就变成那种感觉这样的感觉真不错啊但是不是会因人而异吗？我自己也觉得不错"
+    )
+    parts, intervals = _split_cue(body, 0, 32200)
+    assert len(parts) >= 2
+    assert all(len(p) <= 22 for p in parts)
+    assert "".join(parts) and sum(len(p) for p in parts) <= len(body)
+    assert intervals[0][0] == 0 and intervals[-1][1] == 32200
+    for (s1, e1), (s2, _e2) in zip(intervals, intervals[1:]):
+        assert s2 == e1 and s2 > s1  # 零重叠且严格递增
+    # 无标点 + 短时长（<2s）→ 不切
+    p, i = _split_cue("字" * 30, 0, 1500)
+    assert p == ["字" * 30] and i == [(0, 1500)]
+    # 短 cue → 不切
+    p, i = _split_cue("超级舒服的", 0, 1760)
+    assert p == ["超级舒服的"] and i == [(0, 1760)]
+    # 空格分隔 23 字（取证形态 10:13）→ 2 段
+    p, i = _split_cue("好恶心 被说了很恶心的事呢 太弱了吧 太弱了吧", 0, 7960)
+    assert p == ["好恶心 被说了很恶心的事呢 太弱了吧", "太弱了吧"], p
+    # 幂等：切完的段二跑不拆
+    for part, (s, e) in zip(parts, intervals):
+        assert _split_cue(part, s, e) == ([part], [(s, e)])
+    print("  test_split_cue_units OK")
+
+
+def test_sanitize_split_long_cue_idempotent() -> None:
+    """sanitize 集成：孤立长 cue 被切分，原 start/end 保留，指纹不动，二跑幂等。"""
+    text = (
+        "1\n00:09:17,080 --> 00:09:49,280\n"
+        "诶 感觉很棒呢不不不 我想要听你具体说说怎么做的感觉像是按摩一样的感觉油按摩？"
+        "对对对油按摩然后就变成那种感觉这样的感觉真不错啊但是不是会因人而异吗？我自己也觉得不错\n\n"
+        "2\n00:09:49,280 --> 00:09:51,040\n超级舒服的\n\n"
+        "3\n00:00:00,000 --> 00:00:00,000\n<!-- jav-scribe v0.1.9 | engine=server -->\n"
+    )
+    new1, fixed1 = sanitize_srt_text(text)
+    assert fixed1 == 1, (fixed1, new1)  # 仅 1 条长 cue 切分
+    blocks = _parse_back(new1)
+    assert blocks[0] == (0, 0)  # 指纹 cue（start=0 排首）
+    assert blocks[1][0] == 557080  # 首段保留原 start
+    assert blocks[-2][1] == 589280  # 末段保留原 end
+    assert blocks[-1] == (589280, 591040)  # 原第 2 条不变
+    assert len(blocks) >= 5  # 32s 大 cue 至少切成 4 段
+    assert "<!-- jav-scribe v0.1.9 | engine=server -->" in new1
+    new2, fixed2 = sanitize_srt_text(new1)
+    assert fixed2 == 0 and new2 == new1
+    print("  test_sanitize_split_long_cue_idempotent OK")
+
+
 def test_sanitize_file_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / "a.srt"
@@ -615,6 +668,8 @@ if __name__ == "__main__":
     test_collapse_token_runs()
     test_collapse_in_token()
     test_collapse_srt_integration_idempotent()
+    test_split_cue_units()
+    test_sanitize_split_long_cue_idempotent()
     test_run_finalize_sanitizes_negative()
     test_watch_stability()
     test_batch_two_files_no_skip_overwrite()
