@@ -236,8 +236,9 @@ def _parse_srt_blocks(text: str) -> list[dict]:
 # 规则（保守——只碰「连续」重复；正常对话里分散的重复如「同学」x5 不动）：
 #   a. token 连跑: 同一 k-token(k∈1..3)模式连续重复 R>=3 次 -> 只留首份
 #   b. token 内精确: token = U^N(N>=3,|U|>=2) 或 U^N+U 前缀 -> 只留首份 U
-#   c. token 内主导周期: |norm|>=12 且 norm[0:p](2<=p<=10) 非重叠出现 >=4 次
-#      且覆盖 >=40% -> 只留首个分句（语气词扩展 <=4 字）
+#   c. token 内主导周期: |norm|>=12 且 norm[o:o+p](2<=p<=10, 前导 0<=o<=8)
+#      非重叠出现 >=4 次且覆盖 >=40% -> 只留 前导+首个环单元（语气词扩展 <=4 字）
+#      （o>0 容忍首句变体："要射了吗？"+"要射出来了吗？"xN）
 # 纯文本、幂等、不动时间码；HTML 注释行（指纹 cue）跳过。
 # ---------------------------------------------------------------------------
 
@@ -252,15 +253,15 @@ def _norm_tok(tok: str) -> str:
     return _PUNCT_RE.sub("", tok).casefold()
 
 
-def _first_unit_display(tok: str, p: int) -> str:
-    """首份单元的展示文本：norm 前 p 字对应的原文 + 语气词扩展（<=4 字，
+def _first_units_display(tok: str, norm_end: int) -> str:
+    """norm 前 norm_end 字对应的原文展示文本 + 语气词扩展（<=4 字，
     吃到句末标点为止），使 "要射了吗？要射了吗？..." 折成 "要射了吗？" 而非 "要射"。"""
     norm_idx = 0
     q = -1
     for i, ch in enumerate(tok):
         if not _PUNCT_RE.match(ch):
             norm_idx += 1
-            if norm_idx == p:
+            if norm_idx == norm_end:
                 q = i
                 break
     if q < 0:
@@ -290,19 +291,39 @@ def _collapse_in_token(tok: str) -> str:
         u = norm[:p]
         n_full, r = divmod(L, p)
         if n_full >= 3 and norm == u * n_full + u[:r]:
-            return _first_unit_display(tok, p)
+            return _first_units_display(tok, p)
     if L >= _MIN_LOOP_TOKEN:  # 主导周期（容忍变体插桩：要射出来了吗）
-        for p in range(2, min(10, L) + 1):
-            u = norm[:p]
-            cnt, i = 0, 0
-            while i + p <= L:
-                if norm[i : i + p] == u:
-                    cnt += 1
-                    i += p
-                else:
-                    i += 1
-            if cnt >= 4 and cnt * p >= 0.4 * L:
-                return _first_unit_display(tok, p)
+        # o：环起始偏移。whisper 常把首句说成环单元的变体（"要射了吗？" +
+        # "要射出来了吗？"xN），只从 0 找周期会失手，故允许 <=8 字前导。
+        # 同一环会有多个相位候选（o=2/3/4 覆盖率相同）：按 (覆盖率,
+        # 前导与单元公共前缀长, o 小) 取最优——真起点的变体通常与单元
+        # 同头（"要射"了吗 vs "要射"出来了吗），相位错位的不会。
+        # 命中后保留 前导+首个环单元（o+p），不丢首句。
+        best_key = None
+        best_op = None
+        for o in range(0, min(9, max(1, L - 11))):
+            prologue = norm[:o]
+            for p in range(2, min(10, L - o) + 1):
+                u = norm[o : o + p]
+                cnt, i = 0, o
+                while i + p <= L:
+                    if norm[i : i + p] == u:
+                        cnt += 1
+                        i += p
+                    else:
+                        i += 1
+                if cnt < 4 or cnt * p < 0.4 * L:
+                    continue
+                lcp = 0
+                for a, b in zip(prologue, u):
+                    if a != b:
+                        break
+                    lcp += 1
+                key = (cnt * p, lcp, -o)
+                if best_key is None or key > best_key:
+                    best_key, best_op = key, (o, p)
+        if best_op is not None:
+            return _first_units_display(tok, best_op[0] + best_op[1])
     return tok
 
 

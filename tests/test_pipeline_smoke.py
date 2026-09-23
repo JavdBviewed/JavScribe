@@ -507,6 +507,9 @@ def test_collapse_in_token() -> None:
     assert collapse_repeat_loops("又要去了又要去了又要去了又要去了") == "又要去了"
     t = "要射了吗？要射了吗？要射出来了吗？" + "要射了吗？" * 26  # 取证样本形态
     assert collapse_repeat_loops(t) == "要射了吗？", collapse_repeat_loops(t)
+    # 变体前导：首句是环单元变体（MFYD-118 取证形态，保留首句+首个环单元）
+    t2 = "要射了吗？" + "要射出来了吗？" * 25
+    assert collapse_repeat_loops(t2) == "要射了吗？要射出来了吗？", collapse_repeat_loops(t2)
     print("  test_collapse_in_token OK")
 
 
