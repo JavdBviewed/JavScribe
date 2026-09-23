@@ -32,6 +32,8 @@ UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
 UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
 LOCAL_EXTRACT_CONCURRENCY = int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", "2"))
 LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放弃并标记 failed
+SRT_EXTS = {".srt", ".subrip", ".vtt", ".ass", ".ssa"}  # 预览只允许字幕扩展名
+SRT_MAX_MB = 2.0  # 预览大小上限（正常 srt 远小于此）
 
 
 def _job_rows(
@@ -675,6 +677,38 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             return copy.deepcopy(localscan.DEFAULT_SCAN_CFG), False
         finally:
             await eng.close()
+
+    @app.get("/api/fs/read-srt")
+    async def api_fs_read_srt(path: str) -> dict:
+        """字幕预览：读客户端部署机上的字幕文件内容（前端预览弹窗用）。
+
+        只放行字幕扩展名（SRT_EXTS）且 ≤ SRT_MAX_MB 的常规文件，
+        不开放任意文件读取；解析与展示在客户端完成。
+        """
+        if not path or not path.strip():
+            raise HTTPException(400, "path 必填")
+        p = Path(path).expanduser()
+        if p.suffix.lower() not in SRT_EXTS:
+            raise HTTPException(400, "仅可预览 .srt / .vtt / .ass / .ssa 字幕文件")
+        if not p.is_file():
+            raise HTTPException(404, "文件不存在")
+        try:
+            st = p.stat()
+        except OSError as ex:
+            raise HTTPException(404, f"无法读取文件: {ex}")
+        if st.st_size > SRT_MAX_MB * 1048576:
+            raise HTTPException(413, f"文件超过 {SRT_MAX_MB:.0f}MB，无法预览")
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as ex:
+            raise HTTPException(500, f"读取失败: {ex}")
+        return {
+            "ok": True,
+            "path": str(p.resolve()),
+            "name": p.name,
+            "size_mb": round(st.st_size / 1048576, 2),
+            "text": text,
+        }
 
     @app.get("/api/scan/local")
     async def api_local_scan(

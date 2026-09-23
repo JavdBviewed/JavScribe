@@ -439,4 +439,25 @@ def test_fs_browse() -> None:
         d2 = client.get("/api/fs/browse", params={"path": str(big)}).json()
         assert d2["truncated"] is True and len(d2["entries"]) == 4000
 
+def test_fs_read_srt() -> None:
+    client, _ = make_client()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        srt = root / "PJAM-045.zh.srt"
+        srt.write_text("1\n00:00:01,000 --> 00:00:04,000\n你好\n", encoding="utf-8")
+        d = client.get("/api/fs/read-srt", params={"path": str(srt)}).json()
+        assert d["ok"] and d["name"] == "PJAM-045.zh.srt"
+        assert d["text"].startswith("1") and d["size_mb"] >= 0
+        # 非字幕扩展名 / 空路径 → 400
+        mp4 = root / "x.mp4"
+        mp4.write_bytes(b"0")
+        assert client.get("/api/fs/read-srt", params={"path": str(mp4)}).status_code == 400
+        assert client.get("/api/fs/read-srt", params={"path": ""}).status_code == 400
+        # 不存在 → 404
+        assert client.get("/api/fs/read-srt", params={"path": str(root / "no.srt")}).status_code == 404
+        # 超 2MB → 413
+        big = root / "big.srt"
+        big.write_bytes(b"1" * (int(2 * 1048576) + 1))
+        assert client.get("/api/fs/read-srt", params={"path": str(big)}).status_code == 413
+
 

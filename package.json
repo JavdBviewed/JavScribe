@@ -1,7 +1,7 @@
 {
   "name": "jav-scribe-client",
   "desktopName": "JavScribeClient",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "packageManager": "pnpm@10.17.0",
   "author": "JavdBviewed",
   "private": true,
@@ -13,7 +13,7 @@
     "sync:static": "node scripts/sync-static.mjs",
     "build:web:all": "pnpm build:web && pnpm sync:static",
     "preview": "vite preview",
-    "test:unit:client": "node client/tests/unit/srt-sanitize.test.mjs && node client/tests/unit/sub-embed.test.mjs",
+    "test:unit:client": "node client/tests/unit/srt-sanitize.test.mjs && node client/tests/unit/srt.test.mjs && node client/tests/unit/sub-embed.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "typecheck": "tsc --noEmit",

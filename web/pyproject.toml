@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jav-scribe-web"
-version = "0.2.7"
+version = "0.2.8"
 description = "JavScribe control room: aggregate N subtitle workshops (JavScribe serve endpoints) with a web dashboard, upload dispatch and SRT download"
 readme = "README.md"
 requires-python = ">=3.10"

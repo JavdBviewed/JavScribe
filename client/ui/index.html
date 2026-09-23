@@ -227,6 +227,20 @@
     </div>
   </div>
 </div>
+<div id="srt-backdrop" hidden>
+  <div id="srt-modal" role="dialog" aria-modal="true" aria-labelledby="srt-title">
+    <div class="modal-head">
+      <h2 id="srt-title"></h2>
+      <button type="button" id="srt-x" class="icon-btn" title="关闭">&#10005;</button>
+    </div>
+    <div id="srt-meta" class="srt-meta"></div>
+    <div id="srt-timeline" class="srt-timeline" title=""></div>
+    <div id="srt-list" class="srt-list"></div>
+    <div class="srt-foot">
+      <span id="srt-note" class="muted small"></span>
+    </div>
+  </div>
+</div>
 <div id="toasts" aria-live="polite"></div>
 <script src="/lib/ffmpeg.js"></script>
 <script type="module" src="../web-entry/main.ts"></script>

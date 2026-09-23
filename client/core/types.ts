@@ -114,6 +114,14 @@ export interface ScanResult {
   naming_c?: string;
 }
 
+/** GET /api/fs/read-srt：字幕预览内容（只放行字幕扩展名 ≤2MB） */
+export interface SrtReadResult {
+  path: string;
+  name: string;
+  size_mb: number;
+  text: string;
+}
+
 /** 目录浏览条目（web 形态 GET /api/fs/browse） */
 export interface FsBrowseEntry {
   name: string;

@@ -73,4 +73,6 @@ export interface Transport {
   submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
   /** 目录浏览（web 形态：客户端部署机 /api/fs/browse；desktop 形态无此方法，走原生对话框） */
   fsBrowse?(path: string): Promise<import("./types").FsBrowseResult>;
+  /** 字幕预览：读字幕文件内容（web：/api/fs/read-srt；desktop：IPC 读本机文件） */
+  readSrt(path: string): Promise<import("./types").SrtReadResult>;
 }

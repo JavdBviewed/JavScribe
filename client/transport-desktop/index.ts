@@ -162,6 +162,8 @@ export const desktopTransport: Transport = {
 
   // desktop 形态的 scan 走本地 serve /scan（serve 侧规则，本周期无 min_size/naming 项）
   scan: (name, p, _opts) => call<ScanResult>("scan", name, p),
+  // 字幕预览：desktop 形态字幕文件在本机，走 IPC 直读（main 侧校验扩展名/大小）
+  readSrt: (p) => desktop.readSrt(p),
   submitScan: (name, files, _sub) =>
     call<{ files: number; jobId: string }>("submitScan", name, JSON.stringify(files)),
 };

@@ -18,6 +18,13 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
     ipcRenderer.invoke("pick-video-folder") as Promise<PickFolderItem[] | null>,
 
   pickDir: (title?: string) => ipcRenderer.invoke("pick-dir", title) as Promise<string | null>,
+  readSrt: async (p: string): Promise<{ path: string; name: string; size_mb: number; text: string }> => {
+    const r = (await ipcRenderer.invoke("read-srt", p)) as {
+      ok: boolean; error?: string; data?: { path: string; name: string; size_mb: number; text: string };
+    };
+    if (!r.ok || !r.data) throw new Error(r.error || "字幕预览失败");
+    return r.data;
+  },
 
   writeSrt: (videoPath: string, srtName: string, data: Uint8Array) =>
     ipcRenderer.invoke("write-srt", { videoPath, srtName, data }) as Promise<FileOpResult>,

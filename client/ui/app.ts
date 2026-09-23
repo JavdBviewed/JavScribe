@@ -10,6 +10,7 @@ import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "..
 import type { JavExtractAPI } from "./extract";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
+import { fmtSrtSpan, fmtSrtTime, parseSrt, type SrtCue, type SrtParseResult } from "../core/srt";
 
 const DEFAULT_TITLE = "JavScribe 字幕工作台";
 
@@ -111,6 +112,12 @@ function cleanStem(s: string | null | undefined): string {
 // 与 serve constants.VIDEO_EXTS 对齐：file 带这些扩展名时说明它是真实影片路径（本地任务），
 // 远端任务的 file 则是 inbox 内容寻址名（<sha1>.opus / <sha1>.mp4）
 const VIDEO_EXT_RE = /\.(mp4|mkv|avi|mov|webm|flv|wmv|ts|m2ts|mpg|mpeg)$/i;
+/** 与影片同目录的字幕完整路径（扫描项 subtitle 只存文件名） */
+function siblingOf(videoPath: string, name: string): string {
+  const idx = Math.max(videoPath.lastIndexOf("/"), videoPath.lastIndexOf("\\"));
+  return (idx >= 0 ? videoPath.slice(0, idx + 1) : "") + name;
+}
+
 function srtNameFor(j: JobRow): string {
   // 兜底链（任何一环是 40 位内容寻址 hash 则弃用）：
   // ① 本地任务（扫描/监听/本地直传）：file 即真实影片路径 → 最可信
@@ -630,6 +637,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const dl = j.status === "done" && j.job_id
       ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
       : "";
+    // 预览：done 且有任务 id → 走 result 端点拉内容（本地扫描/远端任务通用）
+    const pv = j.status === "done" && j.job_id
+      ? `<button type="button" class="srt-pv" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="预览生成的字幕（时间轴 + 全文）">预览 srt</button>`
+      : "";
     // 本地扫描任务：工作台本机字幕回写状态（ok / skipped_exists / skipped / failed:…）
     const WB_TAG: Record<string, string> = { ok: "已落回本机", skipped_exists: "字幕已存在，未覆盖", skipped: "生成被跳过" };
     const wb = j.writeback
@@ -654,7 +665,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, retry, rerunBtn, pos, wb, ss, cancel].join("\u0001");
+    const core = [j.status, j.engine, j.file, sub, dl, pv, retry, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
@@ -662,7 +673,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${retry}${rerunBtn}${cancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -1049,6 +1060,181 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   dirBackdrop?.addEventListener("click", (ev) => { if (ev.target === dirBackdrop) dirClose(); });
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape" && dirBackdrop && !dirBackdrop.hidden) dirClose();
+  });
+
+  // ---------- 字幕预览弹窗（扫描表「外部 srt」读客户端部署机文件 / 任务表走 result 端点） ----------
+  const srtBackdrop = $("srt-backdrop") as HTMLDivElement | null;
+  const srtTitle = $("srt-title") as HTMLHeadingElement | null;
+  const srtMeta = $("srt-meta");
+  const srtTimeline = $("srt-timeline") as HTMLDivElement | null;
+  const srtList = $("srt-list") as HTMLDivElement | null;
+  const srtNote = $("srt-note");
+
+  function srtClose(): void {
+    if (srtBackdrop) srtBackdrop.hidden = true;
+  }
+
+  let srtCues: SrtCue[] = [];
+  let srtSpan = 1;
+
+  /** 横坐标 frac → cue 下标：先按 [start,end] 命中，未命中就近（距任一 cue 边界 ≤5s 才算） */
+  function srtCueAt(frac: number): number | null {
+    if (!srtCues.length) return null;
+    const t = frac * srtSpan;
+    for (let i = 0; i < srtCues.length; i++) {
+      const c = srtCues[i];
+      if (t >= c.start - 0.001 && t <= c.end + 0.001) return i;
+    }
+    let best = -1;
+    let bd = Infinity;
+    for (let i = 0; i < srtCues.length; i++) {
+      const c = srtCues[i];
+      const d = Math.min(Math.abs(t - c.start), Math.abs(t - c.end));
+      if (d < bd) { bd = d; best = i; }
+    }
+    return bd <= 5 ? best : null;
+  }
+
+  // 时间轴 segment ↔ 列表行 双向高亮；focusList=true 时列表滚动到该 cue
+  function srtSelectCue(i: number, focusList: boolean): void {
+    if (!srtTimeline || !srtList) return;
+    srtTimeline.querySelectorAll(".srt-seg.active").forEach((n) => n.classList.remove("active"));
+    srtList.querySelectorAll(".srt-cue.active").forEach((n) => n.classList.remove("active"));
+    const seg = srtTimeline.querySelector(`.srt-seg[data-i="${i}"]`);
+    const cue = srtList.querySelector(`.srt-cue[data-i="${i}"]`);
+    if (seg) seg.classList.add("active");
+    if (cue) {
+      cue.classList.add("active");
+      if (focusList) (cue as HTMLElement).scrollIntoView({ block: "center" });
+    }
+  }
+
+  function srtRender(parsed: SrtParseResult, name: string, sizeMb: number | null, raw: string): void {
+    if (srtTitle) srtTitle.textContent = `字幕预览 · ${name}`;
+    if (srtBackdrop) srtBackdrop.hidden = false;
+    if (!srtTimeline || !srtList || !srtMeta) return;
+    srtTimeline.replaceChildren();
+    srtList.replaceChildren();
+    if (parsed.invalid || !parsed.cues.length) {
+      srtMeta.textContent = "";
+      srtTimeline.hidden = true;
+      if (srtNote) srtNote.textContent = "未解析出有效字幕时间轴，以下为原文：";
+      const pre = document.createElement("pre");
+      pre.className = "srt-raw";
+      pre.textContent = raw;
+      srtList.appendChild(pre);
+      return;
+    }
+    srtTimeline.hidden = false;
+    if (srtNote) srtNote.textContent = "";
+    const cues = parsed.cues;
+    const first = cues[0].start;
+    let last = 0;
+    for (const c of cues) if (c.end > last) last = c.end;
+    const span = Math.max(last - first, 0.001);
+    srtMeta.innerHTML =
+      `<span class="srt-stat"><b>${cues.length}</b> 条字幕</span>` +
+      `<span class="srt-stat">起始 <b class="mono">${fmtSrtTime(first)}</b></span>` +
+      `<span class="srt-stat">结束 <b class="mono">${fmtSrtTime(last)}</b></span>` +
+      `<span class="srt-stat">跨 <b class="mono">${fmtSrtSpan(last - first)}</b></span>` +
+      (sizeMb != null ? `<span class="srt-stat">文件 <b class="mono">${sizeMb.toFixed(2)} MB</b></span>` : "");
+    // 时间轴：cue 段纯视觉（密集时仅 1-2px，无独立点击面）；交互挂在轨道上——
+    // 悬停显示时间游标 + tooltip，点击按横坐标反查 cue（命中优先、就近兜底 ≤5s）
+    srtCues = cues;
+    srtSpan = span;
+    const tfrag = document.createDocumentFragment();
+    for (const c of cues) {
+      const seg = document.createElement("div");
+      seg.className = "srt-seg";
+      seg.dataset.i = String(c.index - 1);
+      seg.style.left = `${(c.start / span) * 100}%`;
+      seg.style.width = `${Math.max(((c.end - c.start) / span) * 100, 0.08)}%`;
+      tfrag.appendChild(seg);
+    }
+    const cursor = document.createElement("div");
+    cursor.className = "srt-cursor";
+    const tip = document.createElement("div");
+    tip.className = "srt-tip";
+    tfrag.append(cursor, tip);
+    srtTimeline.appendChild(tfrag);
+    const hideHover = () => { cursor.style.opacity = "0"; tip.hidden = true; };
+    srtTimeline.onmousemove = (ev) => {
+      const r = srtTimeline.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+      cursor.style.left = `${frac * 100}%`;
+      cursor.style.opacity = "0.6";
+      const i = srtCueAt(frac);
+      if (i == null) { tip.hidden = true; return; }
+      const c = srtCues[i];
+      tip.textContent = `#${c.index} ${fmtSrtTime(c.start)} → ${fmtSrtTime(c.end)} · ${c.text.replace(/\n/g, " ").slice(0, 60)}`;
+      tip.style.left = `${Math.min(0.97, Math.max(0.03, frac)) * 100}%`;
+      tip.hidden = false;
+    };
+    srtTimeline.onmouseleave = hideHover;
+    srtTimeline.onclick = (ev) => {
+      const r = srtTimeline.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+      const i = srtCueAt(frac);
+      if (i != null) srtSelectCue(i, true);
+    };
+    // 列表：# / 时间轴 / 文本；点击高亮时间轴对应段
+    const lfrag = document.createDocumentFragment();
+    for (const c of cues) {
+      const row = document.createElement("div");
+      row.className = "srt-cue";
+      row.dataset.i = String(c.index - 1);
+      const no = document.createElement("span");
+      no.className = "srt-no mono";
+      no.textContent = String(c.index);
+      const tm = document.createElement("span");
+      tm.className = "srt-time mono";
+      tm.textContent = `${fmtSrtTime(c.start)} → ${fmtSrtTime(c.end)}`;
+      const tx = document.createElement("span");
+      tx.className = "srt-text";
+      tx.textContent = c.text;
+      row.append(no, tm, tx);
+      row.onclick = () => srtSelectCue(c.index - 1, false);
+      lfrag.appendChild(row);
+    }
+    srtList.appendChild(lfrag);
+  }
+
+  function openSrtPreview(name: string, text: string, sizeMb: number | null): void {
+    srtRender(parseSrt(text), name, sizeMb, text);
+  }
+
+  // 入口一：扫描表「外部 srt」→ 读客户端部署机上的 srt 文件
+  $("scan-table").addEventListener("click", (ev) => {
+    const b = (ev.target as HTMLElement).closest<HTMLElement>(".srt-pv");
+    if (b && b.dataset.srt) {
+      t.readSrt(b.dataset.srt)
+        .then((d) => openSrtPreview(d.name, d.text, d.size_mb))
+        .catch((e: Error) => toast(e.message || "字幕预览失败", "err"));
+    }
+  });
+
+  // 入口二：任务表 done 行 → result 端点拉 srt 内容（本地扫描/远端任务通用）
+  jobList.addEventListener("click", (ev) => {
+    const b = (ev.target as HTMLElement).closest<HTMLElement>(".srt-pv");
+    if (!b || !b.dataset.jid) return;
+    const j = (state._jobs || []).find(
+      (x) => x.job_id === b!.dataset.jid && x.engine === b!.dataset.eng,
+    );
+    if (!j || !j.job_id) return;
+    fetch(t.getResultUrl(j.engine, j.job_id), { cache: "no-store" })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const text = await r.text();
+        openSrtPreview(srtNameFor(j), text, null);
+      })
+      .catch((e: Error) => toast(e.message || "字幕预览失败", "err"));
+  });
+
+  const srtX = $("srt-x") as HTMLButtonElement | null;
+  if (srtX) srtX.onclick = srtClose;
+  srtBackdrop?.addEventListener("click", (ev) => { if (ev.target === srtBackdrop) srtClose(); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && srtBackdrop && !srtBackdrop.hidden) srtClose();
   });
 
   function setStep(id: string, cls: string, dot: string | null, meta: string | null) {
@@ -1818,7 +2004,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           ${items.map((i) => {
             const langs = (i.embedded_langs || []).join("/") || "—";
             const subCell = i.subtitle_status === "external"
-              ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span>`
+              ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span><button type="button" class="srt-pv" data-srt="${esc(i.subtitle ? siblingOf(i.path, i.subtitle) : "")}" title="预览字幕内容">预览</button>`
               : i.subtitle_status === "named"
               ? `<span class="tag subtag" title="文件名含独立 C，按规则视为已压字幕（可在「文件名独立 C」改判）">C 版（名）</span>`
               : i.subtitle_status === "embedded"

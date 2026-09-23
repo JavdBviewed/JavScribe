@@ -133,6 +133,8 @@ export interface JavDesktop {
   pickVideoFolder(): Promise<PickFolderItem[] | null>;
   /** 通用目录选择对话框（「扫描目录」浏览）；取消返回 null */
   pickDir(title?: string): Promise<string | null>;
+  /** 字幕预览读文件（main 侧校验字幕扩展名/≤2MB）；失败 throw */
+  readSrt(p: string): Promise<{ path: string; name: string; size_mb: number; text: string }>;
   writeSrt(videoPath: string, srtName: string, data: Uint8Array): Promise<FileOpResult>;
   /** srt 保存对话框（手动下载 / 自动下载兜底） */
   download(url: string, filename: string): Promise<FileOpResult>;

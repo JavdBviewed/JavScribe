@@ -1260,6 +1260,25 @@ function registerIpc(): void {
     return r.filePaths[0];
   });
 
+  // 字幕预览（扫描面板「外部 srt」/ 任务表）：只放行字幕扩展名 + ≤2MB 常规文件
+  const SRT_PREVIEW_EXTS = new Set([".srt", ".subrip", ".vtt", ".ass", ".ssa"]);
+  ipcMain.handle("read-srt", async (_ev, p: unknown) => {
+    if (typeof p !== "string" || !p.trim()) return { ok: false, error: "path 必填" };
+    const f = path.resolve(p);
+    if (!SRT_PREVIEW_EXTS.has(path.extname(f).toLowerCase()))
+      return { ok: false, error: "仅可预览 .srt / .vtt / .ass / .ssa 字幕文件" };
+    try {
+      const st = fs.statSync(f);
+      if (!st.isFile()) return { ok: false, error: "文件不存在" };
+      if (st.size > 2 * 1048576) return { ok: false, error: "文件超过 2MB，无法预览" };
+      const text = fs.readFileSync(f, "utf-8");
+      return { ok: true, data: { path: f, name: path.basename(f),
+        size_mb: Math.round((st.size / 1048576) * 100) / 100, text } };
+    } catch (ex) {
+      return { ok: false, error: `无法读取文件: ${ex instanceof Error ? ex.message : String(ex)}` };
+    }
+  });
+
   // ---------- 文件夹监控（仅 desktop；renderer 就绪后 watch-arm flush 启动期候选） ----------
   ipcMain.handle("local-serve-state", () => lsState);
   ipcMain.handle("watch-state", () => watchPublicState());
