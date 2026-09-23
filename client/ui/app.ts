@@ -159,7 +159,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   if (platform.kind === "desktop") {
     const sh = $("scan-help") as HTMLElement | null;
     if (sh) sh.dataset.tip =
-      "扫描本机（本电脑）上的目录：填本机上的绝对路径（如 /media/jav）。视频处理完成后，字幕自动落回本机影片旁。视频范围与字幕判定规则可在「服务设置」里调整。";
+      "扫描本机（本电脑，即客户端部署机）上的目录：填本机上的绝对路径（如 /media/jav），或点「浏览」直接选。视频处理完成后，字幕自动落回本机影片旁。视频范围与字幕判定规则可在「服务设置」里调整。";
   }
   const modalX = $("modal-x");
   const modalBackdrop = $("modal-backdrop");
@@ -924,6 +924,133 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
   scanPath.oninput = updateScanGo;
 
+  // ---------- 扫描目录「浏览」：web 形态目录浏览弹窗（客户端部署机文件系统）；desktop 形态原生对话框 ----------
+  const scanBrowse = $("scan-browse") as HTMLButtonElement | null;
+  const dirBackdrop = $("dir-backdrop") as HTMLDivElement | null;
+  const dirCwd = $("dir-cwd") as HTMLInputElement | null;
+  const dirList = $("dir-list") as HTMLDivElement | null;
+  const dirUp = $("dir-up") as HTMLButtonElement | null;
+  const dirPick = $("dir-pick") as HTMLButtonElement | null;
+  const dirNote = $("dir-note");
+  let dirLast = "";
+  let dirSeq = 0;
+
+  function dirClose(): void {
+    if (dirBackdrop) dirBackdrop.hidden = true;
+  }
+
+  function dirJoin(base: string, name: string): string {
+    return base === "/" ? "/" + name : base + "/" + name;
+  }
+
+  async function dirLoad(p: string): Promise<void> {
+    const fn = t.fsBrowse;
+    if (!fn) throw new Error("当前形态不支持目录浏览");
+    const seq = ++dirSeq;
+    if (dirList) dirList.innerHTML = '<div class="muted small" style="padding:10px 18px">加载中…</div>';
+    try {
+      const d = await fn(p);
+      if (seq !== dirSeq) return;
+      dirLast = d.path;
+      if (dirCwd) dirCwd.value = d.path;
+      if (dirUp) dirUp.disabled = !d.parent;
+      if (dirPick) dirPick.disabled = false;
+      if (dirNote) dirNote.textContent = d.truncated ? "仅显示前 4000 项；可在上方输入更精确路径后按 Enter" : "";
+      if (!dirList) return;
+      if (!d.entries.length) {
+        dirList.innerHTML = '<div class="muted small" style="padding:10px 18px">空目录</div>';
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      for (const e of d.entries) {
+        const row = document.createElement("div");
+        row.className = "dir-row" + (e.is_dir ? "" : " file");
+        const nm = document.createElement("span");
+        nm.className = "dir-name";
+        nm.textContent = e.is_dir ? e.name + "/" : e.name;
+        row.appendChild(nm);
+        if (!e.is_dir && e.size_mb != null) {
+          const sz = document.createElement("span");
+          sz.className = "dir-size";
+          sz.textContent = e.size_mb >= 1024
+            ? (e.size_mb / 1024).toFixed(1) + " GB"
+            : e.size_mb.toFixed(1) + " MB";
+          row.appendChild(sz);
+        }
+        if (e.is_dir) {
+          row.tabIndex = 0;
+          row.onclick = () => { void dirLoad(dirJoin(d.path, e.name)); };
+          row.onkeydown = (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              void dirLoad(dirJoin(d.path, e.name));
+            }
+          };
+        }
+        frag.appendChild(row);
+      }
+      dirList.replaceChildren(frag);
+    } catch (ex) {
+      if (seq !== dirSeq) return;
+      if (dirList) dirList.replaceChildren();
+      toast((ex as Error).message || "加载目录失败", "err");
+    }
+  }
+
+  function dirOpen(): void {
+    if (!dirBackdrop) return;
+    dirBackdrop.hidden = false;
+    void dirLoad(dirLast);
+    if (dirCwd) { dirCwd.focus(); dirCwd.select(); }
+  }
+
+  if (scanBrowse) {
+    scanBrowse.onclick = async () => {
+      if (platform.kind === "desktop") {
+        const bd = (window as unknown as {
+          javDesktop?: { pickDir?: (title?: string) => Promise<string | null> };
+        }).javDesktop?.pickDir;
+        if (!bd) { toast("目录选择不可用", "err"); return; }
+        try {
+          const p = await bd("选择扫描目录");
+          if (p) {
+            scanPath.value = p;
+            updateScanGo();
+          }
+        } catch (e) {
+          toast((e as Error).message || "选择目录失败", "err");
+        }
+        return;
+      }
+      dirOpen();
+    };
+  }
+  if (dirUp) dirUp.onclick = () => {
+    const p = dirLast;
+    if (!p || p === "/") return;
+    const stripped = p.replace(/\/+$/, "") || "/";
+    const idx = stripped.lastIndexOf("/");
+    void dirLoad(idx <= 0 ? "/" : stripped.slice(0, idx));
+  };
+  dirCwd?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && dirCwd) {
+      ev.preventDefault();
+      void dirLoad(dirCwd.value.trim());
+    }
+  });
+  if (dirPick) dirPick.onclick = () => {
+    if (!dirLast) return;
+    scanPath.value = dirLast;
+    updateScanGo();
+    dirClose();
+  };
+  const dirX = $("dir-x") as HTMLButtonElement | null;
+  if (dirX) dirX.onclick = dirClose;
+  dirBackdrop?.addEventListener("click", (ev) => { if (ev.target === dirBackdrop) dirClose(); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && dirBackdrop && !dirBackdrop.hidden) dirClose();
+  });
+
   function setStep(id: string, cls: string, dot: string | null, meta: string | null) {
     const el = $(id);
     el.className = "step" + (cls ? " " + cls : "");
@@ -1638,7 +1765,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (/^[a-zA-Z]:[\\/]/.test(path)) {
       toast(platform.kind === "desktop"
         ? "「扫描目录」需要本机绝对路径（如 /media/jav）；盘符路径（如 D:\\Videos）请改用上方「选择文件夹」"
-        : "这是浏览器电脑的本地路径（如 D:\\Videos）。「扫描目录」只能读工作台部署机器上的目录（如 /media/jav）；要处理浏览器电脑上的文件夹，请用上方「选择文件夹」", "err");
+        : "这是浏览器电脑的本地路径（如 D:\\Videos）。「扫描目录」只能读客户端部署机上的目录（如 /media/jav）；要处理浏览器电脑上的文件夹，请用上方「选择文件夹」", "err");
       return;
     }
     scanGo.disabled = true;

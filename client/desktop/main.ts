@@ -1250,6 +1250,16 @@ function registerIpc(): void {
     return walkVideos(r.filePaths[0]);
   });
 
+  // 通用目录选择（「扫描目录」浏览按钮；title 可自定义）
+  ipcMain.handle("pick-dir", async (_ev, title?: string) => {
+    const r = await dialog.showOpenDialog(win as BrowserWindow, {
+      title: typeof title === "string" && title ? title : "选择目录",
+      properties: ["openDirectory"],
+    });
+    if (r.canceled || !r.filePaths.length) return null;
+    return r.filePaths[0];
+  });
+
   // ---------- 文件夹监控（仅 desktop；renderer 就绪后 watch-arm flush 启动期候选） ----------
   ipcMain.handle("local-serve-state", () => lsState);
   ipcMain.handle("watch-state", () => watchPublicState());

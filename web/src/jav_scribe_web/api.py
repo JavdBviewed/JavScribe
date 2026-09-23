@@ -765,6 +765,51 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             "skipped": [p.name for p in skip],
         }
 
+    @app.get("/api/fs/browse")
+    async def api_fs_browse(path: str = "") -> dict:
+        """目录浏览器（Web 形态「浏览」按钮）：列客户端部署机目录下的子目录/文件。
+
+        只列目录名与文件大小，不读文件内容；暴露面与 /api/scan/local 等价
+        （该端点本就可指定任意路径扫描）。path 为空 → 当前用户家目录。
+        """
+        p = (Path(path) if path.strip() else Path.home()).expanduser()
+        try:
+            p = p.resolve()
+        except (OSError, RuntimeError):
+            raise HTTPException(400, "路径无效")
+        if not p.is_dir():
+            raise HTTPException(400, "目录不存在或不可访问")
+        try:
+            with os.scandir(p) as it:
+                items = list(it)
+        except OSError as ex:
+            raise HTTPException(400, f"无法读取目录: {ex}")
+        items.sort(key=lambda d: (not d.is_dir(), d.name.casefold()))
+        entries: list[dict] = []
+        truncated = False
+        for d in items:
+            if len(entries) >= 4000:
+                truncated = True
+                break
+            try:
+                if d.is_dir():
+                    entries.append({"name": d.name, "is_dir": True, "size_mb": None})
+                else:
+                    st = d.stat()
+                    entries.append({"name": d.name, "is_dir": False,
+                                    "size_mb": round(st.st_size / 1048576, 1)})
+            except OSError:
+                entries.append({"name": d.name, "is_dir": False, "size_mb": None})
+        parent = str(p.parent) if p.parent != p else ""
+        return {
+            "ok": True,
+            "path": str(p),
+            "parent": parent,
+            "home": str(Path.home()),
+            "entries": entries,
+            "truncated": truncated,
+        }
+
     async def _local_writeback_tick() -> None:
         """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。"""
         _prune_uploads()

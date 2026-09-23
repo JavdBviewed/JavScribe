@@ -405,3 +405,38 @@ def test_config_proxy_error_mapping() -> None:
         assert r.status_code == 502 and "不可达" in r.json()["detail"], r.text
     finally:
         _jsm.JavScribeEngine.config = orig
+
+def test_fs_browse() -> None:
+    client, _ = make_client()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "zeta").mkdir()
+        (root / "Alpha").mkdir()
+        (root / "a.mp4").write_bytes(b"0" * (5 * 1024 * 1024))
+        (root / "b.txt").write_text("hi")
+        r = client.get("/api/fs/browse", params={"path": str(root)})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] and d["path"] == str(root.resolve())
+        assert d["parent"] == str(root.resolve().parent)
+        assert d["truncated"] is False
+        names = [(e["name"], e["is_dir"]) for e in d["entries"]]
+        # 目录在前、ci 排序；文件在后
+        assert names == [("Alpha", True), ("zeta", True), ("a.mp4", False), ("b.txt", False)]
+        mp4 = next(e for e in d["entries"] if e["name"] == "a.mp4")
+        assert mp4["size_mb"] == 5.0
+        # 空 path → 家目录
+        h = client.get("/api/fs/browse").json()
+        assert h["ok"] and h["path"] == str(Path.home().resolve())
+        # 不存在 / 文件路径 → 400
+        assert client.get("/api/fs/browse", params={"path": str(root / "nope")}).status_code == 400
+        assert client.get("/api/fs/browse", params={"path": str(root / "a.mp4")}).status_code == 400
+        # 截断：4001 个目录
+        big = root / "big"
+        big.mkdir()
+        for i in range(4001):
+            (big / f"d{i:05d}").mkdir()
+        d2 = client.get("/api/fs/browse", params={"path": str(big)}).json()
+        assert d2["truncated"] is True and len(d2["entries"]) == 4000
+
+

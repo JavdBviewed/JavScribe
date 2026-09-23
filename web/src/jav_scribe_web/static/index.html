@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-B09ldpW7.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-BXSIJbwb.css">
+  <script type="module" crossorigin src="/assets/index-BzI1jUUA.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CNRjFyhU.css">
 </head>
 <body>
 <header>
@@ -94,14 +94,14 @@
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
       <label class="chk-row autosave-chk">
         <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
-        <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。「扫描目录」任务无需勾选——完成后字幕自动落回本机影片旁（Web 形态即工作台部署机）。">?</span>
+        <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。「扫描目录」任务无需勾选——完成后字幕自动落回客户端部署机影片旁（Web 形态即本页面所在机器）。">?</span>
       </label>
     </div>
 
     <div id="scan-panel">
       <div class="scan-head">
-        <span class="scan-title">扫描目录（本机）</span>
-        <span class="muted small">填本机上的目录路径<span class="help" tabindex="0" id="scan-help" data-tip="扫描的是工作台（本页面服务）部署所在机器上的目录，不是浏览器所在电脑。填该机器上的绝对路径；视频处理完成后，字幕自动落回本机影片旁。要批量处理浏览器电脑上的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
+        <span class="scan-title">扫描目录（客户端部署机）</span>
+        <span class="muted small">填客户端部署机上的目录路径，或点「浏览」直接选<span class="help" tabindex="0" id="scan-help" data-tip="扫描的是客户端（本页面服务）部署所在机器上的目录，不是浏览器所在电脑。可手填该机器上的绝对路径，或点「浏览」直接选目录；视频处理完成后，字幕自动落回客户端部署机的影片旁。要批量处理浏览器电脑上的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">
@@ -120,7 +120,8 @@
             <option value="off">不识别</option>
           </select>
         </label>
-        <button id="scan-go" class="btn" disabled>扫描</button>
+        <button id="scan-browse" class="btn" type="button" title="浏览客户端部署机上的目录">浏览</button>
+        <button id="scan-go" class="btn btn-primary" disabled>扫描</button>
       </div>
       <div id="scan-results" hidden>
         <div id="scan-mapped" class="muted small scan-mapped-note" hidden></div>
@@ -208,6 +209,24 @@
       <button type="button" id="modal-x" class="icon-btn" title="关闭">&#10005;</button>
     </div>
     <div id="modal-body" class="modal-body"></div>
+  </div>
+</div>
+<div id="dir-backdrop" hidden>
+  <div id="dir-modal" role="dialog" aria-modal="true" aria-labelledby="dir-title">
+    <div class="modal-head">
+      <h2 id="dir-title">选择扫描目录</h2>
+      <button type="button" id="dir-x" class="icon-btn" title="关闭">&#10005;</button>
+    </div>
+    <div class="dir-bar">
+      <button type="button" id="dir-up" class="btn" title="上一级目录">&#8593; 上一级</button>
+      <input id="dir-cwd" class="mono" spellcheck="false" autocomplete="off"
+             title="当前目录：修改后按 Enter 跳转">
+    </div>
+    <div id="dir-list" class="dir-list" role="list"></div>
+    <div class="dir-foot">
+      <span id="dir-note" class="muted small"></span>
+      <button type="button" id="dir-pick" class="btn btn-primary" disabled>选择此目录</button>
+    </div>
   </div>
 </div>
 <div id="toasts" aria-live="polite"></div>

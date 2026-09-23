@@ -3,7 +3,7 @@
 
 import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, ScanResult, UpdateInfo, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, FsBrowseResult, ScanResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
 async function jget<T>(url: string): Promise<T> {
@@ -163,6 +163,9 @@ export const webTransport: Transport = {
     }
     return jgetOrDetail<ScanResult>(q);
   },
+
+  // 目录浏览 = 客户端部署机文件系统（「浏览」按钮；只列目录，不读内容）
+  fsBrowse: (p) => jgetOrDetail<FsBrowseResult>(`/api/fs/browse?path=${encodeURIComponent(p)}`),
 
   async submitScan(name: string, files: string[], subStatus?: Record<string, string>) {
     let r: Response;

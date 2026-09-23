@@ -17,6 +17,8 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
   pickVideoFolder: () =>
     ipcRenderer.invoke("pick-video-folder") as Promise<PickFolderItem[] | null>,
 
+  pickDir: (title?: string) => ipcRenderer.invoke("pick-dir", title) as Promise<string | null>,
+
   writeSrt: (videoPath: string, srtName: string, data: Uint8Array) =>
     ipcRenderer.invoke("write-srt", { videoPath, srtName, data }) as Promise<FileOpResult>,
 

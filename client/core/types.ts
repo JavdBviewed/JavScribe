@@ -114,6 +114,26 @@ export interface ScanResult {
   naming_c?: string;
 }
 
+/** 目录浏览条目（web 形态 GET /api/fs/browse） */
+export interface FsBrowseEntry {
+  name: string;
+  is_dir: boolean;
+  /** 文件大小 MB（仅文件） */
+  size_mb?: number | null;
+}
+
+/** GET /api/fs/browse：客户端部署机目录浏览快照 */
+export interface FsBrowseResult {
+  ok: boolean;
+  path: string;
+  /** 上级目录；根目录为 "" */
+  parent: string;
+  home: string;
+  entries: FsBrowseEntry[];
+  /** 超过 4000 项被截断 */
+  truncated?: boolean;
+}
+
 /** GitHub Release 条目（/api/update 版本对比用） */
 export interface UpdateRelease {
   version: string;
