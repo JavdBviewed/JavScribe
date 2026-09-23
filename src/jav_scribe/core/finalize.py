@@ -473,6 +473,9 @@ def _split_cue(
 def sanitize_srt_text(text: str, log: Optional[LogFn] = None) -> tuple[str, int]:
     """返回 (清洗后的 srt 文本, 修正的 cue 数)。完全合法的文件原样返回、计数 0。"""
     logf = log or (lambda _s: None)
+    # 旧版（v0.1.6 及以前）指纹 cue 时间戳为缩写 "00 --> 00"，先归一化，
+    # 否则严格解析会拒绝整个文件（存量 srt 修复场景）
+    text = re.sub(r"(?m)^\s*00\s*-->\s*00\s*$", "00:00:00,000 --> 00:00:00,000", text)
     try:
         blocks = _parse_srt_blocks(text)
     except ValueError as ex:

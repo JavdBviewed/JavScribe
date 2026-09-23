@@ -579,6 +579,22 @@ def test_sanitize_split_long_cue_idempotent() -> None:
     print("  test_sanitize_split_long_cue_idempotent OK")
 
 
+def test_sanitize_legacy_marker_format() -> None:
+    """旧 v0.1.6 指纹（"00 --> 00" 缩写时间戳）应归一化而非拒绝整个文件。"""
+    text = (
+        "1\n00 --> 00\n<!-- jav-scribe v0.1.6 | engine=server -->\n\n"
+        "2\n00:00:01,000 --> 00:00:09,000\n"
+        "诶 感觉很棒呢不不不 我想要听你具体说说怎么做的感觉像是按摩一样的感觉油按摩？对对对油按摩\n\n"
+    )
+    new1, fixed1 = sanitize_srt_text(text)
+    assert "00:00:00,000 --> 00:00:00,000" in new1
+    assert "<!-- jav-scribe v0.1.6 | engine=server -->" in new1
+    assert fixed1 >= 1, (fixed1, new1)  # 长 cue 切分生效
+    new2, fixed2 = sanitize_srt_text(new1)
+    assert fixed2 == 0 and new2 == new1
+    print("  test_sanitize_legacy_marker_format OK")
+
+
 def test_sanitize_file_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / "a.srt"
@@ -670,6 +686,7 @@ if __name__ == "__main__":
     test_collapse_srt_integration_idempotent()
     test_split_cue_units()
     test_sanitize_split_long_cue_idempotent()
+    test_sanitize_legacy_marker_format()
     test_run_finalize_sanitizes_negative()
     test_watch_stability()
     test_batch_two_files_no_skip_overwrite()
