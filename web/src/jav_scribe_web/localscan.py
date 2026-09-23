@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import re
 import shutil
@@ -71,6 +72,10 @@ class ScanError(ValueError):
     """扫描/提交请求被拒绝（路径非法 / 文件列表非法）。"""
 
 
+_log = logging.getLogger("jav_scribe_web.localscan")
+
+
+
 class ProbeError(Exception):
     """ffprobe 不可用或执行失败（区别于「探测成功但无字幕轨」；失败不缓存）。"""
 
@@ -98,18 +103,24 @@ _CACHE_MAX = 512
 _cache: dict[tuple[str, int, float], list[dict[str, Optional[str]]]] = {}
 _cache_lock = threading.Lock()
 
-_ffprobe_resolved = False
 _ffprobe_path: Optional[str] = None
+_ffprobe_lock = threading.Lock()
 
 
 def _resolve_ffprobe() -> Optional[str]:
-    global _ffprobe_resolved, _ffprobe_path
-    if _ffprobe_resolved:
-        return _ffprobe_path
-    _ffprobe_resolved = True
-    p = shutil.which("ffprobe")
-    if p:
-        _ffprobe_path = p
+    """解析 ffprobe 路径（线程安全）。
+
+    只缓存成功解析：并发首调时某线程的 which() 若瞬态返回 None（PATH
+    尚未就绪等），不能把失败写进缓存让同进程后续所有探测都「不可用」——
+    旧实现存在该竞态（首线程缓存 None，mp4 正常而 mkv 报不可用）。
+    """
+    global _ffprobe_path
+    with _ffprobe_lock:
+        if _ffprobe_path is not None:
+            return _ffprobe_path
+        p = shutil.which("ffprobe")
+        if p:
+            _ffprobe_path = p
     return _ffprobe_path
 
 
@@ -186,7 +197,8 @@ def probe_embedded_subs(
         return hit
     try:
         res = _run_ffprobe(p)
-    except ProbeError:
+    except ProbeError as e:
+        _log.warning("内嵌字幕探测失败 %s: %s", p, e)
         return None
     with _cache_lock:
         if len(_cache) >= _CACHE_MAX:

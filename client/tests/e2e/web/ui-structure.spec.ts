@@ -1,6 +1,6 @@
 // UI 结构类：关键 DOM 断言（id/class/aria、文案、列序、chip 文案）
 import { test, expect } from "@playwright/test";
-import { waitForEngineOnline, mockReset, cleanEngines, waitForJobsEmpty } from "../helpers";
+import { WEB_URL, waitForEngineOnline, mockReset, cleanEngines, waitForJobsEmpty } from "../helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await mockReset(request);
@@ -57,15 +57,15 @@ test("派单栏结构（含提取模式三选项与 autosave）", async ({ page 
   await expect(page.getByText("完成后写回源目录")).toBeVisible();
 });
 
-test("扫描面板结构（服务端目录语义文案）", async ({ page }) => {
-  await expect(page.locator(".scan-title")).toHaveText("扫描服务机器上的目录");
+test("扫描面板结构（客户端部署机语义文案）", async ({ page }) => {
+  await expect(page.locator(".scan-title")).toHaveText("扫描目录（客户端部署机）");
   await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  // 关键语义：路径填「所选服务」运行所在服务器，不是本机（长解释收进 ? 帮助 tooltip）
-  await expect(page.locator(".scan-head .muted")).toHaveText(/填「所选服务」所在机器上的目录/);
+  // 关键语义：路径填客户端（本页面服务）部署机上的目录，不是浏览器电脑（长解释收进 ? 帮助 tooltip）
+  await expect(page.locator(".scan-head .muted")).toHaveText(/填客户端部署机上的目录路径/);
   const tip = await page.locator(".scan-head .help").getAttribute("data-tip");
-  expect(tip).toMatch(/不是当前访问本页面这台电脑/);
+  expect(tip).toMatch(/不是浏览器所在电脑/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
@@ -97,7 +97,8 @@ test("页脚与 modal/toast 结构", async ({ page }) => {
   await expect(page.locator("#toasts")).toHaveAttribute("aria-live", "polite");
 });
 
-test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）", async ({ page }) => {
+test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）", async ({ page, request }) => {
+  const svcVer = ((await (await request.get(`${WEB_URL}/api/health`)).json()) as { version: string }).version;
   const card = page.locator('article.eng[data-name="mock"]');
   await expect(card).toHaveClass(/on/);
   await expect(card.locator(".lamp")).toHaveCount(1);
@@ -113,7 +114,7 @@ test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）",
   await expect(urlTxt).toHaveText("http://127.0.0.1:8301");
   const tags = card.locator(".eng-specs .tag");
   await expect(tags).toHaveCount(3);
-  expect(await tags.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["cuda", "v0.1.0", "运行 0"]);
+  expect(await tags.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["cuda", `v${svcVer}`, "运行 0"]);
 });
 
 test("服务表单校验（重名异址 400）", async ({ page, request }) => {

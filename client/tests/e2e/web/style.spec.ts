@@ -3,11 +3,14 @@
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import {
   waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockPause, cleanEngines, freezeForShot, shot, triggerToast,
-  addEngine, MOCK_KEY, FIXTURES, waitForJobsEmpty,
+  addEngine, MOCK_KEY, FIXTURES, waitForJobsEmpty, makeScanDir,
 } from "../helpers";
 import path from "node:path";
 
 const fx = (n: string) => path.join(FIXTURES, n);
+
+// 本地扫描夹具（工作台本机临时目录）
+const SCAN_DIR = makeScanDir();
 
 let req: APIRequestContext;
 test.beforeEach(async ({ page, request }) => {
@@ -110,7 +113,12 @@ test("设置弹窗：配置表单（8 组白名单）", async ({ page }) => {
 });
 
 test("扫描结果表（字幕标记行）", async ({ page }) => {
-  await page.locator("#scan-path").fill("/media/jav");
+  // 「忽略小于」默认 200MB 会多一个「过小」标签 → 置 0 保持基线语义
+  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
+  await page.reload();
+  await waitForEngineOnline(page);
+  await waitForEngineKey(page, "mock");
+  await page.locator("#scan-path").fill(SCAN_DIR);
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator("#scan-submit")).toBeVisible();

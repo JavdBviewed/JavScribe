@@ -15,7 +15,7 @@ if (process.env.MOCK_COUNT_FILE) {
   const { appendFileSync } = await import("node:fs");
   appendFileSync(process.env.MOCK_COUNT_FILE, String(process.pid) + "\n");
 }
-const VERSION = "0.1.0";
+const VERSION = process.argv[3] || "0.1.0"; // 由 playwright config 传入 web 当前版本（同版本基线）
 const GOOD_KEY = "mock-key-123";
 
 // ---- 配置项（与 serve progress_api.py CONFIG_ITEMS 一一对应）----
@@ -95,9 +95,9 @@ function makeTask(path, opts = {}) {
     eta_s: opts.eta_s ?? null,
   };
 }
-function jobOf(files, { source_kind = "remote", label = "" } = {}) {
+function jobOf(files, { source_kind = "remote", label = "", id } = {}) {
   const j = {
-    id: newId(),
+    id: id || newId(),
     created: Date.now() / 1000,
     finished: null,
     source_kind,
@@ -209,7 +209,7 @@ const server = http.createServer((req, res) => {
             output_files: [`/opt/jav-scribe/inbox/${sha1}.zh.srt`],
             message: "完成",
           });
-          const j = jobOf([t], { source_kind: "remote", label: "" });
+          const j = jobOf([t], { source_kind: "remote", label: "", id: "20260905-seed-hash" });
           return send(200, { ok: true, job_id: j.id });
         });
       }
@@ -226,7 +226,7 @@ const server = http.createServer((req, res) => {
               output_files: st === "done" ? [`/mock/out/seed-${String(i + 1).padStart(3, "0")}.zh.srt`] : [],
               message: st === "skipped" ? "字幕已存在 /media/jav/seed-x.zh.srt" : "",
             });
-            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}` });
+            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${String(i + 1).padStart(3, "0")}` });
             // 确定性 created（间隔 60s，seed-n 最新）：created 降序的分页断言不依赖真实毫秒
             j.created = Date.now() / 1000 - (n - i) * 60;
           }

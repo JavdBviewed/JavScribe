@@ -2,12 +2,15 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockSpeed, cleanEngines, addEngine, MOCK_KEY, MOCK_URL, FIXTURES,
-  waitForJobsEmpty,
+  waitForJobsEmpty, makeScanDir,
 } from "../helpers";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
+
+// 本地扫描夹具（工作台本机临时目录）
+const SCAN_DIR = makeScanDir();
 const readText = (p: string) => readFileSync(p, "utf-8");
 
 let req: APIRequestContext;
@@ -139,24 +142,38 @@ test("文件夹 chip 移除后派单禁用", async ({ page }) => {
   await expect(page.locator("#dispatch-go")).toBeDisabled();
 });
 
-test("扫描全流程：/media/jav → 默认勾选无字幕 → 全选 → 提交入队", async ({ page }) => {
-  await page.locator("#scan-path").fill("/media/jav");
+test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → 提交入队（本机管线）", async ({ page }) => {
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0 复刻旧语义
+  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
+  await page.reload();
+  await waitForEngineOnline(page);
+  await waitForEngineKey(page, "mock");
+  // 全选含已有字幕项 → 提交前弹确认（window.confirm），e2e 一律放行
+  page.on("dialog", (d) => d.accept());
+  await page.locator("#scan-path").fill(SCAN_DIR);
   await expect(page.locator("#scan-go")).toBeEnabled();
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator(".scan-name")).toHaveCount(3);
-  await expect(page.locator(".has-sub .subtag")).toHaveText("AKDL-002.zh.srt");
-  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 已有字幕的默认不勾选");
+  // 外部 srt 行：标签文案「外部 srt」，文件名在 title 上
+  const subtag = page.locator(".has-sub .subtag");
+  await expect(subtag).toHaveCount(1);
+  await expect(subtag).toHaveText("外部 srt");
+  await expect(subtag).toHaveAttribute("title", "AKDL-002.zh.srt");
+  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 1 个已有字幕默认不勾选");
   await expect(page.locator("#scan-submit")).toContainText("开始生成（2 项）");
   await page.locator("#scan-select-all").check();
-  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 已有字幕的默认不勾选");
+  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 1 个已有字幕默认不勾选");
   const [toast] = await Promise.all([
     page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
     page.click("#scan-submit"),
   ]);
-  expect(await toast.textContent()).toContain("已入队 3 项");
+  expect(await toast.textContent()).toContain("已入队 3 项（本机扫描）");
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".job-row .sub", { hasText: "文件夹扫描 · 3 项" })).toHaveCount(3, { timeout: 15_000 });
+  // 本机管线：3 条独立任务，label = 原始视频名（mock 侧 job label = 源名）
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-001.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-002.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
 });
 
 test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）", async ({ page }) => {
@@ -164,7 +181,7 @@ test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）
   await page.click("#scan-go");
   const t = page.locator("#toasts .toast.err");
   await expect(t).toBeVisible({ timeout: 5_000 });
-  expect(await t.textContent()).toContain("这是 Windows 本地路径");
+  expect(await t.textContent()).toContain("浏览器电脑的本地路径");
   expect(await t.textContent()).toContain("选择文件夹");
   await expect(page.locator("#scan-results")).toBeHidden();
 });

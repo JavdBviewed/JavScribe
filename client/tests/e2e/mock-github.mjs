@@ -8,24 +8,42 @@ import http from "node:http";
 
 const PORT = Number(process.argv[2] || 8303);
 
-const DEFAULTS = () => ({
+// 默认 Release 版本 = 工作台当前版本（启动时向 /api/health 取；取不到回退 0.1.0）。
+// 这样 web 版本 bump 后「同版本无角标」基线不用改测试。
+const FALLBACK_VERSION = "0.1.0";
+async function currentWebVersion() {
+  for (let i = 0; i < 20; i++) {
+    try {
+      const r = await fetch("http://127.0.0.1:8901/api/health", { cache: "no-store" });
+      if (r.ok) {
+        const d = await r.json();
+        if (d && d.version) return d.version;
+      }
+    } catch (_e) { /* 工作台还没就绪，重试 */ }
+    await new Promise((rs) => setTimeout(rs, 250));
+  }
+  console.warn("[mock-github] 取不到工作台版本，回退", FALLBACK_VERSION);
+  return FALLBACK_VERSION;
+}
+
+const DEFAULTS = (v) => ({
   app: {
-    tag_name: "v0.1.0",
-    name: "v0.1.0",
+    tag_name: `v${v}`,
+    name: `v${v}`,
     body: "JavScribe 首次发布",
-    html_url: "https://github.com/JavdBviewed/JavScribe/releases/tag/v0.1.0",
+    html_url: `https://github.com/JavdBviewed/JavScribe/releases/tag/v${v}`,
     published_at: "2026-09-05T00:00:00Z",
   },
   client: {
-    tag_name: "client-v0.1.0",
-    name: "JavScribe Client v0.1.0",
+    tag_name: `client-v${v}`,
+    name: `JavScribe Client v${v}`,
     body: "桌面端首次发布",
-    html_url: "https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.1.0",
+    html_url: `https://github.com/JavdBviewed/JavScribe/releases/tag/client-v${v}`,
     published_at: "2026-09-05T00:00:00Z",
   },
 });
 
-let state = DEFAULTS();
+let state = null;
 
 function releases() {
   return [state.client, state.app].filter(Boolean).map((x) => ({ ...x }));
@@ -67,10 +85,17 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.method === "POST" && req.url === "/_mock/reset") {
-    state = DEFAULTS();
+    state = DEFAULTS(stateVersion);
     return send(200, { ok: true });
   }
   send(404, { error: "not found" });
 });
 
-server.listen(PORT, "127.0.0.1", () => console.log(`[mock-github] :${PORT}`));
+// 先确定当前版本再对外服务，避免「同版本」基线与默认 Release 竞态
+// 版本优先取 playwright config 传入（argv[3]），独立运行时回退向 /api/health 取
+const argvVersion = process.argv[3];
+let stateVersion = argvVersion && /^\d+\.\d+\.\d+$/.test(argvVersion)
+  ? argvVersion
+  : await currentWebVersion();
+state = DEFAULTS(stateVersion);
+server.listen(PORT, "127.0.0.1", () => console.log(`[mock-github] :${PORT} (当前版本 v${stateVersion})`));

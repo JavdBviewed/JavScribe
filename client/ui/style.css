@@ -1287,3 +1287,79 @@ body.desktop main > section.view-on { display: block; }
 .help:hover::after, .help:focus-visible::after {
   opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0);
 }
+
+/* ---------- 服务设置弹窗 v2：元信息条 + 分组卡片 + 帮助悬浮 + 改动追踪 ---------- */
+.cfg-meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.cfg-lamp { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.cfg-lamp.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft), 0 0 8px var(--ok); }
+.cfg-lamp.off { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+.cfg-meta-name { font-weight: 650; font-size: 13px; }
+.cfg-meta-url {
+  font-size: 11px; color: var(--muted);
+  text-decoration: none; word-break: break-all; min-width: 0;
+}
+.cfg-meta-url:hover { color: var(--accent); text-decoration: underline; }
+.cfg-meta-tags { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.cfg-sec {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px 12px;
+}
+.cfg-sec-title {
+  margin: 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--fg);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.cfg-sec-desc { font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+.cfg-sec-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.cfg-row { display: flex; flex-direction: column; gap: 5px; position: relative; }
+.cfg-row.chk-row { flex-direction: row; align-items: center; gap: 9px; }
+.cfg-lab {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--fg); min-height: 15px;
+}
+.cfg-row.dirty .cfg-lab::before {
+  content: ""; flex: none;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+.cfg-row.dirty input, .cfg-row.dirty select { border-color: var(--accent); }
+.cfg-row.cfg-dim { opacity: 0.5; }
+.cfg-row.cfg-dim input, .cfg-row.cfg-dim select { background: var(--bg); }
+.modal-body .cfg-row input, .modal-body .cfg-row select {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.cfg-foot {
+  position: sticky; bottom: 0;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 2px -18px 0;
+  padding: 10px 18px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+.cfg-foot-note { font-size: 11px; color: var(--muted); flex: 1; min-width: 200px; }
+.cfg-foot-actions { display: flex; gap: 8px; }
+.set-note-title { font-weight: 700; margin-bottom: 4px; }
+
+/* 帮助图标 tooltip 方向变体（由 JS 按视口空间临时加类） */
+.help.flip::after { top: auto; bottom: calc(100% + 8px); }
+.help.edge-l::after { left: 0; transform: translateY(-2px); }
+.help.edge-l:hover::after, .help.edge-l:focus-visible::after { transform: translateY(0); }
+.help.edge-r::after { left: auto; right: 0; transform: translateY(-2px); }
+.help.edge-r:hover::after, .help.edge-r:focus-visible::after { transform: translateY(0); }
+/* 表格表头里的帮助图标：更小一号，悬浮文案压住表格 */
+.job-head .help { width: 13px; height: 13px; font-size: 9px; margin-left: 4px; }
+.job-head .help::before { content: "?"; } /* 表头 ? 不进 textContent：e2e 对列名做精确断言 */
+.job-head .help::after { z-index: 95; }
+.hud-item { display: inline-flex; align-items: center; gap: 5px; }

@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-BArnBLAV.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-B9xwUcqh.css">
+  <script type="module" crossorigin src="/assets/index-BVzQS0rk.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CFVOS-eS.css">
 </head>
 <body>
 <header>
@@ -19,7 +19,7 @@
     </div>
   </div>
   <div class="hud">
-    <span id="health" class="hud-item">连接中…</span>
+    <span class="hud-item"><span id="health">连接中…</span><span class="help" tabindex="0" data-tip="客户端版本 · 在线服务数：每 5 秒轮询一次。在线 = 服务端可达并正常上报；显示离线时检查服务端网络或容器是否在运行。">?</span></span>
     <span id="clock" class="hud-item mono">--:--:--</span>
   </div>
 </header>
@@ -33,6 +33,7 @@
         <input id="engine-url" type="url" placeholder="http://地址:8300" required>
         <input id="engine-key" type="password" placeholder="API Key（可选，用于服务设置）" maxlength="128">
         <button type="submit" class="btn">添加服务</button>
+        <span class="help" tabindex="0" data-tip="名称：展示名，随意起；地址：服务端 JavScribe Serve 的访问地址（一般为 http://服务端IP:8300）；API Key：服务端设置了 JAVSCRIBE_API_KEY 时必填，用于进「服务设置」修改服务端参数。不填也能提交生成任务。">?</span>
       </form>
     </div>
     <div id="local-serve-status" hidden>
@@ -80,7 +81,7 @@
 
     <div id="dispatch-bar">
       <label class="field">
-        <span class="field-label">选择服务</span>
+        <span class="field-label">选择服务<span class="help" tabindex="0" data-tip="选择由哪台字幕服务端处理：音轨上传到该服务、字幕在该服务上生成。可添加多台，在「服务设置」里分别配置参数。">?</span></span>
         <select id="engine-select"></select>
       </label>
       <label class="field">
@@ -109,11 +110,11 @@
           <input id="scan-path" class="mono" placeholder="/media/jav" spellcheck="false" autocomplete="off">
         </label>
         <label class="field scan-opts" id="scan-minsize-wrap" hidden>
-          <span class="field-label">忽略小于（MB）</span>
+          <span class="field-label">忽略小于（MB）<span class="help" tabindex="0" data-tip="低于该大小的文件不默认勾选（仍会列出，可手动勾选提交）。默认 200MB，用来挡掉预告片、片段与损坏文件。">?</span></span>
           <input id="scan-minsize" type="number" min="0" step="10" value="200">
         </label>
         <label class="field scan-opts" id="scan-namingc-wrap" hidden>
-          <span class="field-label">文件名独立 C</span>
+          <span class="field-label">文件名独立 C<span class="help" tabindex="0" data-tip="识别文件名里与编号用 - _ 空格 . [ ] 等分隔的独立 C（如 ABF-330-C、C-ABF-330，大小写均可）；粘在编号后的 330C、CD1/1CD 集数、Uncut 等不算独立 C。这里选择命中后把文件判成什么。">?</span></span>
           <select id="scan-namingc">
             <option value="no_sub">视为无字幕版（默认）</option>
             <option value="has_sub">视为 C 版（已压字幕）</option>
@@ -184,7 +185,13 @@
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">
-      <span>服务</span><span>文件</span><span>状态</span><span>进度</span><span>位置</span><span>耗时</span><span></span>
+      <span>服务<span class="help" tabindex="0" data-tip="处理该任务的字幕服务端（名称为添加服务时填的展示名）。"></span></span>
+      <span>文件<span class="help" tabindex="0" data-tip="客户端登记时的原始视频名。"></span></span>
+      <span>状态<span class="help" tabindex="0" data-tip="排队：等待服务端处理；运行中：正在识别；完成 / 失败 / 跳过 / 已取消 为终态。"></span></span>
+      <span>进度<span class="help" tabindex="0" data-tip="按已识别语音时长占全片时长估算；排队中为 0。"></span></span>
+      <span>位置<span class="help" tabindex="0" data-tip="运行中显示当前处理阶段（模型加载 / 语音检测 / 识别中）；完成后显示已识别到的时间轴位置。"></span></span>
+      <span>耗时<span class="help" tabindex="0" data-tip="从提交到结束的墙钟时间。"></span></span>
+      <span></span>
     </div>
     <div id="job-list" class="table-wrap"></div>
     <div id="jobs-empty" class="empty">
@@ -200,7 +207,7 @@
   <span class="mono">JAVSCRIBE-WEB</span>
   <span id="foot-ver" class="muted mono"></span>
   <span id="up-chip" class="up-chip" role="button" tabindex="0" hidden></span>
-  <span class="muted">看板 5s · 生成 1s</span>
+  <span class="muted">看板 5s · 生成 1s<span class="help" tabindex="0" data-tip="页面自动刷新节奏：任务看板与服务状态每 5 秒轮询一次；生成进行中每秒轮询一次进度。">?</span></span>
 </footer>
 <div id="modal-backdrop" hidden>
   <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">

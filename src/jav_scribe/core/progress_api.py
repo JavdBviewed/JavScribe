@@ -89,37 +89,112 @@ def cache_path(inbox_dir: Path, sha1: str, ext: str) -> Path:
 # (path, label, type, options|None, secret)
 # ---------------------------------------------------------------------------
 CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
+    # —— 字幕（输出命名 / 跳过判定 / 指纹）——
     ("subtitle.lang_tag", "字幕语言标签", "string", None, False),
+    ("subtitle.naming", "输出命名方式", "enum", ["rename", "keep"], False),
+    ("subtitle.formats", "输出格式（逗号分隔）", "list", None, False),
+    ("subtitle.tag_formats", "语言标签适用扩展名（逗号分隔）", "list", None, False),
+    ("subtitle.output_dir", "输出目录（服务端路径）", "string", None, False),
     ("subtitle.skip_if_exists", "字幕已存在时跳过", "bool", None, False),
     ("subtitle.overwrite", "覆盖已存在字幕", "bool", None, False),
-    ("subtitle.naming", "输出命名方式", "enum", ["rename", "keep"], False),
     ("subtitle.skip_embedded", "内嵌字幕时跳过", "enum", ["off", "target", "any"], False),
     ("subtitle.embedded_langs", "内嵌字幕目标语言（逗号分隔）", "list", None, False),
     ("subtitle.marker", "字幕写入 JavScribe 指纹", "bool", None, False),
+    # —— 推理引擎 ——
     ("infer.device", "推理设备", "enum", ["auto", "cpu", "cuda"], False),
     ("infer.model", "字幕模型", "string", None, False),
     ("infer.log_level", "日志级别", "enum", ["DEBUG", "INFO", "WARNING", "ERROR"], False),
     ("infer.batch", "批量推理", "bool", None, False),
     ("infer.max_batch_size", "批处理大小", "int", None, False),
+    # —— VAD 过滤 ——
     ("vad.threshold", "VAD 语音检测阈值", "float", None, False),
+    # —— AI 润色（可选 LLM 复核）——
     ("polish.enabled", "启用 AI 润色", "bool", None, False),
     ("polish.base_url", "润色服务地址", "string", None, False),
     ("polish.model", "润色模型", "string", None, False),
     ("polish.batch_lines", "润色批行数", "int", None, False),
+    ("polish.timeout_s", "润色请求超时（秒）", "int", None, False),
     ("polish.api_key", "润色 API Key", "secret", None, True),
+    # —— Emby 库刷新 ——
     ("emby.enabled", "启用 Emby 刷新", "bool", None, False),
     ("emby.url", "Emby 地址", "string", None, False),
     ("emby.api_key", "Emby API Key", "secret", None, True),
+    # —— 音频修复（JASNA，前置降噪）——
     ("jasna.enabled", "启用音频修复（JASNA）", "bool", None, False),
+    ("jasna.output", "修复输出命名模板", "string", None, False),
+    # —— 扫描规则（服务端 /scan 生效）——
     ("scan.video_exts", "视频扩展名（逗号分隔）", "list", None, False),
     ("scan.subtitle_patterns", "已有字幕判定后缀（逗号分隔）", "list", None, False),
     ("scan.recurse", "扫描时进入子目录", "bool", None, False),
+    # —— 存储 ——
     ("storage.retention_days", "缓存保留天数（音轨/字幕）", "int", None, False),
 ]
 
 CONFIG_SPEC = {path: (label, ftype, options, secret) for path, label, ftype, options, secret in CONFIG_ITEMS}
 
+# 每项的帮助文案（客户端「服务设置」? 图标悬浮展示；旧客户端忽略该字段）
+CONFIG_HINTS: dict[str, str] = {
+    "subtitle.lang_tag": "加在影片名后的语言标签：zh → <片名>.zh.srt。客户端下载/写回按该标签匹配，无特殊需求保持 zh。",
+    "subtitle.naming": "rename = 统一改名为 <片名>.<标签>.srt（推荐，客户端按此命名写回）；keep = 保留引擎原始输出文件名。",
+    "subtitle.formats": "识别引擎一次产出的字幕格式，逗号分隔。必须包含 srt（客户端链路按 srt 交付），可加 vtt / lrc。",
+    "subtitle.tag_formats": "落位时加语言标签的扩展名：这些格式的文件会命名成 <片名>.<标签>.*；其它格式保留引擎原文件名。",
+    "subtitle.output_dir": "服务端上字幕落盘目录的绝对路径。留空 = 与源视频同目录（推荐；远端任务的字幕随后会经下载/写回交付，本地路径填了客户端也取不到）。",
+    "subtitle.skip_if_exists": "目标字幕文件已存在时，该视频直接跳过、不再重复生成。",
+    "subtitle.overwrite": "目标字幕已存在时，用新生成的覆盖。与「已存在时跳过」同时开启时，覆盖优先。",
+    "subtitle.skip_embedded": "off = 永不跳过；target = 仅当内嵌轨命中下方目标语言时跳过（推荐）；any = 有任意内嵌字幕轨就跳过。",
+    "subtitle.embedded_langs": "「内嵌字幕时跳过」生效时用的目标语言，如 zh、ja，逗号分隔；内嵌轨语言命中即视为已有字幕。",
+    "subtitle.marker": "在生成的 srt 末尾追加 JavScribe 指纹（注释 + 0 时长 cue），用于识别本工具产出的文件；幂等，已有指纹不重复写。",
+    "infer.device": "cuda = 用服务端 GPU 推理（需已装驱动）；cpu = 纯 CPU（慢很多）；auto = 引擎自行选择。",
+    "infer.model": "识别模型目录/名。通常保持不变；改成别的名字前需确认服务端已有该模型。",
+    "infer.log_level": "识别引擎日志详细度。排障用 DEBUG，平时 WARNING 更安静。",
+    "infer.batch": "开启后引擎把队列内多个音轨合并成批推理，GPU 利用率与排队吞吐更高。",
+    "infer.max_batch_size": "一批最多并行多少条音轨：越大排空越快、显存/内存压力越高；默认 8。",
+    "vad.threshold": "语音检测阈值 0.01~0.99：越高越抗背景噪声，但轻声可能被切掉；越低越灵敏，但音乐/噪声更容易被当成语音识别。留空用引擎默认 0.5。",
+    "polish.enabled": "生成字幕后再用大语言模型通读一遍，修正错译、漏译与不通顺。需同时配置下方地址/模型/Key 才生效。",
+    "polish.base_url": "OpenAI 兼容 Chat 接口地址（Ollama / vLLM / 商用 API 均可），如 http://127.0.0.1:11434/v1。",
+    "polish.model": "润色模型名，须与润色服务里登记的模型一致，如 qwen2.5:14b。",
+    "polish.batch_lines": "每次发给模型的字幕行数。过大易让模型改错行数；默认 60。",
+    "polish.timeout_s": "单次请求润色服务的超时秒数。本地模型跑长字幕建议调大，如 600。",
+    "polish.api_key": "润色服务的 Key。留空 = 保持现值；只会发送到你配置的润色服务地址。",
+    "emby.enabled": "字幕生成后通知 Emby 刷新媒体库，新字幕轨立即可选（需服务端能访问到 Emby 地址）。",
+    "emby.url": "Emby 访问地址，如 http://192.168.0.134:8096。",
+    "emby.api_key": "Emby 管理员 API Key。留空 = 保持现值。",
+    "jasna.enabled": "识别前先对音轨做 JASNA 降噪修复。仅当服务端已配置 JASNA 命令（服务端内部设置，不能在此改）时可用。",
+    "jasna.output": "修复后音频的文件名模板：{stem}=影片名，{ext}=扩展名，如 {stem}_restored{ext}。",
+    "scan.video_exts": "「扫描目录」时当作视频的扩展名，逗号分隔，如 mp4, mkv, ts。",
+    "scan.subtitle_patterns": "判定「该视频已有字幕文件」的后缀，如 .zh.srt, .srt：同目录存在 <片名>+<后缀> 即视为已有字幕。",
+    "scan.recurse": "「扫描目录」时是否递归进入子目录。",
+    "storage.retention_days": "服务端自动清理周期：inbox 里的上传音轨与生成字幕副本，超过 N 天未被引用即删除；落在影片旁的成品字幕不受影响。",
+}
+
 _LANG_TAG_RE = re.compile(r"^[A-Za-z0-9]{2,16}$")
+
+# ChickenRice 支持的字幕输出格式（modal_infer.SUB_FORMATS = "srt,vtt,lrc"）
+_SUB_FMT_ALLOWED = ("srt", "vtt", "lrc")
+
+
+def _normalize_subtitle_formats(value: Any, *, require_srt: bool) -> list[str]:
+    """字幕格式列表：接受 list[str] 或逗号分隔字符串；成员限 srt/vtt/lrc，1~3 项。"""
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = [x for x in value if isinstance(x, str)]
+    else:
+        raise ConfigError("字幕格式需要字符串数组或逗号分隔字符串")
+    out: list[str] = []
+    for raw in items:
+        ext = str(raw).strip().lower().lstrip(".")
+        if not ext:
+            continue
+        if ext not in _SUB_FMT_ALLOWED:
+            raise ConfigError(f"非法字幕格式: {raw!r}（仅支持 {' / '.join(_SUB_FMT_ALLOWED)}）")
+        if ext not in out:
+            out.append(ext)
+    if not out:
+        raise ConfigError("字幕格式不能为空")
+    if require_srt and "srt" not in out:
+        raise ConfigError("字幕格式必须包含 srt（客户端链路按 srt 交付）")
+    return out
 
 
 class ConfigError(ValueError):
@@ -153,6 +228,8 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 最大 1000")
             if path == "storage.retention_days" and value > 3650:
                 raise ConfigError(f"{path} 最大 3650")
+            if path == "polish.timeout_s" and not (5 <= value <= 3600):
+                raise ConfigError(f"{path} 需在 5 ~ 3600 之间")
         elif ftype == "float":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError(f"{path} 需要数字")
@@ -179,6 +256,10 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                         value = subprobe.normalize_embedded_langs(value)
                     except subprobe.EmbedLangsError as ex2:
                         raise scanlib.ScanError(str(ex2))
+                elif path == "subtitle.formats":
+                    value = _normalize_subtitle_formats(value, require_srt=True)
+                elif path == "subtitle.tag_formats":
+                    value = _normalize_subtitle_formats(value, require_srt=False)
                 else:  # 通用 list（预留）
                     raise scanlib.ScanError(f"{path} 暂不支持列表更新")
             except scanlib.ScanError as ex:
@@ -191,6 +272,13 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 过长（≤512 字符）")
             if path == "subtitle.lang_tag" and not _LANG_TAG_RE.match(value):
                 raise ConfigError("subtitle.lang_tag 需要 2-16 位字母数字（如 zh / ja）")
+            if path == "jasna.output":
+                if not (1 <= len(value) <= 128):
+                    raise ConfigError("jasna.output 需 1~128 字符")
+                if "/" in value or "\\" in value:
+                    raise ConfigError("jasna.output 是文件名模板，不能含路径分隔符")
+                if "{stem}" not in value and "{ext}" not in value:
+                    raise ConfigError("jasna.output 需包含 {stem} 或 {ext}")
         section, key = path.split(".", 1)
         out.append((section, key, value))
     return out
@@ -211,6 +299,9 @@ def build_config_view(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             item["options"] = options
         if secret:
             item["secret"] = True
+        hint = CONFIG_HINTS.get(path)
+        if hint:
+            item["hint"] = hint
         items.append(item)
     return items
 

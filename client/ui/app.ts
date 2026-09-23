@@ -1780,7 +1780,115 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // ---------- 服务设置 modal ----------
-  const GROUP_ZH: Record<string, string> = { subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色", emby: "Emby", jasna: "音频修复", scan: "扫描规则" };
+  // ---------- 服务设置 modal（服务端参数：分组卡片 + 帮助悬浮 + 改动追踪） ----------
+  const GROUP_ZH: Record<string, string> = {
+    subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色",
+    emby: "Emby 刷新", jasna: "音频修复", scan: "扫描规则", storage: "缓存清理",
+  };
+  // 组职责一句话（组标题右侧）
+  const GROUP_DESC: Record<string, string> = {
+    subtitle: "命名、格式与跳过判定",
+    infer: "语音识别使用的模型与设备",
+    vad: "语音检测：滤掉背景乐/噪声再进识别",
+    polish: "生成后再用大模型复核一遍（可选）",
+    emby: "生成后自动刷新 Emby 媒体库",
+    jasna: "识别前先对音轨降噪修复",
+    scan: "服务端「扫描目录」的判定规则",
+    storage: "服务端临时缓存的清理周期",
+  };
+  // enum 选项的中文展示（提交值仍是原始值）
+  const ENUM_ZH: Record<string, Record<string, string>> = {
+    "subtitle.naming": {
+      rename: "rename · 统一 <片名>.<标签>.srt（推荐）",
+      keep: "keep · 保留引擎原始输出名",
+    },
+    "subtitle.skip_embedded": {
+      off: "永不跳过",
+      target: "命中目标语言才跳过（推荐）",
+      any: "有任意内嵌字幕轨就跳过",
+    },
+    "infer.device": {
+      auto: "auto · 引擎自选",
+      cpu: "cpu · 纯 CPU（慢）",
+      cuda: "cuda · GPU（需驱动）",
+    },
+    "infer.log_level": {
+      DEBUG: "DEBUG · 最详细（排障用）",
+      INFO: "INFO · 默认",
+      WARNING: "WARNING · 安静（推荐）",
+      ERROR: "ERROR · 仅错误",
+    },
+  };
+  // 各设置项帮助文案（与服务端 CONFIG_HINTS 同源生成；服务端返回 hint 时优先用服务端的）
+  const HINT_FALLBACK: Record<string, string> = {
+    "subtitle.lang_tag": "加在影片名后的语言标签：zh → <片名>.zh.srt。客户端下载/写回按该标签匹配，无特殊需求保持 zh。",
+    "subtitle.naming": "rename = 统一改名为 <片名>.<标签>.srt（推荐，客户端按此命名写回）；keep = 保留引擎原始输出文件名。",
+    "subtitle.formats": "识别引擎一次产出的字幕格式，逗号分隔。必须包含 srt（客户端链路按 srt 交付），可加 vtt / lrc。",
+    "subtitle.tag_formats": "落位时加语言标签的扩展名：这些格式的文件会命名成 <片名>.<标签>.*；其它格式保留引擎原文件名。",
+    "subtitle.output_dir": "服务端上字幕落盘目录的绝对路径。留空 = 与源视频同目录（推荐；远端任务的字幕随后会经下载/写回交付，本地路径填了客户端也取不到）。",
+    "subtitle.skip_if_exists": "目标字幕文件已存在时，该视频直接跳过、不再重复生成。",
+    "subtitle.overwrite": "目标字幕已存在时，用新生成的覆盖。与「已存在时跳过」同时开启时，覆盖优先。",
+    "subtitle.skip_embedded": "off = 永不跳过；target = 仅当内嵌轨命中下方目标语言时跳过（推荐）；any = 有任意内嵌字幕轨就跳过。",
+    "subtitle.embedded_langs": "「内嵌字幕时跳过」生效时用的目标语言，如 zh、ja，逗号分隔；内嵌轨语言命中即视为已有字幕。",
+    "subtitle.marker": "在生成的 srt 末尾追加 JavScribe 指纹（注释 + 0 时长 cue），用于识别本工具产出的文件；幂等，已有指纹不重复写。",
+    "infer.device": "cuda = 用服务端 GPU 推理（需已装驱动）；cpu = 纯 CPU（慢很多）；auto = 引擎自行选择。",
+    "infer.model": "识别模型目录/名。通常保持不变；改成别的名字前需确认服务端已有该模型。",
+    "infer.log_level": "识别引擎日志详细度。排障用 DEBUG，平时 WARNING 更安静。",
+    "infer.batch": "开启后引擎把队列内多个音轨合并成批推理，GPU 利用率与排队吞吐更高。",
+    "infer.max_batch_size": "一批最多并行多少条音轨：越大排空越快、显存/内存压力越高；默认 8。",
+    "vad.threshold": "语音检测阈值 0.01~0.99：越高越抗背景噪声，但轻声可能被切掉；越低越灵敏，但音乐/噪声更容易被当成语音识别。留空用引擎默认 0.5。",
+    "polish.enabled": "生成字幕后再用大语言模型通读一遍，修正错译、漏译与不通顺。需同时配置下方地址/模型/Key 才生效。",
+    "polish.base_url": "OpenAI 兼容 Chat 接口地址（Ollama / vLLM / 商用 API 均可），如 http://127.0.0.1:11434/v1。",
+    "polish.model": "润色模型名，须与润色服务里登记的模型一致，如 qwen2.5:14b。",
+    "polish.batch_lines": "每次发给模型的字幕行数。过大易让模型改错行数；默认 60。",
+    "polish.timeout_s": "单次请求润色服务的超时秒数。本地模型跑长字幕建议调大，如 600。",
+    "polish.api_key": "润色服务的 Key。留空 = 保持现值；只会发送到你配置的润色服务地址。",
+    "emby.enabled": "字幕生成后通知 Emby 刷新媒体库，新字幕轨立即可选（需服务端能访问到 Emby 地址）。",
+    "emby.url": "Emby 访问地址，如 http://192.168.0.134:8096。",
+    "emby.api_key": "Emby 管理员 API Key。留空 = 保持现值。",
+    "jasna.enabled": "识别前先对音轨做 JASNA 降噪修复。仅当服务端已配置 JASNA 命令（服务端内部设置，不能在此改）时可用。",
+    "jasna.output": "修复后音频的文件名模板：{stem}=影片名，{ext}=扩展名，如 {stem}_restored{ext}。",
+    "scan.video_exts": "「扫描目录」时当作视频的扩展名，逗号分隔，如 mp4, mkv, ts。",
+    "scan.subtitle_patterns": "判定「该视频已有字幕文件」的后缀，如 .zh.srt, .srt：同目录存在 <片名>+<后缀> 即视为已有字幕。",
+    "scan.recurse": "「扫描目录」时是否递归进入子目录。",
+    "storage.retention_days": "服务端自动清理周期：inbox 里的上传音轨与生成字幕副本，超过 N 天未被引用即删除；落在影片旁的成品字幕不受影响。",
+  };
+  // 各分区的「启用」项：未勾选时其余项置灰（仍可编辑）
+  const GATE_SEC: Record<string, string> = {
+    "polish.enabled": "polish",
+    "emby.enabled": "emby",
+    "jasna.enabled": "jasna",
+  };
+
+  function helpIcon(tip: string): string {
+    return `<span class="help" tabindex="0" data-tip="${esc(tip)}">?</span>`;
+  }
+
+  // 帮助图标 tooltip 自动翻转：下方空间不足时改上翻，贴近屏幕左右边缘时贴边对齐，
+  // 避免悬浮文案被视口/弹窗裁掉（纯 CSS 定位 + 事件时补一个方向类）
+  function helpRelocate(el: HTMLElement): void {
+    const r = el.getBoundingClientRect();
+    const estH = Math.min(200, 34 + Math.max(1, Math.ceil((el.dataset.tip || "").length / 20)) * 19);
+    el.classList.toggle("flip", r.bottom + estH + 20 > window.innerHeight && r.top > estH + 20);
+    el.classList.toggle("edge-l", r.left < 16);
+    el.classList.toggle("edge-r", r.left >= 16 && r.right > window.innerWidth - 16 && r.left > 180);
+  }
+  document.addEventListener("mouseover", (ev) => {
+    const h = (ev.target as HTMLElement).closest?.(".help");
+    if (h) helpRelocate(h as HTMLElement);
+  });
+  document.addEventListener("focusin", (ev) => {
+    const h = (ev.target as HTMLElement).closest?.(".help");
+    if (h) helpRelocate(h as HTMLElement);
+  });
+  document.addEventListener("mouseout", (ev) => {
+    const h = (ev.target as HTMLElement).closest?.(".help");
+    if (h) (h as HTMLElement).classList.remove("flip", "edge-l", "edge-r");
+  });
+  document.addEventListener("focusout", (ev) => {
+    const h = (ev.target as HTMLElement).closest?.(".help");
+    if (h) (h as HTMLElement).classList.remove("flip", "edge-l", "edge-r");
+  });
 
   function showModal(title: string) {
     $("modal-title").textContent = title;
@@ -1804,10 +1912,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const body = $("modal-body");
     if (!e || !e.has_key) {
       body.innerHTML = `
-      <div class="set-note">该服务还没有登记 API Key。保存后才可以读取和管理服务端设置项。</div>
+      <div class="set-note">
+        <div class="set-note-title">该服务尚未登记 API Key</div>
+        登记后即可在此查看与修改服务端设置（字幕规则、模型、润色、Emby 等）；
+        不登记也能正常提交生成任务，只是进不了服务端设置。
+      </div>
       <form id="key-form" class="set-row" autocomplete="off">
         <label class="field grow">
-          <span class="field-label">API Key</span>
+          <span class="field-label">API Key${helpIcon("需与服务端环境变量 JAVSCRIBE_API_KEY 完全一致。Key 只保存在客户端本机，请求时随 X-Api-Key 头发送。")}</span>
           <input id="key-input" class="mono" type="password" maxlength="128" required
                  placeholder="与服务端环境变量 JAVSCRIBE_API_KEY 一致">
         </label>
@@ -1832,13 +1944,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       .then((items) => renderConfigForm(name, items))
       .catch((err: Error) => {
         body.innerHTML = `
-        <div class="set-note err">${esc(err.message)}</div>
-        <div class="muted small">若提示 Key 不正确：先清空 Key（保存空值）再重填；若提示版本过旧：请升级该服务端的 JavScribe。</div>`;
+        <div class="set-note err">
+          <div class="set-note-title">无法读取服务端设置</div>
+          ${esc(err.message)}
+        </div>
+        <div class="muted small">提示：若 Key 不正确，先把 Key 清空（保存空值）再重填；若提示版本过旧，请升级该服务端的 JavScribe。</div>`;
       });
   }
 
   function renderConfigForm(name: string, items: ConfigItem[]) {
     state.cfgItems = items;
+    const e = (state.engines || []).find((x) => x.name === name);
     const groups: Record<string, ConfigItem[]> = {};
     for (const it of items) {
       const g = it.path.split(".")[0];
@@ -1846,44 +1962,121 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const body = $("modal-body");
     let html = "";
-    for (const [g, list] of Object.entries(groups)) {
-      html += `<div class="set-group">${esc(GROUP_ZH[g] || g)}</div>`;
-      for (const it of list) html += configFieldHtml(it);
+    if (e) {
+      html += `
+      <div class="cfg-meta">
+        <span class="cfg-lamp${e.online ? " on" : " off"}"></span>
+        <span class="cfg-meta-name">${esc(e.name)}</span>
+        <a class="cfg-meta-url mono" href="${esc(e.url)}" target="_blank" rel="noopener" title="打开服务端页面">${esc(e.url)}</a>
+        <span class="cfg-meta-tags">
+          <span class="tag">${esc(e.device || "—")}</span>
+          <span class="tag">v${esc(e.version || "—")}</span>
+          <span class="tag${e.jobs_running ? " hot" : ""}">${e.jobs_running ? `运行 ${e.jobs_running}` : "队列空闲"}</span>
+        </span>
+      </div>`;
     }
+    for (const [g, list] of Object.entries(groups)) {
+      html += `
+      <section class="cfg-sec" data-sec="${esc(g)}">
+        <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
+        <div class="cfg-sec-body">${list.map(configFieldHtml).join("")}</div>
+      </section>`;
+    }
+    const hasSecret = items.some((i) => i.type === "secret");
     html += `
-    <div class="set-row">
-      <button type="button" id="cfg-save" class="btn btn-primary">保存设置</button>
-      <span class="muted small">改动对之后新提交的任务生效；敏感项留空 = 保持不变。</span>
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">保存后对新提交的任务生效${hasSecret ? "；Key 类留空 = 保持不变" : ""}</span>
+      <span id="cfg-dirty" class="muted small">无改动</span>
+      <span class="cfg-foot-actions">
+        <button type="button" id="cfg-reset" class="btn" hidden>重置改动</button>
+        <button type="button" id="cfg-save" class="btn btn-primary">保存设置</button>
+      </span>
     </div>`;
     body.innerHTML = html;
-    $("cfg-save").onclick = () => saveConfig(name);
+    // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
+    body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+      const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
+      if (!ctl) return;
+      const sync = (): void => {
+        const cur = ctl instanceof HTMLInputElement && ctl.type === "checkbox"
+          ? JSON.stringify(ctl.checked)
+          : JSON.stringify(ctl.value);
+        row.classList.toggle("dirty", cur !== (row.dataset.base ?? ""));
+        const n = body.querySelectorAll(".cfg-row.dirty").length;
+        const d = $("cfg-dirty");
+        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        const r = $("cfg-reset");
+        if (r) r.hidden = n === 0;
+      };
+      ctl.addEventListener("input", sync);
+      ctl.addEventListener("change", sync);
+      if (ctl.type === "checkbox" && GATE_SEC[row.dataset.path || ""]) {
+        ctl.addEventListener("change", () => applyGating(body));
+      }
+    });
+    applyGating(body);
+    ($("cfg-reset") as HTMLButtonElement).onclick = () => {
+      body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+        const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
+        if (!ctl) return;
+        const base = JSON.parse(row.dataset.base ?? '""') as boolean | string;
+        if (ctl.type === "checkbox") ctl.checked = base === true;
+        else ctl.value = base === true ? "true" : base === false ? "false" : String(base);
+        ctl.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    ($("cfg-save") as HTMLButtonElement).onclick = () => saveConfig(name);
+  }
+
+  // 「启用」项未勾选 → 同分区其余项置灰（保留可编辑：勾启用 + 填值可一起保存）
+  function applyGating(body: HTMLElement): void {
+    for (const path of Object.keys(GATE_SEC)) {
+      const row = body.querySelector<HTMLElement>(`.cfg-row[data-path="${path}"]`);
+      const ctl = row?.querySelector<HTMLInputElement>("input[type=checkbox]");
+      const section = row?.closest<HTMLElement>(".cfg-sec");
+      if (!row || !ctl || !section) continue;
+      for (const r of section.querySelectorAll<HTMLElement>(".cfg-row")) {
+        if (r !== row) r.classList.toggle("cfg-dim", !ctl.checked);
+      }
+    }
   }
 
   function configFieldHtml(it: ConfigItem): string {
     const id = "cfg-" + it.path.replace(/\./g, "-");
+    const tip = it.hint || HINT_FALLBACK[it.path] || "";
+    const lab = (text: string): string =>
+      `<span class="cfg-lab">${esc(text)}${tip ? helpIcon(tip) : ""}</span>`;
+    const baseVal: string | boolean = it.type === "bool" ? !!it.value
+      : it.type === "secret" ? "" : (it.value == null ? "" : String(it.value));
+    const base = JSON.stringify(baseVal);
     if (it.type === "bool") {
-      return `<label class="chk-row"><input type="checkbox" id="${id}" data-path="${esc(it.path)}"${it.value ? " checked" : ""}>
-      <span>${esc(it.label)}</span></label>`;
+      return `<label class="cfg-row chk-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
+      <input type="checkbox" id="${id}"${it.value ? " checked" : ""}>
+      ${lab(it.label)}</label>`;
     }
     if (it.type === "enum") {
-      const opts = (it.options || []).map((o: string) => `<option value="${esc(o)}"${o === it.value ? " selected" : ""}>${esc(o)}</option>`).join("");
-      return `<label class="field"><span class="field-label">${esc(it.label)}</span>
-      <select id="${id}" data-path="${esc(it.path)}">${opts}</select></label>`;
+      const zh = ENUM_ZH[it.path] || {};
+      const opts = (it.options || []).map((o: string) =>
+        `<option value="${esc(o)}"${o === it.value ? " selected" : ""}>${esc(zh[o] || o)}</option>`).join("");
+      return `<div class="cfg-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
+      ${lab(it.label)}
+      <select id="${id}">${opts}</select></div>`;
     }
     if (it.type === "list") {
       const val = Array.isArray(it.value) ? (it.value as string[]).join(", ") : (it.value == null ? "" : String(it.value));
-      return `<label class="field"><span class="field-label">${esc(it.label)}</span>
-      <input id="${id}" type="text" class="mono" data-path="${esc(it.path)}"
-             value="${esc(val)}" placeholder="逗号分隔，如 mp4, mkv"></label>`;
+      return `<div class="cfg-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
+      ${lab(it.label)}
+      <input id="${id}" type="text" class="mono" value="${esc(val)}" placeholder="逗号分隔" spellcheck="false" autocomplete="off"></div>`;
     }
     const type = it.type === "int" || it.type === "float" ? "number" : it.type === "secret" ? "password" : "text";
     const val = it.type === "secret" ? "" : (it.value == null ? "" : String(it.value));
     const ph = it.type === "secret" ? (it.value === "***" ? "已设置，留空保持不变" : "")
       : it.type === "float" ? "留空用服务端默认（0.5）" : "";
-    const numAttrs = it.type === "float" ? ' step="0.05" min="0.01" max="0.99"' : it.type === "int" ? " min=1" : "";
-    return `<label class="field"><span class="field-label">${esc(it.label)}</span>
-    <input id="${id}" type="${type}"${numAttrs} class="${it.type === "secret" ? "mono" : ""}"
-           data-path="${esc(it.path)}" value="${esc(val)}" placeholder="${esc(ph)}"></label>`;
+    const numAttrs = it.type === "float" ? ' step="0.05" min="0.01" max="0.99"' : it.type === "int" ? ' min="1"' : "";
+    return `<div class="cfg-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
+      ${lab(it.label)}
+      <input id="${id}" type="${type}"${numAttrs} class="${it.type === "secret" ? "mono" : ""}"
+             value="${esc(val)}" placeholder="${esc(ph)}" spellcheck="false" autocomplete="off"></div>`;
   }
 
   async function saveConfig(name: string) {
@@ -1913,7 +2106,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       await t.putConfig(name, values);
       toast("服务设置已保存（对新提交的任务生效）", "ok");
       refresh();
-      openSettings(name); // 重新拉取，敏感项回到打码状态
+      openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
     } catch (e) {
       toast((e as Error).message, "err");
     }

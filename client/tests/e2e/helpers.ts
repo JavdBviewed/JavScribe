@@ -1,9 +1,31 @@
 import { expect, type Page, type APIRequestContext } from "@playwright/test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export const MOCK_URL = "http://127.0.0.1:8301";
 export const WEB_URL = "http://127.0.0.1:8901";
 export const MOCK_KEY = "mock-key-123";
 export const FIXTURES = new URL("./fixtures", import.meta.url).pathname;
+
+/**
+ * 本地扫描测试目录：临时目录放 3 个真视频（AKDL-001 / AKDL-002+外部 srt / SUB-001），
+ * 复刻旧 mock 的 /media/jav 语义——扫描现在读工作台机器本地盘，不再是 mock 虚拟目录。
+ */
+export function makeScanDir(): string {
+  // 固定目录名：路径会显示在 #scan-path 输入框里，随机名会让像素基线每次跑都漂移
+  const dir = path.join(os.tmpdir(), "javweb-scan-e2e");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(path.join(FIXTURES, "video-a.mp4"), path.join(dir, "AKDL-001.mp4"));
+  fs.copyFileSync(path.join(FIXTURES, "video-a.mp4"), path.join(dir, "AKDL-002.mp4"));
+  fs.writeFileSync(
+    path.join(dir, "AKDL-002.zh.srt"),
+    "1\n00:00:00,000 --> 00:00:02,000\nテスト字幕\n",
+  );
+  fs.copyFileSync(path.join(FIXTURES, "video-b.mkv"), path.join(dir, "SUB-001.mkv"));
+  return dir;
+}
 
 /** mock serve 控制口（测试专用） */
 export async function mockControl(req: APIRequestContext, path: string, body?: unknown) {
@@ -26,12 +48,20 @@ export const mockConfigMode = (req: APIRequestContext, mode: string) => mockCont
  * reuseExistingServer 下 web 进程跨 suite 存活：上一 suite 遗留的 running 任务
  * 在 mockReset 后仍会在快照里滞留最多一个 tick（1s），页面先渲染就会拍到残留行。
  */
-export async function waitForJobsEmpty(req: APIRequestContext, timeoutMs = 10_000) {
+export async function waitForJobsEmpty(req: APIRequestContext, timeoutMs = 15_000) {
   const t0 = Date.now();
+  let rows: unknown[] = [];
   for (;;) {
-    const rows = (await (await req.get("/api/jobs")).json()) as unknown[];
+    rows = (await (await req.get("/api/jobs")).json()) as unknown[];
     if (rows.length === 0) return;
-    if (Date.now() - t0 > timeoutMs) throw new Error("web 快照任务未在超时内清空");
+    if (Date.now() - t0 > timeoutMs) {
+      // 诊断：dump 剩余行的关键字段，定位卡住的相位（error 行 TTL 24h 不会自清）
+      const brief = rows.slice(0, 3).map((r) => {
+        const o = r as any;
+        return JSON.stringify({ job_id: o.job_id, phase: o.phase, status: o.status, message: o.message, ts: o.ts ?? o.created });
+      });
+      throw new Error(`web 快照任务未在超时内清空（剩 ${rows.length} 行）: ${brief.join(" | ")}`);
+    }
     await new Promise((r) => setTimeout(r, 200));
   }
 }
@@ -164,7 +194,9 @@ export async function cleanEngines(req: APIRequestContext) {
     await req.post(`${WEB_URL}/api/engines`, {
       data: { name: "mock", url: MOCK_URL, api_key: MOCK_KEY }, headers: jh,
     });
-  } else if (!mock.has_key) {
+  } else {
+    // 无条件回写正确 Key：有前序用例会把 key 改成 "wrong"（见 functional「Key 不符」），
+    // 仅凭 has_key 判断会漏修，导致后续弹窗读 config 401
     await req.put(`${WEB_URL}/api/engines/mock`, { data: { api_key: MOCK_KEY }, headers: jh });
   }
 }

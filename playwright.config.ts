@@ -1,4 +1,10 @@
 import { defineConfig } from "@playwright/test";
+import { readFileSync } from "node:fs";
+
+// web 工作台版本（与 web/pyproject.toml 同源）：mock-serve / mock-github 用同一版本
+// 做「同版本无更新」基线，web 版本 bump 后 e2e 无需改测试。
+const WEB_VERSION =
+  (readFileSync("web/pyproject.toml", "utf-8").match(/^version = "([^"]+)"/m) || [])[1] || "0.1.0";
 
 // e2e 一键：pnpm test:e2e
 //  - mock serve：node（127.0.0.1:8301），忠实复刻 JavScribe serve 8300 协议
@@ -27,14 +33,14 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "node client/tests/e2e/mock-serve.mjs 8301",
+      command: `node client/tests/e2e/mock-serve.mjs 8301 ${WEB_VERSION}`,
       url: "http://127.0.0.1:8301/health",
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
     },
     {
       command:
-        "D=$(mktemp -d /tmp/javweb-e2e-data.XXXXXX) && cd web && " +
+        "rm -rf /tmp/javweb-e2e-data.* 2>/dev/null; D=$(mktemp -d /tmp/javweb-e2e-data.XXXXXX) && cd web && " +
         "JAV_WEB_PORT=8901 JAV_WEB_TLS_PORT=0 JAV_DATA_DIR=$D " +
         "JAV_ENGINES='mock=http://127.0.0.1:8301' JAV_POLL_INTERVAL_S=1 " +
         "JAV_UPDATE_CHECK=on JAV_UPDATE_GITHUB_BASE=http://127.0.0.1:8303 JAV_UPDATE_INTERVAL_S=3 " +
@@ -44,7 +50,7 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: "node client/tests/e2e/mock-github.mjs 8303",
+      command: `node client/tests/e2e/mock-github.mjs 8303 ${WEB_VERSION}`,
       url: "http://127.0.0.1:8303/repos/JavdBviewed/JavScribe/releases",
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,

@@ -1,7 +1,7 @@
 // 功能类：API 直调（/api 层，mock serve）+ UI 持久化行为
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
-  WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES,
+  WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES, makeScanDir,
   mockReset, mockSeed, mockPause, mockResume, mockConfigMode, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
 } from "../helpers";
 import path from "node:path";
@@ -9,6 +9,9 @@ import { readFileSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 const jh = { "Content-Type": "application/json" };
+
+// 本地扫描夹具（工作台本机临时目录，3 项：2 无字幕 + 1 外部 srt）
+const SCAN_DIR = makeScanDir();
 
 let req: APIRequestContext;
 test.beforeEach(async ({ request }) => {
@@ -196,9 +199,10 @@ test("config：服务端未设 Key → 400（web 映射 403）；Key 不符 → 
   expect((await r3.json()).detail).toContain("API Key 不正确");
 });
 
-test("scan：/media/jav 三项（1 个有字幕）；Windows 路径 400；不存在 400", async () => {
-  await addEngine(req, { name: "mock", url: "http://127.0.0.1:8301", api_key: MOCK_KEY });
-  const r = await req.get(`${WEB_URL}/api/engines/mock/scan?path=/media/jav`);
+test("scan：本地扫描目录三项（1 个有字幕）；Windows 路径 400；不存在 400", async () => {
+  const r = await req.get(
+    `${WEB_URL}/api/scan/local?engine=mock&path=${encodeURIComponent(SCAN_DIR)}&min_size_mb=0`,
+  );
   expect(r.status()).toBe(200);
   const d = await r.json();
   expect(d.mapped).toBe(false);
@@ -206,28 +210,34 @@ test("scan：/media/jav 三项（1 个有字幕）；Windows 路径 400；不存
   const sub = d.items.find((i: any) => i.name === "AKDL-002.mp4");
   expect(sub.has_subtitle).toBe(true);
   expect(sub.subtitle).toBe("AKDL-002.zh.srt");
-  // Windows 路径（本机磁盘语义，服务端拒）
-  const rw = await req.get(`${WEB_URL}/api/engines/mock/scan?path=${encodeURIComponent("D:\\Videos")}`);
+  // Windows 路径（浏览器电脑本地磁盘语义，客户端部署机读不到，直接拒）
+  const rw = await req.get(`${WEB_URL}/api/scan/local?engine=mock&path=${encodeURIComponent("D:\\Videos")}`);
   expect(rw.status()).toBe(400);
   expect((await rw.json()).detail).toContain("需要绝对路径");
   // 不存在
-  const rn = await req.get(`${WEB_URL}/api/engines/mock/scan?path=/nope`);
+  const rn = await req.get(`${WEB_URL}/api/scan/local?engine=mock&path=/nope`);
   expect(rn.status()).toBe(400);
   expect((await rn.json()).detail).toContain("路径不存在");
 });
 
-test("scan/submit：勾选入队 → 201；空 files → 400", async () => {
-  await addEngine(req, { name: "mock", url: "http://127.0.0.1:8301", api_key: MOCK_KEY });
-  const r = await req.post(`${WEB_URL}/api/engines/mock/scan/submit`, {
-    data: { files: ["/media/jav/AKDL-001.mp4", "/media/jav/SUB-001.mkv"] }, headers: jh,
+test("scan/submit：本机扫描提交 → 200 两条本地任务 → 派发到 mock；空 files → 400", async () => {
+  const r = await req.post(`${WEB_URL}/api/scan/local/submit`, {
+    data: {
+      engine: "mock",
+      files: [path.join(SCAN_DIR, "AKDL-001.mp4"), path.join(SCAN_DIR, "SUB-001.mkv")],
+    },
+    headers: jh,
   });
   expect(r.status()).toBe(200);
   const d = await r.json();
   expect(d.files).toBe(2);
-  expect(d.job_id).toBeTruthy();
-  const row = await waitForJobRow(req, (j: any) => j.job_id === d.job_id);
-  expect(row.label).toBe("文件夹扫描 · 2 项");
-  expect((await req.post(`${WEB_URL}/api/engines/mock/scan/submit`, { data: { files: [] }, headers: jh })).status()).toBe(400);
+  expect(d.upload_ids).toHaveLength(2);
+  // 本地管线：读本机视频 → 提 opus → 派发；job label = 原始视频名
+  await waitForJobRow(req, (j: any) => j.file === "AKDL-001.mp4");
+  await waitForJobRow(req, (j: any) => j.file === "SUB-001.mkv");
+  expect((await req.post(`${WEB_URL}/api/scan/local/submit`, {
+    data: { engine: "mock", files: [] }, headers: jh,
+  })).status()).toBe(400);
 });
 
 test("UI 持久化：autosave / 提取模式 / 所选服务 刷新后保持", async ({ page }) => {

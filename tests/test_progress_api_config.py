@@ -139,13 +139,25 @@ def test_auth_and_masking() -> None:
             code, body = _http("GET", base + "/config", key="k1")
             assert code == 200 and body["ok"] and body["profile"] == "server", (code, body)
             items = {i["path"]: i for i in body["items"]}
-            assert len(items) == 26, len(items)  # 19 基础项 + 3 内嵌字幕/指纹项 + 3 扫描规则项 + 1 缓存保留项
+            # 19 基础项 + 3 内嵌字幕/指纹项 + 3 扫描规则项 + 1 缓存保留项
+            # + 5 新增可调项（formats/tag_formats/output_dir/jasna.output/polish.timeout_s）
+            assert len(items) == 31, len(items)
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
             assert items["subtitle.skip_embedded"]["options"] == ["off", "target", "any"]
             assert items["subtitle.skip_embedded"]["value"] in ("off", "target", "any")
             assert items["subtitle.marker"]["value"] in (True, False)
             assert isinstance(items["subtitle.embedded_langs"]["value"], list)
+            # 新增项默认值（来自 BASE_CFG）
+            assert items["subtitle.formats"]["value"] == ["srt"]
+            assert items["subtitle.tag_formats"]["value"] == ["srt", "vtt"]
+            assert items["subtitle.output_dir"]["value"] in (None, "")
+            assert items["jasna.output"]["value"] == "{stem}_restored{ext}"
+            assert items["polish.timeout_s"]["type"] == "int"
+            # 每项带帮助文案（客户端 ? 图标悬浮展示）
+            for path in ("subtitle.lang_tag", "vad.threshold", "polish.api_key",
+                         "subtitle.formats", "jasna.output", "storage.retention_days"):
+                assert isinstance(items[path].get("hint"), str) and items[path]["hint"], path
             # 敏感项打码：未设置 -> ""
             assert items["emby.api_key"]["secret"] and items["emby.api_key"]["value"] == ""
             cfg["emby"]["api_key"] = "sek"
@@ -305,6 +317,66 @@ def test_persist_top_level_when_no_profile_section() -> None:
             saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert "profiles" not in saved
             assert saved["subtitle"]["lang_tag"] == "ja"
+        finally:
+            http.stop()
+
+
+def test_new_config_items_validation() -> None:
+    """新增可调项：subtitle.formats / tag_formats / output_dir / jasna.output / polish.timeout_s。"""
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        file_cfg = copy.deepcopy(BASE_CFG)
+        http, engine, cfg_path = _start(td, cfg, file_cfg)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+
+            def put(path, value):
+                return _http("PUT", base + "/config", {"values": {path: value}}, key="k1")
+
+            # subtitle.formats：逗号串/数组均可；必须含 srt
+            code, body = put("subtitle.formats", "srt, vtt")
+            assert code == 200 and body["updated"] == ["subtitle.formats"], (code, body)
+            assert cfg["subtitle"]["formats"] == ["srt", "vtt"]
+            code, _ = put("subtitle.formats", ["srt", "lrc"])
+            assert code == 200
+            assert cfg["subtitle"]["formats"] == ["srt", "lrc"]
+            code, _ = put("subtitle.formats", ["srt"])  # 数组单元素合法
+            assert cfg["subtitle"]["formats"] == ["srt"]
+            for bad in ("vtt", "srt,ass", "", None, "mp4"):
+                code, body = put("subtitle.formats", bad)
+                assert code == 400 and not body["ok"], (bad, code, body)
+            # 落盘到 active profile
+            code, _ = put("subtitle.formats", "srt")
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            assert saved["profiles"]["server"]["subtitle"]["formats"] == ["srt"]
+
+            # subtitle.tag_formats：不强制 srt
+            code, body = put("subtitle.tag_formats", "vtt")
+            assert code == 200 and cfg["subtitle"]["tag_formats"] == ["vtt"]
+            code, body = put("subtitle.tag_formats", "srt,ass")
+            assert code == 400
+
+            # subtitle.output_dir：普通字符串路径
+            code, body = put("subtitle.output_dir", "/data/subs")
+            assert code == 200 and cfg["subtitle"]["output_dir"] == "/data/subs"
+            code, body = put("subtitle.output_dir", "  ")
+            assert code == 200 and cfg["subtitle"]["output_dir"] == ""
+
+            # jasna.output：模板必须含 {stem}/{ext}，不能含路径分隔符
+            code, body = put("jasna.output", "{stem}_fixed{ext}")
+            assert code == 200 and cfg["jasna"]["output"] == "{stem}_fixed{ext}"
+            for bad in ("plain", "{stem}/x{ext}", "x" * 200, ""):
+                code, body = put("jasna.output", bad)
+                assert code == 400 and not body["ok"], (bad, code, body)
+
+            # polish.timeout_s：5~3600
+            code, body = put("polish.timeout_s", 900)
+            assert code == 200 and cfg["polish"]["timeout_s"] == 900
+            for bad in (0, 4, 3601, "abc", True):
+                code, body = put("polish.timeout_s", bad)
+                assert code == 400 and not body["ok"], (bad, code, body)
         finally:
             http.stop()
 

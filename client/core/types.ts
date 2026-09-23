@@ -79,6 +79,8 @@ export interface ConfigItem {
   type: ConfigType;
   value: unknown;
   options?: string[];
+  /** 帮助文案（服务端 v0.2.1+ 返回；旧服务端无此字段，前端用本地兜底） */
+  hint?: string;
 }
 
 /** 目录扫描命中的单个文件 */
