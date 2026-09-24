@@ -21,6 +21,8 @@ export interface Engine {
   error?: string | null;
   /** 服务队列已挂起（serve 0.2.3+ /health.paused；旧服务无此字段） */
   paused?: boolean;
+  /** 参与自动负载均衡（工作台 v0.2.11+；false 时不接收 auto 派发的新任务） */
+  enabled?: boolean;
 }
 
 /** GET /api/jobs 展平行（running 优先 + created 降序，工作台侧已排好） */

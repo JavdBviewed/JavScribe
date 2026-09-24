@@ -97,6 +97,9 @@ export const webTransport: Transport = {
   putEngineKey: (name, apiKey) =>
     jput("/api/engines/" + encodeURIComponent(name), { api_key: apiKey }),
 
+  setEngineEnabled: (name, enabled) =>
+    jput("/api/engines/" + encodeURIComponent(name), { enabled }),
+
   listJobs: () => jget<JobRow[]>("/api/jobs"),
 
   listJobsSummary: () => jget<import("../core/types").JobSummary>("/api/jobs/summary"),

@@ -56,8 +56,9 @@ class EngineStore:
             for entry in data.get("engines", []):
                 name, url = entry["name"], entry["url"]
                 if name and is_url(url):
-                    # 旧文件可能没有 api_key 字段（向后兼容）
-                    self._upsert(name, url, entry.get("api_key", ""))
+                    # 旧文件可能没有 api_key / enabled 字段（向后兼容）
+                    self._upsert(name, url, entry.get("api_key", ""),
+                                 enabled=entry.get("enabled", True))
         except (json.JSONDecodeError, KeyError, TypeError):
             # Corrupt registry: start fresh rather than crash the service.
             pass
@@ -72,14 +73,25 @@ class EngineStore:
         tmp.replace(self._path)
 
     # -- mutation ----------------------------------------------------------
-    def _upsert(self, name: str, url: str, api_key: Optional[str] = None) -> None:
+    def _upsert(
+        self,
+        name: str,
+        url: str,
+        api_key: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> None:
         """Register/refresh an engine. api_key=None keeps the stored key
-        (env preset merge must not wipe a key set via the API)."""
+        (env preset merge must not wipe a key set via the API). enabled=None
+        keeps the stored flag (default True: 参与自动负载均衡)."""
         entry = {"name": name, "url": url.rstrip("/")}
         if api_key is None:
             entry["api_key"] = self._engines.get(name, {}).get("api_key", "")
         else:
             entry["api_key"] = api_key.strip()
+        if enabled is None:
+            entry["enabled"] = self._engines.get(name, {}).get("enabled", True)
+        else:
+            entry["enabled"] = bool(enabled)
         self._engines[name] = entry
 
     def add(self, name: str, url: str, api_key: Optional[str] = None) -> Optional[dict]:
@@ -103,6 +115,16 @@ class EngineStore:
             if entry is None:
                 return None
             entry["api_key"] = (api_key or "").strip()
+            self._save()
+            return entry
+
+    def set_enabled(self, name: str, enabled: bool) -> Optional[dict]:
+        """切换引擎是否参与自动负载均衡（v0.2.11+；仅工作台侧调度语义）。"""
+        with self._lock:
+            entry = self._engines.get(name)
+            if entry is None:
+                return None
+            entry["enabled"] = bool(enabled)
             self._save()
             return entry
 

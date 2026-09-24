@@ -51,7 +51,7 @@ def test_add_remove_persist() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EngineStore(td)
         e = store.add("w", "http://10.9.9.9:8300/")
-        assert e == {"name": "w", "url": "http://10.9.9.9:8300", "api_key": ""}
+        assert e == {"name": "w", "url": "http://10.9.9.9:8300", "api_key": "", "enabled": True}
         # same name same url = idempotent update
         assert store.add("w", "http://10.9.9.9:8300")["url"] == "http://10.9.9.9:8300"
         # same name different url = rejected

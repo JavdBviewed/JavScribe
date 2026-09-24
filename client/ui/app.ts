@@ -558,7 +558,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
       ${e.paused ? `<span class="tag tag-paused" title="服务队列已挂起：运行中任务跑完后不再开新任务（看板「继续任务」或单任务「继续」恢复）">已暂停</span>` : ""}
       ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
-    </div>`;
+    </div>
+    ${typeof t.setEngineEnabled === "function" ? `
+    <div class="eng-bal-row">
+      <label class="eng-bal" title="勾选后该服务参与「自动均衡」：新任务实时分派给在途任务最少的在线服务；取消勾选后只收手动指定的任务"><input type="checkbox" class="bal-chk" data-name="${esc(e.name)}"${e.enabled === false ? "" : " checked"}> 参与均衡</label>
+    </div>` : ""}`;
   }
 
   function renderEngines(list: Engine[]) {
@@ -583,6 +587,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (card._html !== html) { card.innerHTML = html; card._html = html; }
       card.classList.toggle("on", !!e.online);
       card.classList.toggle("off", !e.online);
+      card.classList.toggle("bal-off", e.enabled === false);
     }
     const order = Array.from(grid.children).map((c) => (c as HTMLElement).dataset.name).join("\u0001");
     if (order !== list.map((e) => e.name).join("\u0001")) {
@@ -592,6 +597,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   $("engine-grid").onclick = async (ev) => {
     const target = ev.target as HTMLElement;
+    const bal = target.closest<HTMLElement>(".bal-chk");
+    if (bal) {
+      if (typeof t.setEngineEnabled !== "function") return;
+      const name = bal.dataset.name || "";
+      const on = (bal as HTMLInputElement).checked;
+      try {
+        await t.setEngineEnabled(name, on);
+        toast(`「${name}」${on ? "已加入自动均衡" : "已退出自动均衡"}`, "ok");
+        refresh();
+      } catch (ex) {
+        (bal as HTMLInputElement).checked = !on;
+        toast(ex instanceof Error ? ex.message : "设置失败", "err");
+      }
+      return;
+    }
     const del = target.closest<HTMLElement>(".del");
     if (del) {
       const name = del.dataset.name || "";
@@ -699,7 +719,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
     const core = [j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
-      <div class="job-cell">${esc(j.engine)}</div>
+      <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
@@ -1046,22 +1066,30 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const online = engines.filter((e) => e.online);
     const pool = online.length ? online : engines;
-    // 选项集（名称+在线态）无变化不重建：避免 5s 轮询周期性重绘把用户手选静默打回第一项
-    const sig = pool.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
+    // auto 选项：仅工作台形态且 ≥2 台服务（auto 由工作台服务端在派发时刻按实时负载解析；
+    // desktop 形态客户端直连单服务，无均衡概念）
+    const canAuto = typeof t.setEngineEnabled === "function" && engines.length >= 2;
+    // 选项集（auto 可用性+名称+在线态）无变化不重建：避免 5s 轮询周期性重绘把用户手选静默打回第一项
+    const sig = (canAuto ? "auto|" : "") + pool.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
     if (sel.dataset.sig === sig) {
       updateGo();
       return;
     }
     const prev = sel.value;
     sel.dataset.sig = sig;
-    sel.innerHTML = pool
+    const autoOpt = canAuto
+      ? `<option value="auto">⚖ 自动均衡（${engines.length} 台服务，实时选最闲）</option>`
+      : "";
+    sel.innerHTML = autoOpt + pool
       .map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${engineHostHint(e)}${e.online ? "" : "（离线）"}</option>`)
       .join("");
     // 现存选中（用户手选）> 持久化值 > 第一项
-    if (pool.some((e) => e.name === prev)) sel.value = prev;
+    const prevValid = !!prev && (prev === "auto" ? canAuto : pool.some((e) => e.name === prev));
+    if (prevValid) sel.value = prev;
     else {
       const saved = localStorage.getItem("javweb_engine");
-      if (saved && pool.some((e) => e.name === saved)) sel.value = saved;
+      const savedValid = !!saved && (saved === "auto" ? canAuto : pool.some((e) => e.name === saved));
+      if (savedValid) sel.value = saved;
     }
     updateGo();
   }
@@ -2356,10 +2384,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const engine = engineSelect.value;
     const path = scanPath.value.trim();
     if (!engine || !path || state.busy) return;
-    const e = (state.engines || []).find((x) => x.name === engine);
-    if (!e || !e.has_key) {
-      toast("请先在「服务设置」里为这个服务登记 API Key，才能扫描", "err");
-      return;
+    if (engine === "auto") {
+      const cands = (state.engines || []).filter((x) => x.online && x.enabled !== false);
+      if (!cands.length) {
+        toast("自动均衡没有可用服务（全部离线，或都没勾选「参与均衡」）", "err");
+        return;
+      }
+      if (!cands.some((x) => x.has_key)) {
+        toast("参与均衡的服务都未登记 API Key，请先在「服务设置」里登记", "err");
+        return;
+      }
+    } else {
+      const e = (state.engines || []).find((x) => x.name === engine);
+      if (!e || !e.has_key) {
+        toast("请先在「服务设置」里为这个服务登记 API Key，才能扫描", "err");
+        return;
+      }
     }
     if (/^[a-zA-Z]:[\\/]/.test(path)) {
       toast(platform.kind === "desktop"

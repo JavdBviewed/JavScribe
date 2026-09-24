@@ -1393,3 +1393,22 @@ body.desktop main > section.view-on { display: block; }
 .job-head .help::before { content: "?"; } /* 表头 ? 不进 textContent：e2e 对列名做精确断言 */
 .job-head .help::after { z-index: 95; }
 .hud-item { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ---- 服务卡片「参与均衡」行（v0.2.11 多服务自动负载均衡） ---- */
+.eng-bal-row {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+.eng-bal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.eng-bal:hover { color: var(--fg); }
+.eng-bal input { accent-color: var(--accent); margin: 0; cursor: pointer; }
+.eng.bal-off .eng-top, .eng.bal-off .eng-url, .eng.bal-off .eng-specs { opacity: 0.55; }

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import itertools
 import json
 import logging
 import os
@@ -360,6 +361,47 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     def _lock_for(engine_name: str) -> asyncio.Lock:
         return _upload_locks.setdefault(engine_name, asyncio.Lock())
 
+    # ---- 多服务自动负载均衡（v0.2.11+）--------------------------------------
+    # engine=auto：派发时刻按「在线 + 参与均衡」里在途任务最少者选服务；
+    # 同负载按注册顺序轮转（round-robin），避免总是砸向同名排序靠前者。
+    AUTO = "auto"
+    _rr = itertools.count()
+
+    def _auto_candidates() -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = []
+        for entry in store.engines:
+            if not entry.get("enabled", True):
+                continue
+            info = poller.engines.get(entry["name"])
+            if info is None or not info.online:
+                continue
+            out.append((max(0, info.jobs_running), entry["name"]))
+        return out
+
+    def pick_engine() -> str:
+        """从候选服务里挑在途任务最少的一个；无候选抛 503。"""
+        cands = _auto_candidates()
+        if not cands:
+            raise HTTPException(503, "没有可分配的服务（全部离线或未参与均衡）")
+        cands.sort()
+        min_load = cands[0][0]
+        group = [n for load, n in cands if load == min_load]
+        return group[next(_rr) % len(group)]
+
+    def resolve_engine(engine: str) -> str:
+        """endpoint 入口校验：auto → 候选存在性检查（全离线直接 503，避免 202 后
+        后台派发才失败）；显式名 → 存在性检查。"""
+        if engine == AUTO:
+            if not store.engines:
+                raise HTTPException(404, "请先添加字幕服务")
+            if not _auto_candidates():
+                raise HTTPException(503, "没有可分配的服务（全部离线或未参与均衡）")
+            return AUTO
+        if store.get(engine) is None:
+            raise HTTPException(404, "服务不存在")
+        return engine
+
+
     # 客户端并发设置（设置弹窗「客户端（本机工作台）」卡片可调，立即生效）：
     # 提取并发闸 + 在途封顶门，替代原固定 Semaphore（部署期只能 env 配）
     _client_cfg_path = Path(data_dir) / CLIENT_CONFIG_NAME
@@ -423,7 +465,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     @app.get("/api/engines")
     async def api_list_engines() -> list[dict]:
-        return [i.to_dict() for i in sorted(poller.engines.values(), key=lambda e: e.name)]
+        out = []
+        for info in sorted(poller.engines.values(), key=lambda e: e.name):
+            d = info.to_dict()
+            d["enabled"] = (store.get(info.name) or {}).get("enabled", True)
+            out.append(d)
+        return out
 
     @app.post("/api/engines", status_code=201)
     async def api_add_engine(body: dict) -> dict:
@@ -438,10 +485,20 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     @app.put("/api/engines/{name}")
     async def api_update_engine(name: str, body: dict) -> dict:
-        entry = store.set_api_key(name, str(body.get("api_key", "")) if body else "")
+        body = body or {}
+        entry = None
+        if "api_key" in body:
+            entry = store.set_api_key(name, str(body.get("api_key", "")))
+        if "enabled" in body:
+            entry = store.set_enabled(name, bool(body.get("enabled"))) or entry
         if entry is None:
             raise HTTPException(404, "服务不存在")
-        return {"ok": True, "name": entry["name"], "has_key": bool(entry["api_key"])}
+        return {
+            "ok": True,
+            "name": entry["name"],
+            "has_key": bool(entry["api_key"]),
+            "enabled": entry.get("enabled", True),
+        }
 
     @app.delete("/api/engines/{name}")
     async def api_remove_engine(name: str) -> dict:
@@ -645,6 +702,17 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     async def _dispatch_task(task: UploadTask, audio_tmp: Path) -> None:
         """把已提取好的 opus 转发给所选服务（两路上传共用）。"""
+        if task.engine == AUTO:
+            # 派发时刻才解析：此时 poller 负载快照最新（提取耗时数分钟，入队时的
+            # 选择早已过期）；解析后持久化，任务跟踪/回写按真实服务走。
+            # 入队后服务全离线 → 标错误行（可重试），不让 503 裸奔到后台任务
+            try:
+                task.engine = pick_engine()
+            except HTTPException as ex:
+                task.phase = "error"
+                task.error = str(ex.detail)
+                return
+            _save_uploads_state()
         entry = store.get(task.engine)
         assert entry is not None
         task.phase = "dispatching"
@@ -746,9 +814,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     @app.post("/api/upload", status_code=202)
     async def api_upload(file: UploadFile = File(...), engine: str = Form(...)) -> dict:
-        entry = store.get(engine)
-        if entry is None:
-            raise HTTPException(404, "engine not found")
+        resolve_engine(engine)
         _prune_uploads()
         max_bytes = int(UPLOAD_MAX_GB * 1024**3)
         fd, name = tempfile.mkstemp(
@@ -794,9 +860,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         duration_s: float = Form(0),
     ) -> dict:
         """浏览器本地提音轨后只传 opus：跳过服务端提取，直接派发服务。"""
-        entry = store.get(engine)
-        if entry is None:
-            raise HTTPException(404, "engine not found")
+        resolve_engine(engine)
         _prune_uploads()
         max_bytes = int(UPLOAD_MAX_GB * 1024**3)
         fd, fname = tempfile.mkstemp(suffix=".opus", prefix="javweb_aud_")
@@ -1096,9 +1160,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         min_size_mb: float | None = None,
         naming_c: str | None = None,
     ) -> dict:
-        if store.get(engine) is None:
-            raise HTTPException(404, "服务不存在")
-        cfg, from_engine = await _engine_scan_cfg(engine)
+        resolve_engine(engine)
+        # auto：扫描规则取自当前负载最轻的服务（规则各服务一致时等价于任选）
+        cfg, from_engine = await _engine_scan_cfg(pick_engine() if engine == AUTO else engine)
         # 客户端侧文件属性规则覆盖（扫描面板设置；非法值拒绝而非静默回退）
         if min_size_mb is not None:
             if not (min_size_mb >= 0) or min_size_mb == float("inf"):
@@ -1128,11 +1192,14 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     async def api_local_scan_submit(body: dict) -> dict:
         name = body.get("engine") if isinstance(body, dict) else None
         files = body.get("files") if isinstance(body, dict) else None
-        if not name or store.get(name) is None:
+        if not name:
             raise HTTPException(404, "服务不存在")
+        resolve_engine(name)
         if not isinstance(files, list) or not files:
             raise HTTPException(400, "files 需要非空数组（绝对路径列表）")
-        cfg, _from_engine = await _engine_scan_cfg(name)
+        # auto：扩展名/字幕判定规则取自当前负载最轻的服务；任务行保留 auto，
+        # 实际服务在各自派发时刻按负载解析
+        cfg, _from_engine = await _engine_scan_cfg(pick_engine() if name == AUTO else name)
         try:
             paths = localscan.validate_submit_files(files, cfg)
         except localscan.ScanError as ex:

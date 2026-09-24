@@ -38,6 +38,13 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
     },
+    // 第二台 mock serve：多服务自动均衡 e2e（functional「多服务自动均衡」用）
+    {
+      command: `node client/tests/e2e/mock-serve.mjs 8302 ${WEB_VERSION}`,
+      url: "http://127.0.0.1:8302/health",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
     {
       command:
         "rm -rf /tmp/javweb-e2e-data.* 2>/dev/null; D=$(mktemp -d /tmp/javweb-e2e-data.XXXXXX) && cd web && " +

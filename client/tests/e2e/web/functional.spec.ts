@@ -396,3 +396,70 @@ test("UI 持久化：autosave / 提取模式 / 所选服务 刷新后保持", as
   await page.reload();
   await expect(page.locator("#engine-select")).toHaveValue("mock");
 });
+
+test("多服务自动均衡（auto）：派发时刻选最闲服务；UI 出现自动均衡选项", async ({ page }) => {
+  const M2 = "http://127.0.0.1:8302";
+  const m2ctl = (p: string, body?: unknown) =>
+    req.post(`${M2}/_mock/${p}`, {
+      data: body === undefined ? "{}" : body,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  await addEngine(req, { name: "mock2", url: M2, api_key: MOCK_KEY });
+  await waitForEngineListed(req, "mock2");
+
+  try {
+    // UI：≥2 台服务时 select 出现「自动均衡」选项（单服务时不出现，见 style 基线）
+    await page.goto("/");
+    await expect(page.locator("#engine-select")).toContainText("自动均衡");
+
+    // mock2 压 1 个在途任务（先 pause 冻结 tick，负载稳定不流失）
+    await m2ctl("pause");
+    await m2ctl("seed", { n: 1, status: "running" });
+    // 等 poller 快照体现 mock2 负载（jobs_running 是均衡决策源）
+    await waitForJobRow(req, (j: any) => j.engine === "mock2" && j.status === "running");
+
+    const postAudio = async (name: string) => {
+      const opus = readFileSync(fx("sine.opus"));
+      const fd = new FormData();
+      fd.append("audio", new Blob([opus]), "bal.opus");
+      fd.append("engine", "auto");
+      fd.append("name", name);
+      fd.append("size_mb", "0");
+      const r = await fetch(`${WEB_URL}/api/upload-audio`, { method: "POST", body: fd });
+      expect(r.status).toBe(202);
+      const { upload_id } = await r.json();
+      let d: any = null;
+      for (let i = 0; i < 40; i++) {
+        d = await (await req.get(`${WEB_URL}/api/uploads/${upload_id}`)).json();
+        if (d.phase === "done" || d.phase === "error") break;
+        await new Promise((rs) => setTimeout(rs, 300));
+      }
+      expect(d.phase).toBe("done");
+      expect(d.job_id).toBeTruthy();
+      return d;
+    };
+
+    // 第一发：mock2 在途 1、mock 在途 0 → 落 mock；字节不进 mock2
+    const d1 = await postAudio("bal-a.mp4");
+    expect(d1.engine).toBe("mock");
+    expect(await (await req.get(`${M2}/_mock/uploads`)).json()).toHaveLength(0);
+    expect(await (await req.get(`${MOCK_URL}/_mock/uploads`)).json()).toHaveLength(1);
+
+    // 第二发：mock 压 3 个在途并冻结（含 bal-a 则 4 个）→ 反转向 mock2 分流
+    await mockSeed(req, { n: 3, status: "running" });
+    await mockPause(req);
+    // 等 poller 快照体现 mock 新负载（均衡决策源是快照；不等则派发放行旧值）
+    await waitForJobRow(req, (j: any) => j.engine === "mock" && j.file === "seed-001.mp4" && j.status === "running");
+    const d2 = await postAudio("bal-b.mp4");
+    expect(d2.engine).toBe("mock2");
+    expect(await (await req.get(`${M2}/_mock/uploads`)).json()).toHaveLength(1);
+    expect(await (await req.get(`${MOCK_URL}/_mock/uploads`)).json()).toHaveLength(1);
+  } finally {
+    // 复位两台 mock + 删 mock2：冻结的 seeded 任务不能滞留 poller 快照（拖死后续 waitForJobsEmpty）
+    await mockResume(req).catch(() => {});
+    await m2ctl("resume").catch(() => {});
+    await m2ctl("reset").catch(() => {});
+    await req.delete(`${WEB_URL}/api/engines/mock2`).catch(() => {});
+  }
+});
