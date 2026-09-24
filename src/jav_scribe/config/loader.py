@@ -33,6 +33,9 @@ DEFAULTS: dict[str, Any] = {
         "command": "",
         "cwd": None,
         "model": "models",
+        # 转译并发（同时运行的模型实例数）：1=串行（最省显存，默认）；
+        # 按服务端显卡显存可经 /config 热调至 4
+        "concurrency": 1,
         "device": "auto",
         "preset": "gpu",
         "log_level": "DEBUG",

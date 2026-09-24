@@ -157,6 +157,13 @@ class MetricsRegistry:
         ap("# HELP javscribe_model_loaded 当前是否有已加载的推理模型（1/0）。")
         ap("# TYPE javscribe_model_loaded gauge")
         ap(f"javscribe_model_loaded {1 if bool(getattr(e, 'model_loaded', False)) else 0}")
+        aw = getattr(e, "active_workers", None)
+        ap("# HELP javscribe_infer_active 当前在途转译任务数。")
+        ap("# TYPE javscribe_infer_active gauge")
+        ap(f"javscribe_infer_active {int(aw()) if callable(aw) else 0}")
+        ap("# HELP javscribe_infer_concurrency 配置的转译并发度。")
+        ap("# TYPE javscribe_infer_concurrency gauge")
+        ap(f"javscribe_infer_concurrency {int(getattr(e, 'concurrency', 1) or 1)}")
         return "\n".join(L) + "\n"
 
     def _observe(self, dur: float) -> None:
@@ -286,11 +293,14 @@ class LiveSampler:
                 self._last_mem_total = g["mem_total_mb"]
                 gpu = {"present": True, **g}
         paused_jobs = sum(1 for j in list(getattr(e, "jobs", []) or []) if getattr(j, "paused", False))
+        aw = getattr(e, "active_workers", None)
         return {
             "ok": True,
             "uptime_s": int(time.time() - self._started),
             "paused": bool(getattr(e, "paused", False)),
             "model_loaded": bool(getattr(e, "model_loaded", False)),
+            "concurrency": int(getattr(e, "concurrency", 1) or 1),
+            "active_workers": int(aw()) if callable(aw) else 0,
             "jobs": {
                 "running": last["running"] if last else 0,
                 "queued": last["queued"] if last else 0,

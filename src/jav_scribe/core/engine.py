@@ -113,13 +113,18 @@ class Engine:
         self.profile = profile
         self.log = log or print
         self.jobs: list[Job] = []
-        self.model_loaded = False  # 当前是否有已加载模型的推理进程（/metrics gauge）
-        self._parser = LogParser()
-        self._current_task: Task | None = None
-        self._runner: ProcRunner | None = None
+        # 在途推理进程数（>0 = 有已加载模型的进程；/metrics gauge 单一口径）
+        self._model_procs = 0
+        self._model_lock = threading.Lock()
         self._stop_evt = threading.Event()
-        self._job_thread: threading.Thread | None = None
+        # 转译 worker 池：并发度 = 同时运行的模型实例数（infer.concurrency，
+        # /config 热调，1~4）。_sched_lock 统一保护 _workers 与 _pending_jobs。
+        self._workers: list[threading.Thread] = []
         self._pending_jobs: list[Job] = []
+        self._sched_lock = threading.Lock()
+        # 在途子进程登记（stop() 时全部终止；并发下多个 _run_command 互不覆盖）
+        self._active_runners: set[ProcRunner] = set()
+        self._runners_lock = threading.Lock()
         self._inflight_files: set[Path] = set()
         # retry_job 放行的文件：resubmit 时豁免内嵌字幕判定（一次性）
         self._force_embedded: set[Path] = set()
@@ -142,6 +147,35 @@ class Engine:
         self._load_pause_state()
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
         self._live_thread.start()
+
+    @property
+    def model_loaded(self) -> bool:
+        """当前是否有已加载模型的推理进程（/metrics gauge 单一口径）。"""
+        with self._model_lock:
+            return self._model_procs > 0
+
+    def _model_up(self) -> None:
+        with self._model_lock:
+            self._model_procs += 1
+
+    def _model_down(self) -> None:
+        with self._model_lock:
+            if self._model_procs > 0:
+                self._model_procs -= 1
+
+    @property
+    def concurrency(self) -> int:
+        """转译并发度（同时运行的转译任务/模型实例数），/config 热调，1~4。"""
+        try:
+            v = int(self.cfg.get("infer", {}).get("concurrency", 1))
+        except (TypeError, ValueError):
+            v = 1
+        return max(1, min(4, v))
+
+    def active_workers(self) -> int:
+        """当前正跑任务的 worker 数（≤ 并发度；监控快照用）。"""
+        with self._sched_lock:
+            return sum(1 for t in self._workers if t.is_alive())
 
     # ------------------------------------------------------------------
     # Submission
@@ -180,14 +214,12 @@ class Engine:
             self.jobs.pop(0)
         self._save_jobs()
         if run_in_thread:
-            if self._paused or (self._job_thread is not None and self._job_thread.is_alive()):
-                # queue behind the running job / 队列暂停中一律入队
+            # 一律先入队，由 _drain_pending 按并发度派发（有空槽立即开跑）
+            with self._sched_lock:
                 self._pending_jobs.append(job)
-                self.log(f"[engine] 任务排队: {job.id}（{len(files)} 个文件）"
-                         + ("（队列已暂停）" if self._paused else ""))
-            else:
-                self._job_thread = threading.Thread(target=self._run_job, args=(job,), daemon=True)
-                self._job_thread.start()
+            if self._paused:
+                self.log(f"[engine] 任务排队: {job.id}（{len(files)} 个文件）（队列已暂停）")
+            self._drain_pending()
         else:
             self._run_job(job)
         return job
@@ -242,17 +274,17 @@ class Engine:
                 t.status in (TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.ERROR, TaskStatus.CANCELED)
                 for t in job.files) else "canceling"
         job.cancel_requested = True
-        if any(j is job for j in self._pending_jobs):
-            try:
+        with self._sched_lock:
+            in_queue = job in self._pending_jobs
+            if in_queue:
                 self._pending_jobs.remove(job)
-            except ValueError:
-                # worker 线程并发 drain 已取出该任务 → _run_job 入口检查会兜底收尾
-                pass
+        if in_queue:
             self._cancel_pending_tasks(job, "已取消")
             job.finished = time.time()
             self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（排队中，未占用推理资源）")
+            self._drain_pending()  # 腾出位置，让后续任务立即补位
             return "canceled"
         self.log(f"[engine] 任务 {job.id} 收到取消请求（运行中，将在检查点中止）")
         return "canceling"
@@ -316,15 +348,20 @@ class Engine:
 
     def pause_job(self, job_id: str) -> "str | None":
         """挂起单个排队任务。返回：None=不存在；"finished"=已结束；
-        "running"=运行中不可挂起；"paused"=已挂起。"""
+        "running"=运行中不可挂起；"paused"=已挂起。
+
+        判定与置位都在 _sched_lock 内原子完成：与 _pipeline 的开跑提交
+        （committed 位）互斥，杜绝「drain 派发后、开跑前」的挂起丢失窗口。
+        """
         job = self.job_by_id(job_id)
         if job is None:
             return None
         if job.finished is not None or job.done:
             return "finished"
-        if job.current() is not None or job.cancel_requested:
-            return "running"
-        job.paused = True
+        with self._sched_lock:
+            if job.committed or job.current() is not None or job.cancel_requested:
+                return "running"
+            job.paused = True
         self._save_jobs()
         self.log(f"[engine] 任务 {job.id} 已挂起（排队中）")
         return "paused"
@@ -448,8 +485,10 @@ class Engine:
 
     def stop(self) -> None:
         self._stop_evt.set()
-        if self._runner is not None:
-            self._runner.stop()
+        with self._runners_lock:
+            runners = list(self._active_runners)
+        for r in runners:
+            r.stop()
 
     # ------------------------------------------------------------------
     # Job execution
@@ -457,9 +496,10 @@ class Engine:
     def _run_job(self, job: Job) -> None:
         if job.paused:
             # 交接窗口：drain 弹出后、开跑前被挂起 → 回到队首，不占推理资源
-            self._pending_jobs.insert(0, job)
+            with self._sched_lock:
+                self._pending_jobs.insert(0, job)
             self.log(f"[engine] 任务 {job.id} 已挂起（开跑前）")
-            self._drain_pending()
+            self._release_slot()
             return
         if job.cancel_requested:
             # 交接窗口：drain 弹出后、开跑前被取消 → 立即收尾，不占推理资源
@@ -468,7 +508,7 @@ class Engine:
             self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（开跑前）")
-            self._drain_pending()
+            self._release_slot()
             return
         self.log(f"[engine] ===== 任务 {job.id} 开始（{len(job.files)} 个文件） =====")
         try:
@@ -478,27 +518,61 @@ class Engine:
             self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] ===== 任务 {job.id} 结束 =====")
-            self._drain_pending()
+            self._release_slot()
+
+    def _release_slot(self) -> None:
+        """worker 退出：把自己移出池并补派队列（槽位释放的唯一出口）。"""
+        with self._sched_lock:
+            try:
+                self._workers.remove(threading.current_thread())
+            except ValueError:
+                pass
+        self._drain_pending()
 
     def _drain_pending(self) -> None:
-        if self._paused:
+        """按并发度补派：有空槽就从队头取非挂起任务开 worker（挂起者移尾）。"""
+        if self._paused or self._stop_evt.is_set():
             return
-        t = self._job_thread
-        if t is not None and t.is_alive() and t is not threading.current_thread():
-            return
-        while self._pending_jobs:
-            job = self._pending_jobs[0]
-            if job.paused:
-                if all(j.paused for j in self._pending_jobs):
-                    break  # 全被挂起：无任务可跑，等 resume
-                self._pending_jobs.append(self._pending_jobs.pop(0))
-                continue  # 挂起者移尾，找下一个
-            self._pending_jobs.pop(0)
-            self._job_thread = threading.Thread(target=self._run_job, args=(job,), daemon=True)
-            self._job_thread.start()
-            break
+        while True:
+            with self._sched_lock:
+                self._workers = [t for t in self._workers if t.is_alive()]
+                cap = self.concurrency
+                if len(self._workers) >= cap:
+                    return
+                job = None
+                while self._pending_jobs:
+                    cand = self._pending_jobs.pop(0)
+                    if cand.paused:
+                        if all(j.paused for j in self._pending_jobs):
+                            # 全被挂起：放回去，等 resume
+                            self._pending_jobs.insert(0, cand)
+                            return
+                        self._pending_jobs.append(cand)  # 移尾，找下一个
+                        continue
+                    job = cand
+                    break
+                if job is None:
+                    return
+                w = threading.Thread(target=self._run_job, args=(job,), daemon=True)
+                self._workers.append(w)
+                self.log(f"[engine] 派发任务 {job.id}（在途 {len(self._workers)}/{cap}）")
+            w.start()
 
     def _pipeline(self, job: Job) -> None:
+        # 开跑门：与 pause_job 同一把锁，commit / requeue 二选一，零竞态窗口。
+        # 若挂起发生在 drain 派发之后、此处提交之前 → 回到队首重排，不占资源。
+        with self._sched_lock:
+            if job.paused:
+                self._pending_jobs.insert(0, job)
+                job.committed = False
+                requeue = True
+            else:
+                job.committed = True
+                requeue = False
+        if requeue:
+            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前，重新排队）")
+            self._release_slot()
+            return
         lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
         sub_cfg = self.cfg.get("subtitle", {})
         mode = str(sub_cfg.get("skip_embedded", "target") or "target").lower()
@@ -688,17 +762,18 @@ class Engine:
             return
         cmd, cwd = self._build_infer_command([t.source for t in todo])
         self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型）")
-        self._parser = LogParser()
-        self._current_task = None
+        # 日志解析与「当前文件」指针是 job 级私有的（并发 worker 互不串扰）
+        parser = LogParser()
+        cur: dict = {"t": None}
         shared = {"transcribe_started": None, "model_loaded": False}
 
         def on_line(line: str) -> None:
             self.log(f"  [infer] {line}")
-            evt = self._parser.feed(line)
-            t = self._match_task(job, evt.file_path, evt.file_idx, todo)
+            evt = parser.feed(line)
+            t = self._match_task(job, evt.file_path, evt.file_idx, todo, cur)
             now = time.time()
             if evt.kind == "file_start":
-                self._current_task = t
+                cur["t"] = t
                 if t is not None:
                     t.status = TaskStatus.RUNNING
                     t.phase = TaskPhase.SUBTITLING
@@ -715,7 +790,6 @@ class Engine:
                         t.phase_detail = LIVE_PHASES["vad"][3]
             elif evt.kind == "batch_probe":
                 shared["model_loaded"] = True
-                self.model_loaded = True
                 for tt in todo:
                     if tt.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and tt.transcribe_started is None:
                         tt.live_phase = "vad"
@@ -753,21 +827,21 @@ class Engine:
                     t.eta_s = None
             elif evt.kind == "model_load":
                 shared["model_loaded"] = True
-                self.model_loaded = True
                 self.log("  [infer] 模型加载中…")
 
+        self._model_up()
         ok = self._run_command(cmd, cwd=cwd, on_line=on_line,
                                stop_check=lambda: job.cancel_requested)
-        self.model_loaded = False  # 推理进程已退出，模型随进程释放
+        self._model_down()  # 推理进程已退出，模型随进程释放
         if not ok:
             for t in todo:
                 if t.status == TaskStatus.RUNNING:
-                    if job.cancel_requested:
-                        # 取消时已产出字幕的文件保留：留给 finalize 循环收尾为 DONE
+                    if job.cancel_requested or self._stop_evt.is_set():
+                        # 取消/停止时已产出字幕的文件保留：留给 finalize 循环收尾为 DONE
                         if t.output_files:
                             continue
                         t.status = TaskStatus.CANCELED
-                        t.message = "已取消"
+                        t.message = "已取消" if job.cancel_requested else "服务停止"
                     else:
                         t.status = TaskStatus.ERROR
                         t.message = t.message or "引擎退出非零"
@@ -783,10 +857,10 @@ class Engine:
                     t.status = TaskStatus.DONE
                     t.message = t.message or "完成"
                     t.progress = 1.0
-                elif job.cancel_requested:
-                    # 取消时未开始的文件（同批后续项）：不报错，标已取消
+                elif job.cancel_requested or self._stop_evt.is_set():
+                    # 取消/停止时未开始的文件（同批后续项）：不报错，标已取消
                     t.status = TaskStatus.CANCELED
-                    t.message = "已取消"
+                    t.message = "已取消" if job.cancel_requested else "服务停止"
                 else:
                     t.status = TaskStatus.ERROR
                     t.message = t.message or "无字幕输出"
@@ -829,7 +903,8 @@ class Engine:
                 t.progress = max(t.progress, lo + (hi - lo) * frac)
             t.eta_s = None
 
-    def _match_task(self, job: Job, path: Optional[str], idx: Optional[int], todo: list[Task]) -> Task | None:
+    def _match_task(self, job: Job, path: Optional[str], idx: Optional[int],
+                    todo: list[Task], cur: dict) -> Task | None:
         if path:
             target = Path(path).resolve()
             for t in todo:
@@ -841,7 +916,7 @@ class Engine:
                     return t
         if idx is not None and 0 <= idx < len(todo):
             return todo[idx]
-        return self._current_task
+        return cur["t"]
 
     def _build_infer_command(self, files: list[Path]) -> tuple[list[str], Optional[str]]:
         inf = self.cfg.get("infer", {})
@@ -983,36 +1058,40 @@ class Engine:
         timeout: float | None = None,
         stop_check: Optional[Callable[[], bool]] = None,
     ) -> bool:
-        self._last_exit_code = None
+        # 并发 worker 各自持有 ProcRunner 与退出码（不再用引擎级单例）
+        exit_box: dict = {"code": None}
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        self._runner = ProcRunner(
+        runner = ProcRunner(
             " ".join(shlex.quote(c) for c in cmd),
             cwd=cwd,
             on_line=on_line,
             on_progress_pct=on_progress,
-            on_exit=lambda code: setattr(self, "_last_exit_code", code),
+            on_exit=lambda code: exit_box.__setitem__("code", code),
             env=env,
         )
-        if not self._runner.start():
-            return False
-        start = time.time()
-        while self._runner.running:
-            self._runner.wait(1.0)
-            if timeout and time.time() - start > timeout:
-                self.log("[engine] 超时，终止")
-                self._runner.stop()
-                break
-            if self._stop_evt.is_set():
-                self._runner.stop()
-                break
-            if stop_check is not None and stop_check():
-                self.log("[engine] 收到取消，终止子进程")
-                self._runner.stop()
-                break
-        self._runner = None
-        return self._last_exit_code in (0, None)
-
-    _last_exit_code: int | None = None
+        with self._runners_lock:
+            self._active_runners.add(runner)
+        try:
+            if not runner.start():
+                return False
+            start = time.time()
+            while runner.running:
+                runner.wait(1.0)
+                if timeout and time.time() - start > timeout:
+                    self.log("[engine] 超时，终止")
+                    runner.stop()
+                    break
+                if self._stop_evt.is_set():
+                    runner.stop()
+                    break
+                if stop_check is not None and stop_check():
+                    self.log("[engine] 收到取消，终止子进程")
+                    runner.stop()
+                    break
+            return exit_box["code"] in (0, None)
+        finally:
+            with self._runners_lock:
+                self._active_runners.discard(runner)
 
     # ------------------------------------------------------------------
     # API helpers
