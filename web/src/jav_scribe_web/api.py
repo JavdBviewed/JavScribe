@@ -115,11 +115,16 @@ class _Gate:
 
     serve 逐条串行转译，客户端在途数 ≈ 服务队列深度：封顶队列深度 →
     保护 serve 内存/磁盘，也压缩「服务重启丢队列」的风险面。
+
+    公平性（v0.2.13）：多服务同时排队时，空槽优先给在途（held）最少的
+    等待服务，同服务内 FIFO——防止一个服务的长队列独占全部槽位、
+    让另一个服务 GPU 全程空转（如 127 的 87 条先跑完、158 的 88 条干等）。
     """
 
     def __init__(self, limit: int) -> None:
         self._limit = max(1, int(limit))
-        self._held: set[str] = set()
+        self._held: dict[str, str] = {}  # task_id -> 服务名
+        self._waiters: dict[str, set[str]] = {}  # 服务名 -> 等待中的 task_id
         self._cv = asyncio.Condition()
 
     @property
@@ -140,23 +145,46 @@ class _Gate:
         async with self._cv:
             self._cv.notify_all()
 
-    def rehold(self, task_id: str) -> None:
-        """工作台重启恢复在途任务时认领槽位（启动期同步调用，尚无等待者）。"""
-        self._held.add(task_id)
+    def held_count(self) -> int:
+        return len(self._held)
 
-    async def acquire(self, task_id: str) -> None:
+    def _load(self, engine: str) -> int:
+        return sum(1 for e in self._held.values() if e == engine)
+
+    def _min_waiter_load(self) -> int:
+        loads = [self._load(e) for e in self._waiters if self._waiters[e]]
+        return min(loads) if loads else 0
+
+    def rehold(self, task_id: str, engine: str = "") -> None:
+        """工作台重启恢复在途任务时认领槽位（启动期同步调用，尚无等待者）。"""
+        self._held[task_id] = engine
+
+    async def acquire(self, task_id: str, engine: str = "") -> None:
         async with self._cv:
             if task_id in self._held:
                 return
-            # asyncio.Condition.wait() 无谓词参数（与 threading 不同）：手动轮询条件
-            while len(self._held) >= self._limit:
-                await self._cv.wait()
-            self._held.add(task_id)
+            waiters = self._waiters.setdefault(engine, set())
+            waiters.add(task_id)
+        try:
+            # 批量恢复场景：让并发等待者先完成登记，再做公平判定——否则恢复瞬间
+            # 的空槽会被登记最早的长队列服务在「独自判定」时抢先吃掉
+            await asyncio.sleep(0)
+            async with self._cv:
+                # asyncio.Condition.wait() 无谓词参数（与 threading 不同）：手动轮询条件。
+                # 有空槽且本服务在途数不超过等待服务中最少者 → 让位更轻的、取槽
+                while (
+                    len(self._held) >= self._limit
+                    or self._load(engine) > self._min_waiter_load()
+                ):
+                    await self._cv.wait()
+                self._held[task_id] = engine
+        finally:
+            waiters.discard(task_id)
 
     def release(self, task_id: str) -> None:
         if task_id not in self._held:
             return
-        self._held.discard(task_id)
+        self._held.pop(task_id, None)
         try:
             asyncio.get_running_loop().create_task(self._wake())
         except RuntimeError:
@@ -359,7 +387,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _uploads[t.id] = t
             if t.local_path and t.job_id and not t.writeback:
                 _local_wb[t.id] = t
-                _gate.rehold(t.id)  # 重启恢复的在途任务继续占服务队列槽
+                _gate.rehold(t.id, t.engine)  # 重启恢复的在途任务继续占服务队列槽
         _prune_uploads()
 
     def _lock_for(engine_name: str) -> asyncio.Lock:
@@ -792,7 +820,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         task.phase = "queued"
         try:
             await _pause_gate_wait(task, "queued")
-            await _gate.acquire(task.id)
+            await _gate.acquire(task.id, task.engine)
             try:
                 async with _local_limiter:
                     task.phase = "extracting"  # 拿到槽后进入提取阶段（行状态区分排队/提取）
