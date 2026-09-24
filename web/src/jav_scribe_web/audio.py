@@ -6,6 +6,7 @@ network to a subtitle service; the video itself never leaves this service.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 import tempfile
 from pathlib import Path
@@ -72,17 +73,25 @@ async def extract_audio_progress(
     last = -1.0
     if on_progress is not None:
         on_progress(0.0)
-    while line := await proc.stdout.readline():
-        if not line.startswith(b"out_time_us="):
-            continue
-        if duration <= 0:
-            continue
-        frac = min(1.0, int(line.strip()[12:]) / (duration * 1_000_000))
-        if frac - last >= 0.01:  # throttle: at most ~100 callbacks
-            last = frac
-            if on_progress is not None:
-                on_progress(frac)
-    _out, err = await proc.communicate()
+    try:
+        while line := await proc.stdout.readline():
+            if not line.startswith(b"out_time_us="):
+                continue
+            if duration <= 0:
+                continue
+            frac = min(1.0, int(line.strip()[12:]) / (duration * 1_000_000))
+            if frac - last >= 0.01:  # throttle: at most ~100 callbacks
+                last = frac
+                if on_progress is not None:
+                    on_progress(frac)
+        _out, err = await proc.communicate()
+    except asyncio.CancelledError:
+        # 任务被取消（用户暂停/工作台停机）：先杀 ffmpeg 防孤儿进程，再传播
+        with contextlib.suppress(BaseException):
+            proc.kill()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), 3)
+        raise
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         dest.unlink(missing_ok=True)
         raise AudioError(f"ffmpeg failed: {err.decode(errors='replace')[-300:]}")

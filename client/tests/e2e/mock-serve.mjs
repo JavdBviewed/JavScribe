@@ -70,7 +70,66 @@ const state = {
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
   seq: 0,
+  // 监控快照（GET /metrics/json；/_mock/metrics 控制 GPU 有无与数值）
+  metrics: { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 },
+  metricsHist: [],      // 环形历史（/metrics/json 每请求追一点，reset 预填）
 };
+
+function metricsCounts() {
+  let running = 0, queued = 0, paused = 0, done = 0, skipped = 0, failed = 0, canceled = 0;
+  for (const j of state.jobs.values()) {
+    if (j.paused) paused += j.files.length;
+    for (const f of j.files) {
+      if (f.status === "running") running += 1;
+      else if (f.status === "pending") queued += 1;
+      else if (f.status === "done") done += 1;
+      else if (f.status === "skipped") skipped += 1;
+      else if (f.status === "error") failed += 1;
+      else if (f.status === "canceled") canceled += 1;
+    }
+  }
+  return { running, queued, paused, done, skipped, failed, canceled };
+}
+
+function seedMetricsHist() {
+  state.metricsHist = [];
+  const now = Date.now() / 1000;
+  for (let i = 40; i > 0; i--) {
+    const w = Math.round(Math.sin(i / 5) * 4 + 8);
+    state.metricsHist.push({
+      ts: now - i * 5,
+      gpu_util: state.metrics.gpu_present ? state.metrics.gpu_util + Math.round(Math.sin(i / 3) * 5) : null,
+      gpu_mem_used_mb: state.metrics.gpu_present ? state.metrics.mem_used_mb : null,
+      running: Math.max(0, w % 3),
+      queued: Math.max(0, w - 2),
+    });
+  }
+}
+
+function metricsSnapshot() {
+  const c = metricsCounts();
+  // 历史窗恒定（仅 reset 时预填的 40 点）：页面轮询频率不定，若按请求追加，
+  // sparkline 尾部形状随轮询次数漂移 → style 快照像素基线不稳定
+  if (state.metricsHist.length > 200) state.metricsHist = state.metricsHist.slice(-200);
+  return {
+    ok: true,
+    uptime_s: 3600,
+    paused: state.queuePaused,
+    model_loaded: true,
+    jobs: c,
+    gpu: state.metrics.gpu_present
+      ? {
+          present: true,
+          name: "Mock GPU",
+          util_pct: state.metrics.gpu_util,
+          mem_used_mb: state.metrics.mem_used_mb,
+          mem_total_mb: state.metrics.mem_total_mb,
+        }
+      : null,
+    history: state.metricsHist,
+  };
+}
+seedMetricsHist();
 
 function newId() {
   state.seq += 1;
@@ -195,7 +254,17 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); return send(200, { ok: true }); }
+      if (sub === "metrics") {
+        return readBody().then((b) => {
+          const d = b ? JSON.parse(b) : {};
+          if (typeof d.gpu_present === "boolean") state.metrics.gpu_present = d.gpu_present;
+          if (typeof d.gpu_util === "number") state.metrics.gpu_util = d.gpu_util;
+          if (typeof d.mem_used_mb === "number") state.metrics.mem_used_mb = d.mem_used_mb;
+          if (typeof d.mem_total_mb === "number") state.metrics.mem_total_mb = d.mem_total_mb;
+          return send(200, { ok: true, metrics: state.metrics });
+        });
+      }
       if (sub === "version") {
         return readBody().then((b) => {
           const v = b && JSON.parse(b).version;
@@ -309,6 +378,10 @@ const server = http.createServer((req, res) => {
       if (!SCAN_DIRS.includes(raw)) return sendErr(400, `路径不存在: ${raw}`);
       const items = SCAN_TREE[raw].map((i) => ({ path: `${raw}/${i.name}`, ...i }));
       return send(200, { ok: true, mapped: false, path: raw, items, truncated: false });
+    }
+    if (parts[0] === "metrics" && (parts.length === 2 && parts[1] === "json"
+      || (parts.length === 1 && url.searchParams.get("fmt") === "json"))) {
+      return send(200, metricsSnapshot());
     }
     if (parts[0] === "jobs") {
       if (parts.length === 1) return send(200, [...state.jobs.values()].map((j) => jobToDict(j)));

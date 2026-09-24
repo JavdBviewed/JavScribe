@@ -78,6 +78,15 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
+    async def metrics(self) -> dict:
+        """监控快照（serve v0.2.4+ /metrics/json）：GPU/显存 + 调度 + 1h 历史。
+
+        旧版服务无此路由 → 404（调用方映射为 unsupported，前端隐藏监控块）。
+        """
+        r = await self._get_client().get(f"{self.url}/metrics/json")
+        r.raise_for_status()
+        return r.json()
+
     async def upload_audio(self, audio: bytes, source_name: str) -> dict:
         """转发 opus：先问后传（服务端内容寻址缓存）。
 

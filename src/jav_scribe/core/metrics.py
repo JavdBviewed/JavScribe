@@ -10,7 +10,11 @@ status），job 被弹出后计数不丢、重复渲染不重复计。
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import threading
+import time
+from collections import deque
 from typing import Any, Optional
 
 # 单文件处理耗时分布桶（秒）
@@ -56,6 +60,11 @@ class MetricsRegistry:
     def inc_config_changes(self, n: int = 1) -> None:
         with self._lock:
             self._config_changes += max(0, n)
+
+    def totals(self) -> dict[str, int]:
+        """终态累计快照（done/skipped/failed/canceled；供 JSON 监控端点）。"""
+        with self._lock:
+            return dict(self._completed)
 
     # -- 渲染 ----------------------------------------------------------------
     def render(self, engine: Any) -> str:
@@ -161,4 +170,134 @@ class MetricsRegistry:
                     self._hist[k] += 1
                 return
         self._hist[-1] += 1
+
+
+
+# ---------------------------------------------------------------------------
+# LiveSampler：5s 采样 GPU 利用率/显存 + 调度状态（在途文件数），环形缓冲 1h。
+# 供 GET /metrics/json（前端服务卡片迷你趋势图）。stdlib 零依赖：nvidia-smi
+# 子进程轮询（每次 ~50ms，仅 GPU 机器存在该命令；CPU 机器 gpu=None，
+# 前端退化为队列深度曲线）。
+# ---------------------------------------------------------------------------
+
+
+class LiveSampler:
+    def __init__(self, engine: Any, interval_s: float = 5.0, maxlen: int = 720) -> None:
+        self._engine = engine
+        self._interval = max(1.0, float(interval_s))
+        self._history: deque[dict[str, Any]] = deque(maxlen=max(10, int(maxlen)))
+        self._lock = threading.Lock()
+        self._started = time.time()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._nvidia = shutil.which("nvidia-smi")
+        self._gpu_name: str | None = None
+        self._last_mem_total: float | None = None
+
+    # -- 生命周期 -------------------------------------------------------------
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="javscr-live")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+
+    def _loop(self) -> None:
+        self._tick()  # 立即首采（首个请求就有 1 个点）
+        while not self._stop.wait(self._interval):
+            try:
+                self._tick()
+            except Exception:  # noqa: BLE001 采样异常不得杀死监控线程
+                pass
+
+    # -- 采样 -----------------------------------------------------------------
+    def _sample_gpu(self) -> dict[str, Any] | None:
+        if not self._nvidia:
+            return None
+        try:
+            out = subprocess.run(
+                [self._nvidia,
+                 "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode != 0:
+                return None
+            first = out.stdout.strip().splitlines()[0]
+            name, util, used, total = (x.strip() for x in first.split(","))
+            return {
+                "name": name,
+                "util_pct": float(util),
+                "mem_used_mb": float(used),
+                "mem_total_mb": float(total),
+            }
+        except Exception:  # noqa: BLE001 命令缺失/超时/解析失败 → 无 GPU 数据
+            return None
+
+    def _tick(self) -> None:
+        gpu = self._sample_gpu()
+        engine = self._engine
+        running = queued = 0
+        for j in list(getattr(engine, "jobs", []) or []):
+            for t in j.files:
+                st = t.status.value
+                if st == "running":
+                    running += 1
+                elif st == "pending":
+                    queued += 1
+        if gpu is not None:
+            self._gpu_name = gpu["name"]
+            self._last_mem_total = gpu["mem_total_mb"]
+        sample = {
+            "ts": round(time.time(), 1),
+            "gpu_util": gpu["util_pct"] if gpu else None,
+            "gpu_mem_used_mb": gpu["mem_used_mb"] if gpu else None,
+            "running": running,
+            "queued": queued,
+        }
+        with self._lock:
+            self._history.append(sample)
+
+    # -- 快照 -----------------------------------------------------------------
+    def snapshot(self, registry: "MetricsRegistry") -> dict[str, Any]:
+        e = self._engine
+        with self._lock:
+            hist = list(self._history)
+        last = hist[-1] if hist else None
+        gpu: dict[str, Any] | None = None
+        if last is not None and last.get("gpu_util") is not None:
+            gpu = {
+                "present": True,
+                "name": self._gpu_name,
+                "util_pct": last["gpu_util"],
+                "mem_used_mb": last.get("gpu_mem_used_mb"),
+                "mem_total_mb": self._last_mem_total,
+            }
+        elif self._nvidia:
+            # 有 nvidia-smi 但尚无采样点（刚启动）：现取一次
+            g = self._sample_gpu()
+            if g:
+                self._gpu_name = g["name"]
+                self._last_mem_total = g["mem_total_mb"]
+                gpu = {"present": True, **g}
+        paused_jobs = sum(1 for j in list(getattr(e, "jobs", []) or []) if getattr(j, "paused", False))
+        return {
+            "ok": True,
+            "uptime_s": int(time.time() - self._started),
+            "paused": bool(getattr(e, "paused", False)),
+            "model_loaded": bool(getattr(e, "model_loaded", False)),
+            "jobs": {
+                "running": last["running"] if last else 0,
+                "queued": last["queued"] if last else 0,
+                "paused": paused_jobs,
+                **registry.totals(),
+            },
+            "gpu": gpu,
+            "history": hist,
+        }
 

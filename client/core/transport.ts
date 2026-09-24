@@ -85,6 +85,16 @@ export interface Transport {
   resumeJob?(engine: string, jobId: string): Promise<{ ok: boolean; job_id: string; status: string }>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
+  /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
+  pauseLocalTask?(taskId: string): Promise<{ ok: boolean; task_id: string; already?: boolean }>;
+  /** 批量操作（400+ 场景）：pause/resume/retry/cancel；单条失败不 throw，结果逐条列出 */
+  bulkJobs?(
+    action: "pause" | "resume" | "retry" | "cancel",
+    taskIds: string[],
+    jobs: { engine: string; job_id: string }[],
+  ): Promise<import("./types").BulkResult>;
+  /** 服务监控快照（GPU/显存/调度/1h 历史）；ok=false 表示旧版服务不支持或服务不可达 */
+  engineMetrics?(name: string): Promise<import("./types").MetricsResponse>;
   /** 服务端设置项；Key 错误/版本过旧等 throw(detail 或 "HTTP <status>") */
   getConfig(name: string): Promise<ConfigItem[]>;
   /** 保存设置；失败 throw(detail 或 "<status>") */

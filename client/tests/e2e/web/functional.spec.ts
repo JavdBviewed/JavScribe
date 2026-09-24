@@ -2,11 +2,12 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES, makeScanDir,
-  mockReset, mockSeed, mockPause, mockResume, mockConfigMode, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
+  mockReset, mockSeed, mockPause, mockResume, mockConfigMode, mockControl, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
   resetPipelinePause, mockSpeed,
 } from "../helpers";
 import path from "node:path";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import http from "node:http";
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 const jh = { "Content-Type": "application/json" };
@@ -461,5 +462,122 @@ test("多服务自动均衡（auto）：派发时刻选最闲服务；UI 出现�
     await m2ctl("resume").catch(() => {});
     await m2ctl("reset").catch(() => {});
     await req.delete(`${WEB_URL}/api/engines/mock2`).catch(() => {});
+  }
+});
+
+test("本机任务 暂停/继续：单任务 + 批量（暂停态落盘持久化，继续后全部完成回写）", async () => {
+  const extra = path.join(SCAN_DIR, "EXTRA-001.mp4");
+  copyFileSync(fx("video-a.mp4"), extra);
+  try {
+    // 在途封顶 1：首个任务持槽到回写完成，其余停在排队
+    expect((await req.put(`${WEB_URL}/api/client-config`, { data: { queue_cap: 1 }, headers: jh })).status()).toBe(200);
+    // mock 转译 ~10s/条：A 有充足在途窗口让 B/C 稳定停在排队
+    await mockSpeed(req, { step: 0.01, tickMs: 100 });
+
+    const r = await req.post(`${WEB_URL}/api/scan/local/submit`, {
+      data: { engine: "mock", files: [path.join(SCAN_DIR, "AKDL-001.mp4"), path.join(SCAN_DIR, "SUB-001.mkv"), extra] },
+      headers: jh,
+    });
+    expect(r.status()).toBe(200);
+    const { upload_ids } = await r.json();
+    expect(upload_ids).toHaveLength(3);
+    const [tidA, tidB, tidC] = upload_ids as string[];
+    const up = async (id: string) => (await (await req.get(`${WEB_URL}/api/uploads/${id}`)).json()) as any;
+
+    // A 进入管线（job_id 就位 = 服务已受理）；B/C 停在排队（在途封顶 1）
+    await expect.poll(async () => (await up(tidA)).job_id, { timeout: 30_000 }).toBeTruthy();
+    await expect.poll(
+      async () => (await up(tidB)).phase === "queued" && (await up(tidC)).phase === "queued",
+      { timeout: 10_000 },
+    ).toBe(true);
+
+    // 单任务暂停 B；重复暂停幂等 → already；A 已入服务队列 → 409
+    expect((await req.post(`${WEB_URL}/api/local/${tidB}/pause`)).status()).toBe(200);
+    const p1b = await req.post(`${WEB_URL}/api/local/${tidB}/pause`);
+    expect(p1b.status()).toBe(200);
+    expect((await p1b.json()).already).toBe(true);
+    const pA = await req.post(`${WEB_URL}/api/local/${tidA}/pause`);
+    expect(pA.status()).toBe(409);
+    expect((await pA.json()).detail).toContain("已提交服务队列");
+
+    // 批量暂停 C
+    const d1 = await (await req.post(`${WEB_URL}/api/jobs/bulk`, { data: { action: "pause", task_ids: [tidC] }, headers: jh })).json();
+    expect(d1.succeeded).toBe(1);
+    expect(d1.failed).toBe(0);
+
+    // B/C 暂停中，且落盘 uploads.json（task_paused：下次工作台重启可恢复）
+    for (const id of [tidB, tidC]) {
+      const d = await up(id);
+      expect(d.phase).toBe("paused");
+      expect(d.task_paused).toBe(true);
+    }
+    const dataDirs = readdirSync("/tmp").filter((n) => n.startsWith("javweb-e2e-data."));
+    const uploadsJson = dataDirs.map((d) => path.join("/tmp", d, "uploads.json")).find((p) => existsSync(p));
+    expect(uploadsJson).toBeTruthy();
+    const persisted = (JSON.parse(readFileSync(uploadsJson!, "utf-8")) as { uploads: any[] }).uploads;
+    for (const id of [tidB, tidC]) {
+      const e = persisted.find((x) => x.id === id);
+      expect(e?.task_paused).toBe(true);
+    }
+
+    // 本机「取消」无语义 → 单条 error，不拖垮整批
+    const d2 = await (await req.post(`${WEB_URL}/api/jobs/bulk`, { data: { action: "cancel", task_ids: [tidC] }, headers: jh })).json();
+    expect(d2.succeeded).toBe(0);
+    expect(d2.failed).toBe(1);
+
+    // 批量继续 B/C → 三条全部完成、字幕回写视频旁
+    const d3 = await (await req.post(`${WEB_URL}/api/jobs/bulk`, { data: { action: "resume", task_ids: [tidB, tidC] }, headers: jh })).json();
+    expect(d3.succeeded).toBe(2);
+    expect(d3.failed).toBe(0);
+    const want = ["AKDL-001.zh.srt", "SUB-001.zh.srt", "EXTRA-001.zh.srt"];
+    const t0 = Date.now();
+    while (!want.every((n) => existsSync(path.join(SCAN_DIR, n))) && Date.now() - t0 < 90_000) {
+      await new Promise((rs) => setTimeout(rs, 500));
+    }
+    for (const n of want) expect(existsSync(path.join(SCAN_DIR, n))).toBe(true);
+  } finally {
+    for (const n of ["AKDL-001.zh.srt", "SUB-001.zh.srt", "EXTRA-001.zh.srt"]) rmSync(path.join(SCAN_DIR, n), { force: true });
+    rmSync(extra, { force: true });
+    await req.put(`${WEB_URL}/api/client-config`, { data: { queue_cap: 4 }, headers: jh }).catch(() => {});
+  }
+});
+
+test("metrics：/api/engines/{name}/metrics（GPU 快照 / 旧版服务 unsupported / 不可达 unreachable）", async () => {
+  // mock 默认无 GPU → gpu=null（前端降级队列深度曲线）；历史预填 40 点
+  const g1 = await (await req.get(`${WEB_URL}/api/engines/mock/metrics`)).json() as any;
+  expect(g1.ok).toBe(true);
+  expect(g1.metrics.gpu).toBeNull();
+  expect(g1.metrics.jobs.running).toBe(0);
+  expect(g1.metrics.history.length).toBeGreaterThanOrEqual(2);
+
+  // 开启 GPU → 快照带 GPU 指标（工作台侧 2s 内存缓存，需等待过期）
+  await mockControl(req, "metrics", { gpu_present: true, gpu_util: 43, mem_used_mb: 5400, mem_total_mb: 8192 });
+  await new Promise((rs) => setTimeout(rs, 2300));
+  const g2 = await (await req.get(`${WEB_URL}/api/engines/mock/metrics`)).json() as any;
+  expect(g2.metrics.gpu.present).toBe(true);
+  expect(g2.metrics.gpu.util_pct).toBe(43);
+  expect(g2.metrics.gpu.mem_used_mb).toBe(5400);
+
+  // 旧版服务（无 /metrics/json → 404）→ unsupported
+  const srv = http.createServer((_q, res) => {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((rs) => srv.listen(8305, "127.0.0.1", () => rs()));
+  try {
+    await addEngine(req, { name: "legacy-x", url: "http://127.0.0.1:8305" });
+    await waitForEngineListed(req, "legacy-x");
+    expect(await (await req.get(`${WEB_URL}/api/engines/legacy-x/metrics`)).json()).toEqual({ ok: false, error: "unsupported" });
+  } finally {
+    await req.delete(`${WEB_URL}/api/engines/legacy-x`).catch(() => {});
+    await new Promise<void>((rs) => srv.close(() => rs()));
+  }
+  // 不可达服务 → unreachable
+  await addEngine(req, { name: "dead-x", url: "http://127.0.0.1:9998" });
+  await waitForEngineListed(req, "dead-x");
+  try {
+    expect(await (await req.get(`${WEB_URL}/api/engines/dead-x/metrics`)).json()).toEqual({ ok: false, error: "unreachable" });
+  } finally {
+    await req.delete(`${WEB_URL}/api/engines/dead-x`);
   }
 });

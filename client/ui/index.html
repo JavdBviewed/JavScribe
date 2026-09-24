@@ -174,17 +174,13 @@
   <section id="sec-jobs">
     <div class="sec-head">
       <div class="sec-title"><span class="kicker">Tasks</span><h2>字幕任务</h2></div>
-      <div id="job-stats" class="stats"></div>
-      <div id="job-filter" class="seg" role="group" aria-label="筛选任务">
-        <button type="button" data-f="all" class="on">全部</button>
-        <button type="button" data-f="running">进行中</button>
-        <button type="button" data-f="finished">已完成</button>
-      </div>
+      <div id="job-filter" class="seg" role="group" aria-label="筛选任务（按钮内为各状态任务数）"></div>
       <button type="button" id="job-pause-all" class="btn job-pause-all" hidden
         title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">
+      <span class="job-chk-box"><input type="checkbox" id="job-sel-all" aria-label="全选当前筛选结果"></span>
       <span>服务<span class="help" tabindex="0" data-tip="处理该任务的字幕服务端（名称为添加服务时填的展示名）。"></span></span>
       <span>文件<span class="help" tabindex="0" data-tip="客户端登记时的原始视频名。"></span></span>
       <span>状态<span class="help" tabindex="0" data-tip="排队：等待服务端处理；运行中：正在识别；完成 / 失败 / 跳过 / 已取消 为终态。"></span></span>
@@ -192,6 +188,14 @@
       <span>位置<span class="help" tabindex="0" data-tip="运行中显示当前处理阶段（模型加载 / 语音检测 / 识别中）；完成后显示已识别到的时间轴位置。"></span></span>
       <span>耗时<span class="help" tabindex="0" data-tip="从提交到结束的墙钟时间。"></span></span>
       <span></span>
+    </div>
+    <div id="job-bulk-bar" class="bulk-bar" hidden>
+      <span id="job-bulk-info" class="mono">已选 0 项</span>
+      <button type="button" class="dl-btn bulk-act" data-act="pause" title="暂停所选：本机行停排队/提取（恢复需重新提取音轨）；服务行挂起排队中任务">&#9208; 暂停</button>
+      <button type="button" class="dl-btn bulk-act" data-act="resume" title="继续所选：本机暂停/失败行重新提取音轨并提交；服务挂起行恢复排队">&#9654; 继续</button>
+      <button type="button" class="dl-btn bulk-act" data-act="retry" title="重试所选：失败/跳过的服务任务重新入队；本机失败行重新提取提交">&#8635; 重试</button>
+      <button type="button" class="dl-btn bulk-act" data-act="cancel" title="取消所选服务任务：排队立即终止，运行中检查点中止，已生成字幕保留">&#10006; 取消</button>
+      <button type="button" class="icon-btn bulk-clear" title="清除全部选择">&#10005;</button>
     </div>
     <div id="job-list" class="table-wrap"></div>
     <div id="jobs-empty" class="empty">

@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { ClientConfig, ConfigItem, Engine, JobRow, JobSummary, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
+import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -34,6 +34,9 @@ interface AppState {
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
   _summary: JobSummary | null; // 最近一次 /api/jobs/summary（serve 累计口径；null=回退行计数）
   _jobActive: Map<string, boolean>; // engine|job_id -> 该任务是否有文件运行中（单任务挂起可用性）
+  selected: Set<string>;                     // 勾选的任务行 key（批量操作）
+  _filteredKeys: string[];                   // 当前筛选下的全部行 key（表头全选/半选态）
+  _metrics: Record<string, MetricsResponse>; // 引擎名 -> 监控快照（卡片迷你趋势图）
   extractMode: "auto" | "local" | "server";
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
@@ -73,6 +76,9 @@ const state: AppState = {
   _jobs: [],
   _summary: null,
   _jobActive: new Map(),
+  selected: new Set(),
+  _filteredKeys: [],
+  _metrics: {},
   extractMode: savedExtract === "auto" || savedExtract === "local" || savedExtract === "server"
     ? savedExtract
     : "auto",
@@ -255,6 +261,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       state._jobs = jobs;
       state._summary = summary;
       renderJobs(jobs);
+      if (platform.kind === "web" && typeof t.engineMetrics === "function") {
+        for (const e of engines) {
+          if (!e.online) continue;
+          void t.engineMetrics(e.name).then((m) => {
+            state._metrics[e.name] = m;
+            const card = document.querySelector<HTMLElement>(
+              `#engine-grid .eng[data-name="${CSS.escape(e.name)}"]`);
+            if (card) renderEngineMetrics(card, e.name);
+          }).catch(() => {
+            state._metrics[e.name] = { ok: false, error: "unreachable" };
+            const card = document.querySelector<HTMLElement>(
+              `#engine-grid .eng[data-name="${CSS.escape(e.name)}"]`);
+            if (card) renderEngineMetrics(card, e.name);
+          });
+        }
+      }
       renderSelect(engines);
       $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
       notifyJobChanges(jobs);
@@ -559,6 +581,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ${e.paused ? `<span class="tag tag-paused" title="服务队列已挂起：运行中任务跑完后不再开新任务（看板「继续任务」或单任务「继续」恢复）">已暂停</span>` : ""}
       ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
     </div>
+    <div class="eng-metrics"></div>
     ${typeof t.setEngineEnabled === "function" ? `
     <div class="eng-bal-row">
       <label class="eng-bal" title="勾选后该服务参与「自动均衡」：新任务实时分派给在途任务最少的在线服务；取消勾选后只收手动指定的任务"><input type="checkbox" class="bal-chk" data-name="${esc(e.name)}"${e.enabled === false ? "" : " checked"}> 参与均衡</label>
@@ -588,11 +611,61 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       card.classList.toggle("on", !!e.online);
       card.classList.toggle("off", !e.online);
       card.classList.toggle("bal-off", e.enabled === false);
+      renderEngineMetrics(card as HTMLElement, e.name);
     }
     const order = Array.from(grid.children).map((c) => (c as HTMLElement).dataset.name).join("\u0001");
     if (order !== list.map((e) => e.name).join("\u0001")) {
       for (const e of list) grid.appendChild(cards.get(e.name)!);
     }
+  }
+
+  // 引擎监控迷你趋势图（serve 0.2.4+ /metrics/json；旧版服务降级为小字提示）
+  interface MetricsBoxEl extends HTMLElement { _mhtml?: string; }
+
+  function renderEngineMetrics(card: HTMLElement, name: string) {
+    const box = card.querySelector(".eng-metrics") as MetricsBoxEl | null;
+    if (!box) return;
+    const online = state.engines.some((e) => e.name === name && e.online);
+    let html = "";
+    if (!online) {
+      html = "";
+    } else {
+      const m = state._metrics[name];
+      if (!m) {
+        html = `<span class="mm-muted">监控数据加载中…</span>`;
+      } else if (!m.ok) {
+        html = `<span class="mm-muted">${m.error === "unsupported" ? "无监控指标（服务版本过旧）" : "监控暂不可用"}</span>`;
+      } else {
+        const mm = m.metrics || ({} as EngineMetrics);
+        const gpu = mm.gpu || null;
+        const jobs = mm.jobs;
+        // sparkline：最近 120 点；有 GPU → 利用率曲线，无 GPU → 队列深度曲线
+        const hist = (mm.history || []).slice(-120);
+        let spark = "";
+        if (hist.length >= 2) {
+          const useGpu = !!(gpu && gpu.present && gpu.util_pct != null);
+          const vals = hist.map((h) => (useGpu ? (h.gpu_util ?? 0) : h.running + h.queued));
+          const max = useGpu ? 100 : Math.max(10, Math.ceil(Math.max(...vals) / 10) * 10);
+          const W = 132, H = 26;
+          const step = W / (hist.length - 1);
+          const pts = vals
+            .map((v, i) => `${(i * step).toFixed(1)},${(H - 2 - (Math.min(v, max) / max) * (H - 8)).toFixed(1)}`)
+            .join(" ");
+          spark = `<svg class="spark" viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" aria-hidden="true"><polygon class="spark-area" points="0,${H} ${pts} ${W},${H}"></polygon><polyline class="spark-line" points="${pts}"></polyline></svg>`;
+        }
+        let main: string;
+        if (gpu && gpu.present) {
+          const usedGb = gpu.mem_used_mb != null ? (gpu.mem_used_mb / 1024).toFixed(1) : "—";
+          const totGb = gpu.mem_total_mb != null ? (gpu.mem_total_mb / 1024).toFixed(1) : "—";
+          main = `GPU ${gpu.util_pct != null ? Math.round(gpu.util_pct) : "—"}% · 显存 ${usedGb}/${totGb}G`;
+        } else {
+          main = "队列深度";
+        }
+        const sub = jobs ? `排队 ${jobs.queued} · 运行 ${jobs.running}` : "";
+        html = `<div class="mm-row"><span class="mm-main mono" title="${esc(gpu && gpu.name ? gpu.name : "")}">${esc(main)}</span>${spark}</div>${sub ? `<div class="mm-sub mono">${esc(sub)}</div>` : ""}`;
+      }
+    }
+    if (box._mhtml !== html) { box._mhtml = html; box.innerHTML = html; }
   }
 
   $("engine-grid").onclick = async (ev) => {
@@ -634,6 +707,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function jobRowData(j: JobRow, now: number) {
+    const key = jobKey(j);
+    const sel = state.selected.has(key);
     const pct = Math.round((j.progress || 0) * 100);
     const isRun = j.status === "running";
     // 服务单任务挂起：行 status 仍是 pending，展示态归一为「已暂停」
@@ -707,6 +782,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         ? `<button type="button" class="dl-btn resume-job rerun-local" data-tid="${esc(j.task_id)}" data-mode="resume" title="继续：重新提取音轨并重新提交（本机视频需仍存在）">&#9654; 继续</button>`
         : `<button type="button" class="dl-btn retry rerun-local" data-tid="${esc(j.task_id)}" data-mode="error" title="重试：重新提取音轨并重新提交（本机视频需仍存在）">&#8635; 重试</button>`)
       : "";
+    // 本机管线行暂停（排队/提取/派发中，未提交服务）：重提取音轨才能恢复
+    const localPauseBtn = isLocalRow && !!t.pauseLocalTask && j.status === "running"
+      ? `<button type="button" class="dl-btn pause-local" data-tid="${esc(j.task_id)}" title="暂停本机管线：停止排队/提取；恢复需重新提取音轨并提交">&#9208; 暂停</button>`
+      : "";
     // 取消（运行中/排队，未挂起）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
     const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
@@ -717,15 +796,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, rerunBtn, pos, wb, ss, cancel].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
+      <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${rerunBtn}${cancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -743,30 +823,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function renderJobs(rows: JobRow[]) {
-    // 统计单一真源：serve 累计终态计数 + 当前在途（/api/jobs/summary）。
-    // 服务端任务表只留最近 200 条，行计数在大批量任务下必然少算；
-    // summary 不可用（老服务端/请求失败）时回退现行行计数。
-    let running: number, done: number, skipped: number, failed: number;
-    const pausedCount = state._summary && typeof state._summary.paused === "number"
-      ? state._summary.paused
-      : rows.filter((r) => r.status === "paused" || r.paused).length;
-    if (state._summary) {
-      running = state._summary.running;
-      done = state._summary.done;
-      skipped = state._summary.skipped;
-      failed = state._summary.failed;
-    } else {
-      running = rows.filter((r) => r.status === "running").length;
-      done = rows.filter((r) => r.status === "done").length;
-      skipped = rows.filter((r) => r.status === "skipped").length;
-      failed = rows.filter((r) => r.status === "error" || r.status === "canceled").length;
-    }
-    $("job-stats").innerHTML =
-      `<span class="stat${running ? " s-run" : ""}">进行中 <b>${running}</b></span>` +
-      `<span class="stat">完成 <b>${done}</b></span>` +
-      `<span class="stat">跳过 <b>${skipped}</b></span>` +
-      `<span class="stat">失败 <b>${failed}</b></span>` +
-      `<span class="stat${pausedCount ? " s-paused" : ""}">已暂停 <b>${pausedCount}</b></span>`;
+    // 统计与筛选合一（renderFilterBar）：终态计数走 serve 累计 summary（200 内存窗
+    // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
+    renderFilterBar();
     renderPauseAllBtn();
 
     // 单任务挂起可用性：同任务任一文件运行中 → 服务侧拒绝挂起（409），行级「暂停」隐藏
@@ -776,7 +835,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     state._jobActive = jobActive;
 
+    // 勾选维护：消失的行（任务过期/挤出窗口）自动取消勾选
+    const allKeys = new Set(rows.map(jobKey));
+    for (const k of Array.from(state.selected)) if (!allKeys.has(k)) state.selected.delete(k);
+
     const filtered = visibleRows(rows);
+    state._filteredKeys = filtered.map(jobKey);
 
     // 分页：只渲染当前页；stats/空态仍基于全量 filtered。页码越界自动收回（任务完成会收缩列表）。
     const pages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
@@ -822,16 +886,77 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       for (const j of pageRows) list.appendChild(rowMap.get(jobKey(j))!);
     }
     renderPager(filtered.length);
+    renderBulkBar();
+    renderSelAll();
+  }
+
+  // ---------- 任务筛选（状态桶：活跃态分行细类，终态归一） ----------
+  // 桶语义（与筛选按钮一一对应）：
+  //   排队中 = 本机 queued/dispatching + serve pending
+  //   提取中 = 本机 ffmpeg 提取音轨
+  //   转译中 = serve 运行中（模型识别）
+  //   已暂停 = 本机 paused 或 serve 单任务挂起（paused）
+  //   完成/跳过/失败 = 终态（失败含 canceled）
+  function rowBucket(r: JobRow): string {
+    if (r.status === "done") return "done";
+    if (r.status === "skipped") return "skipped";
+    if (r.status === "error" || r.status === "canceled") return "failed";
+    if (r.status === "paused" || r.paused) return "paused";
+    if (!r.job_id) {
+      // 本机管线行（无 job_id）：按 phase 细分
+      if (r.phase === "extracting") return "extracting";
+      return "queued"; // queued / dispatching 均属「排队/派发」
+    }
+    // serve 行
+    if (r.status === "running") return "transcribing";
+    return "queued"; // pending
   }
 
   // ---------- 任务分页（基于缓存即时翻页，不请求网络；5s 轮询照常刷新数据） ----------
   function visibleRows(rows: JobRow[]) {
-    return rows.filter((r) =>
-      state.filter === "all" ? true :
-      // 进行中 = 运行中 + 排队（serve pending）+ 已暂停；已完成 = 全部终态（done/失败/跳过/已取消）
-      state.filter === "running"
-        ? r.status === "running" || r.status === "pending" || r.status === "paused" || r.paused
-        : r.status !== "running" && r.status !== "pending" && r.status !== "paused" && !r.paused);
+    return rows.filter((r) => {
+      if (state.filter === "all") return true;
+      const b = rowBucket(r);
+      if (state.filter === "active") return b === "queued" || b === "extracting" || b === "transcribing";
+      return b === state.filter;
+    });
+  }
+
+  // ---------- 合并筛选条（统计 + 筛选一体：按钮内带计数，避免两套重复控件） ----------
+  const FILTERS: Array<[string, string]> = [
+    ["all", "全部"], ["active", "进行中"], ["queued", "排队中"], ["extracting", "提取中"],
+    ["transcribing", "转译中"], ["done", "完成"], ["skipped", "跳过"], ["failed", "失败"], ["paused", "已暂停"],
+  ];
+
+  function renderFilterBar() {
+    const box = $("job-filter");
+    const counts: Record<string, number> = {
+      all: 0, active: 0, queued: 0, extracting: 0, transcribing: 0,
+      done: 0, skipped: 0, failed: 0, paused: 0,
+    };
+    for (const r of state._jobs) counts[rowBucket(r)] += 1;
+    // 终态计数用 serve 累计 summary（200 内存窗下行计数必少算）；活跃态只能按现行
+    if (state._summary) {
+      counts.done = state._summary.done;
+      counts.skipped = state._summary.skipped;
+      counts.failed = state._summary.failed;
+    }
+    counts.active = counts.queued + counts.extracting + counts.transcribing;
+    counts.all = counts.active + counts.done + counts.skipped + counts.failed + counts.paused;
+    const html = FILTERS.map(([f, zh]) =>
+      `<button type="button" data-f="${f}" class="${state.filter === f ? "on" : ""}">${zh} <b>${counts[f]}</b></button>`,
+    ).join("");
+    if ((box as HTMLElement & { _html?: string })._html !== html) {
+      (box as HTMLElement & { _html?: string })._html = html;
+      box.innerHTML = html;
+    }
+    for (const b of Array.from(box.querySelectorAll<HTMLButtonElement>("button"))) {
+      b.onclick = () => {
+        state.filter = b.dataset.f || "all";
+        state.page = 0;
+        renderJobs(state._jobs);
+      };
+    }
   }
 
   function renderPager(total: number) {
@@ -915,6 +1040,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       } catch (e) {
         toast(`恢复失败：${(e as Error).message}`, "err");
         rj.disabled = false; rj.textContent = "▶ 继续";
+      }
+      refresh();
+      return;
+    }
+    // 本机管线任务暂停（排队/提取/派发中，未提交服务）
+    const pl = (ev.target as HTMLElement).closest(".pause-local") as HTMLButtonElement | null;
+    if (pl && !pl.disabled && t.pauseLocalTask) {
+      const tid = pl.dataset.tid || "";
+      pl.disabled = true; pl.textContent = "暂停中…";
+      try {
+        const d = await t.pauseLocalTask(tid);
+        toast(d.already ? "该任务已是暂停状态" : "已暂停（点「继续」重新提取音轨并提交）", "ok");
+      } catch (e) {
+        toast(`暂停失败：${(e as Error).message}`, "err");
+        pl.disabled = false; pl.textContent = "⏸ 暂停";
       }
       refresh();
       return;
@@ -1019,15 +1159,115 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   };
 
-  // ---------- 筛选 ----------
-  for (const b of document.querySelectorAll<HTMLButtonElement>("#job-filter button")) {
-    b.onclick = () => {
-      state.filter = b.dataset.f || "all";
-      state.page = 0;
-      document.querySelectorAll("#job-filter button").forEach((x) => x.classList.toggle("on", x === b));
-      renderJobs(state._jobs);
+  // ---------- 勾选 + 批量操作（400+ 场景：勾选行 → 底部操作条） ----------
+  // 行内勾选（change 委托；行整行重写时 checked 态由 core 串保证一致）
+  jobList.onchange = (ev) => {
+    const chk = (ev.target as HTMLElement).closest(".job-chk") as HTMLInputElement | null;
+    if (!chk) return;
+    const key = chk.dataset.key || "";
+    if (chk.checked) state.selected.add(key);
+    else state.selected.delete(key);
+    renderBulkBar();
+    renderSelAll();
+  };
+
+  // 表头「全选当前筛选结果」（跨页；部分选中 → indeterminate）
+  const selAll = $("job-sel-all") as HTMLInputElement | null;
+  if (selAll) {
+    selAll.onchange = () => {
+      if (selAll.checked) for (const k of state._filteredKeys) state.selected.add(k);
+      else for (const k of state._filteredKeys) state.selected.delete(k);
+      // 当前页行内勾选同步（不触发 renderJobs，避免 5s 数据外的多余重排）
+      for (const row of Array.from(jobList.children) as JobRowEl[]) {
+        const chk = row.querySelector<HTMLInputElement>("input.job-chk");
+        if (chk) chk.checked = selAll.checked;
+      }
+      renderBulkBar();
+      renderSelAll();
     };
   }
+
+  function renderSelAll() {
+    if (!selAll) return;
+    const sel = state._filteredKeys.filter((k) => state.selected.has(k)).length;
+    selAll.checked = state._filteredKeys.length > 0 && sel === state._filteredKeys.length;
+    selAll.indeterminate = sel > 0 && sel < state._filteredKeys.length;
+  }
+
+  const BULK_ACT_ZH: Record<string, string> = { pause: "暂停", resume: "继续", retry: "重试", cancel: "取消" };
+
+  function renderBulkBar() {
+    const bar = $("job-bulk-bar");
+    const n = state.selected.size;
+    if (!n) { bar.hidden = true; return; }
+    bar.hidden = false;
+    const info = $("job-bulk-info");
+    if (info) info.textContent = `已选 ${n} 项`;
+  }
+
+  const bulkBar = $("job-bulk-bar");
+  bulkBar.onclick = async (ev) => {
+    const t0 = ev.target as HTMLElement;
+    if (t0.closest(".bulk-clear")) {
+      state.selected.clear();
+      for (const row of Array.from(jobList.children) as JobRowEl[]) {
+        const chk = row.querySelector<HTMLInputElement>("input.job-chk");
+        if (chk) chk.checked = false;
+      }
+      renderBulkBar();
+      renderSelAll();
+      return;
+    }
+    const btn = t0.closest<HTMLButtonElement>(".bulk-act");
+    if (!btn || btn.disabled) return;
+    const act = btn.dataset.act as "pause" | "resume" | "retry" | "cancel";
+    if (typeof t.bulkJobs !== "function") { toast("当前工作台版本不支持批量操作", "err"); return; }
+    if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    // 勾选行拆成两类：本机任务（task_id，无 job_id）/ 服务任务（engine+job_id 去重）
+    const taskIds: string[] = [];
+    const jobs: Array<{ engine: string; job_id: string }> = [];
+    const seen = new Set<string>();
+    for (const r of state._jobs) {
+      if (!state.selected.has(jobKey(r))) continue;
+      if (!r.job_id && r.task_id) {
+        if (!taskIds.includes(r.task_id)) taskIds.push(r.task_id);
+      } else if (r.job_id) {
+        const ek = r.engine + "|" + r.job_id;
+        if (!seen.has(ek)) { seen.add(ek); jobs.push({ engine: r.engine, job_id: r.job_id }); }
+      }
+    }
+    if (!taskIds.length && !jobs.length) { toast("所选行暂无可操作任务（多为已完成行）", "err"); return; }
+    if (act === "cancel") {
+      const ok = window.confirm(
+        `确认取消选中的 ${jobs.length ? jobs.length + " 个服务任务" : "任务"}？\n` +
+        "排队中/未开始的文件立即终止；运行中的将在检查点中止，已生成字幕保留。" +
+        (taskIds.length ? "\n（本机未入队的任务无「取消」，会按失败计）" : ""),
+      );
+      if (!ok) return;
+    }
+    for (const b of Array.from(bulkBar.querySelectorAll<HTMLButtonElement>(".bulk-act"))) b.disabled = true;
+    try {
+      const res = await t.bulkJobs(act, taskIds, jobs);
+      const fails = res.results.filter((x) => !x.ok);
+      if (res.failed) {
+        const detail = fails.slice(0, 3).map((f) => `${f.key}：${f.error || "失败"}`).join("；");
+        toast(`批量${BULK_ACT_ZH[act]}：成功 ${res.succeeded}，失败 ${res.failed}${detail ? `（${detail}${fails.length > 3 ? "…" : ""}）` : ""}`, "err");
+      } else {
+        toast(`批量${BULK_ACT_ZH[act]}：成功 ${res.succeeded}`, "ok");
+      }
+      state.selected.clear();
+      // core diff 未变的行不会重写 → 手动复位勾选，避免残留「已选」视觉态
+      for (const row of Array.from(jobList.children) as JobRowEl[]) {
+        const chk = row.querySelector<HTMLInputElement>("input.job-chk");
+        if (chk) chk.checked = false;
+      }
+    } catch (e) {
+      toast(`批量${BULK_ACT_ZH[act]}失败：${(e as Error).message}`, "err");
+    } finally {
+      for (const b of Array.from(bulkBar.querySelectorAll<HTMLButtonElement>(".bulk-act"))) b.disabled = false;
+      refresh();
+    }
+  };
 
   // ---------- 服务表单 ----------
   engineForm.onsubmit = async (ev) => {

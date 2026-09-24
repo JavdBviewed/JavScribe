@@ -171,3 +171,95 @@ def test_http_route_no_auth_text_format() -> None:
             assert "javscribe_model_loaded 0" in body
         finally:
             http.stop()
+
+
+# ---------------------------------------------------------------------------
+# LiveSampler（0.2.4+）：GPU/调度采样 + /metrics/json 路由
+# ---------------------------------------------------------------------------
+
+def _fake_nvidia(tmp: Path) -> str:
+    """伪 nvidia-smi：固定输出一行 CSV（csv,noheader,nounits 语义）。"""
+    exe = tmp / "nvidia-smi"
+    exe.write_text(
+        "#!/bin/sh\necho \"Test GPU 0,12,3000,8192\"\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o755)
+    return str(exe)
+
+
+def test_live_sampler_no_gpu() -> None:
+    e = FakeEngine(jobs=[Job(id="j1", files=[
+        _task("a.mp4", TaskStatus.RUNNING),
+        _task("b.mp4", TaskStatus.PENDING),
+    ])])
+    s = M.LiveSampler(e, interval_s=60)
+    s._nvidia = None  # 强制无 GPU 分支
+    s._tick()
+    snap = s.snapshot(M.MetricsRegistry())
+    assert snap["ok"] is True
+    assert snap["gpu"] is None
+    assert snap["jobs"]["running"] == 1
+    assert snap["jobs"]["queued"] == 1
+    assert snap["jobs"]["done"] == 0
+    h0 = snap["history"][0]
+    assert h0["gpu_util"] is None and h0["running"] == 1 and h0["queued"] == 1
+    assert snap["uptime_s"] >= 0
+
+
+def test_live_sampler_fake_gpu_and_ring() -> None:
+    td = tempfile.TemporaryDirectory()
+    try:
+        fake = _fake_nvidia(Path(td.name))
+        e = FakeEngine(jobs=[])
+        s = M.LiveSampler(e, interval_s=60, maxlen=10)
+        s._nvidia = fake
+        for _ in range(13):
+            s._tick()
+        snap = s.snapshot(M.MetricsRegistry())
+        g = snap["gpu"]
+        assert g is not None and g["present"] is True
+        assert g["name"] == "Test GPU 0"
+        assert g["util_pct"] == 12.0
+        assert g["mem_used_mb"] == 3000.0
+        assert g["mem_total_mb"] == 8192.0
+        # 环形缓冲：13 次采样 → 只留 maxlen(10) 个
+        assert len(snap["history"]) == 10
+        assert snap["history"][-1]["gpu_util"] == 12.0
+        assert all(h["ts"] <= snap["history"][-1]["ts"] for h in snap["history"])
+    finally:
+        td.cleanup()
+
+
+def test_http_route_metrics_json() -> None:
+    from jav_scribe.core.progress_api import ProgressHTTP
+
+    class _FE(FakeEngine):
+        def log(self, *_a): pass
+        def job_by_id(self, _i): return None
+        def result_srt_bytes(self, _j): return None
+        def submit_remote_files(self, *_a, **_k): raise AssertionError
+        def submit(self, *_a, **_k): raise AssertionError
+        def retry_job(self, _i): return None
+
+    with tempfile.TemporaryDirectory() as td_s:
+        http = ProgressHTTP(_FE(), host="127.0.0.1", port=0, profile="server",
+                            inbox_dir=Path(td_s) / "inbox", config_path=None)
+        http.start()
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            # /metrics/json 与 /metrics?fmt=json 等价
+            for path in ("/metrics/json", "/metrics?fmt=json"):
+                with urllib.request.urlopen(base + path, timeout=5) as resp:
+                    assert resp.status == 200
+                    assert "application/json" in resp.headers.get("Content-Type", "")
+                    d = json.loads(resp.read().decode())
+                assert d["ok"] is True
+                assert d["gpu"] is None  # 测试机无 nvidia-smi 或采样为 None
+                assert set(d["jobs"]) >= {"running", "queued", "paused", "done", "skipped", "failed", "canceled"}
+                assert isinstance(d["history"], list)
+            # 纯 /metrics 仍是 Prometheus text（老客户端/采集器兼容）
+            with urllib.request.urlopen(base + "/metrics", timeout=5) as resp:
+                assert "text/plain" in resp.headers.get("Content-Type", "")
+        finally:
+            http.stop()

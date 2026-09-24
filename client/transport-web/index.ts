@@ -5,7 +5,8 @@ import {
   TransportError, type PauseAllResult, type Transport, type UploadDispatch, type UploadProgress,
 } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, FsBrowseResult, ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
+  BulkResult, ConfigItem, Engine, Health, JobRow, FsBrowseResult, MetricsResponse,
+  ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
 async function jget<T>(url: string): Promise<T> {
@@ -163,6 +164,16 @@ export const webTransport: Transport = {
   // 本机任务 重试/继续：error 或 已暂停 且本机视频仍在 → 重提取重提交
   rerunLocal: (taskId) =>
     jpost<{ ok: boolean; task_id: string }>(`/api/local/${encodeURIComponent(taskId)}/rerun`),
+  // 本机任务暂停（排队/提取/派发阶段；已提交服务的行不可暂停 → 409 透传）
+  pauseLocalTask: (taskId) =>
+    jpost<{ ok: boolean; task_id: string; already?: boolean }>(
+      `/api/local/${encodeURIComponent(taskId)}/pause`),
+  // 批量操作：taskIds=本机行，jobs=服务行（去重后）；单条失败不 throw
+  bulkJobs: (action, taskIds, jobs) =>
+    jpost<BulkResult>("/api/jobs/bulk", { action, task_ids: taskIds, jobs }),
+  // 服务监控快照（serve 0.2.4+；旧版服务 404 → ok=false unsupported）
+  engineMetrics: (name) =>
+    jget<MetricsResponse>("/api/engines/" + encodeURIComponent(name) + "/metrics"),
 
   getConfig: (name) =>
     jgetOrDetail<{ items: ConfigItem[] }>(

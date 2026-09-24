@@ -2,6 +2,8 @@
 
 Endpoints (all JSON unless noted):
   GET  /health                 -> {ok, version, profile, device, jobs}
+  GET  /metrics                -> Prometheus text (0.0.4)
+  GET  /metrics/json           -> JSON 监控快照（GPU/调度/1h 历史，前端趋势图；0.2.4+）
   GET  /jobs                   -> list of job summaries
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
@@ -437,6 +439,15 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if parts[:2] == ["metrics", "json"] or (
+            len(parts) == 1 and parts[0] == "metrics"
+            and (urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                 .get("fmt") or [""])[0] == "json"
+        ):
+            # JSON 监控快照：GPU 利用率/显存 + 调度（在途/排队/累计）+ 1h 采样历史
+            # （前端服务卡片迷你趋势图；老 serve 无此路由 → 404，工作台降级隐藏）
+            self._send(200, self.live.snapshot(self.metrics), "application/json")
+            return
         if len(parts) == 1 and parts[0] == "metrics":
             # 与 /jobs 同敏感级：无鉴权、仅内网（暴露文件名与 /jobs 一致）
             body = self.metrics.render(self.engine)
@@ -705,12 +716,14 @@ class ProgressHTTP:
         self.inbox_dir = inbox_dir or (Path.home() / ".jav_scribe" / "inbox")
         self.config_path = config_path
         self.metrics = metricslib.MetricsRegistry()
+        self.live = metricslib.LiveSampler(engine)
         h = _Handler
         h.engine = engine
         h.profile = profile
         h.inbox_dir = self.inbox_dir
         h.config_path = config_path
         h.metrics = self.metrics
+        h.live = self.live
         self.server = ThreadingHTTPServer((host, port), h)
         self.thread: threading.Thread | None = None
         self.host, self.port = host, port
@@ -728,7 +741,9 @@ class ProgressHTTP:
             daemon=True,
         )
         self.retention_thread.start()
+        self.live.start()
 
     def stop(self) -> None:
+        self.live.stop()
         self.server.shutdown()
         self.server.server_close()

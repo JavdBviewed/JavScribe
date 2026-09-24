@@ -69,7 +69,8 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await expect(
     page.locator(".job-row .cell-pos", { hasText: "已暂停（等待继续）" }).first(),
   ).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator("#job-stats .stat.s-paused")).toContainText("已暂停 3", { timeout: 20_000 });
+  // 合并筛选条：「已暂停」按钮内嵌计数（旧 #job-stats 统计行已删）
+  await expect(page.locator('#job-filter button[data-f="paused"]')).toContainText("已暂停 3", { timeout: 20_000 });
   // 3. 继续任务（resume 无 confirm）
   await page.click("#job-pause-all");
   await expectToast(page, "已继续所有任务");
@@ -297,7 +298,7 @@ test("筛选 × 分页：25 条已完成 → 2 页 → 翻页重渲染", async (
   // /api/jobs 按 created 降序（最新在前），mock 按 60s 间隔赋 created：
   // 第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
   await page.locator('.job-row .fn', { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
-  await page.click('#job-filter [data-f="finished"]');
+  await page.click('#job-filter [data-f="done"]');
   await expect(page.locator(".pg-info")).toHaveText("第 1 / 2 页 · 共 25 条");
   await expect(page.locator("#job-list .job-row")).toHaveCount(20);
   // 页 1 的末行边界：最老的一条（seed-006）仍在页 1
@@ -307,7 +308,7 @@ test("筛选 × 分页：25 条已完成 → 2 页 → 翻页重渲染", async (
   await expect(page.locator("#job-list .job-row")).toHaveCount(5);
   await expect(page.locator('.job-row .fn', { hasText: "seed-001.mp4" })).toBeVisible();
   await expect(page.locator("#pg-next")).toBeDisabled();
-  await page.click('#job-filter [data-f="running"]');
+  await page.click('#job-filter [data-f="active"]');
   await expect(page.locator("#jobs-empty")).toBeVisible();
   await expect(page.locator("#jobs-empty-text")).toHaveText("当前筛选下无任务");
 });

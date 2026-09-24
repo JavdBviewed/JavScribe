@@ -257,6 +257,8 @@ class UploadTask:
     sub_status: str | None = None
     writeback: str | None = None  # None=不适用 / pending / ok / skipped_exists / skipped / failed:…
     wb_fails: int = 0  # 回写连续失败计数（内部，不外发）
+    # 用户主动暂停（区别于重启中断的 paused）：恢复时前端据此展示「继续」
+    task_paused: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -275,6 +277,7 @@ class UploadTask:
             "local_path": self.local_path,
             "sub_status": self.sub_status,
             "writeback": self.writeback,
+            "task_paused": self.task_paused,
         }
 
 
@@ -341,6 +344,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     local_path=e.get("local_path"),
                     sub_status=e.get("sub_status"),
                     writeback=e.get("writeback"),
+                    task_paused=bool(e.get("task_paused")),
                 )
             except (TypeError, ValueError):
                 continue
@@ -762,6 +766,18 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             audio_tmp.unlink(missing_ok=True)
 
     _local_wb: dict[str, UploadTask] = {}  # upload_id -> task（本地扫描且已拿到 job_id）
+    _run_tasks: dict[str, asyncio.Task] = {}  # task.id -> 在跑的管线协程（暂停时 cancel）
+
+    def _spawn_local(task: UploadTask, video_path: Path) -> None:
+        '''启动本机管线并登记协程（暂停需要 cancel 到具体协程）；结束自动清表。'''
+        rt = asyncio.get_running_loop().create_task(_run_local(task, video_path))
+        _run_tasks[task.id] = rt
+
+        def _cleanup(_rt: asyncio.Task) -> None:
+            if _run_tasks.get(task.id) is _rt:
+                _run_tasks.pop(task.id, None)
+
+        rt.add_done_callback(_cleanup)
 
     async def _run_local(task: UploadTask, video_path: Path) -> None:
         """本地扫描管线：直接读工作台机器上的视频（不复制、不出本机），
@@ -801,6 +817,24 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     _gate.release(task.id)
                 task.finished = time.time()
                 audio_tmp.unlink(missing_ok=True)
+        except asyncio.CancelledError:
+            # 用户暂停（单任务/批量暂停）：
+            #  - 已拿到 job_id：服务侧任务不受影响，按正常在途收尾（保留回写跟踪）
+            #  - 未拿到：停「已暂停」，释放可能占用的在途槽，点「继续」重提取重提交
+            if task.job_id:
+                task.phase = "done"
+                task.progress = 1.0
+                task.error = None
+                _local_wb[task.id] = task
+            else:
+                _gate.release(task.id)
+                task.phase = "paused"
+                task.task_paused = True
+                task.error = "用户暂停（点「继续」重新提取音轨并提交）"
+                task.progress = 0.0
+                task.finished = None
+            _save_uploads_state()
+            return  # 吞掉 CancelledError：以明确终态收尾，不再向上传播
         except BaseException:
             # 预期外异常兜底：未拿到 job_id 就释放槽，防止槽位泄漏；
             # 显式标 error，避免任务行永久卡在「排队中」
@@ -1023,10 +1057,53 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     async def api_job_resume(engine: str, job_id: str) -> dict:
         return await _job_pause_resume("resume", engine, job_id)
 
-    # -- 本机任务重试 / 继续（error 或 重启中断的 paused 任务：重提取并提交）---
+    # -- 本机任务 暂停 / 继续 / 重试 -------------------------------------------
+
+    def _reset_local_task(task: UploadTask) -> None:
+        """重置本机任务到可重跑状态（不启动；调用方负责 _spawn_local）。"""
+        task.phase = "queued"
+        task.error = None
+        task.progress = 0.0
+        task.finished = None
+        task.job_id = None
+        task.writeback = None
+        task.audio_mb = None
+        task.wb_fails = 0
+        task.cached = False
+        task.task_paused = False
+        _local_wb.pop(task.id, None)
+        _gate.release(task.id)  # 防御：确保无槽位残留
+
+    def _pause_local(task: UploadTask) -> tuple[bool, str]:
+        """暂停本机管线（仅限未提交服务的：排队/提取/派发阶段）。"""
+        if task.job_id:
+            return False, "已提交服务队列，请在服务任务行上操作"
+        if task.phase == "paused":
+            return True, "已是暂停状态"
+        if task.phase not in ("queued", "extracting", "dispatching"):
+            return False, f"任务非进行中（{task.phase}），无法暂停"
+        task.phase = "paused"
+        task.task_paused = True
+        task.error = None
+        _save_uploads_state()
+        rt = _run_tasks.get(task.id)
+        if rt is not None and not rt.done():
+            rt.cancel()
+        return True, "ok"
+
+    @app.post("/api/local/{task_id}/pause")
+    async def api_local_pause(task_id: str) -> dict:
+        task = _uploads.get(task_id)
+        if task is None:
+            raise HTTPException(404, "任务不存在（已过期）")
+        ok, msg = _pause_local(task)
+        if not ok:
+            raise HTTPException(409, msg)
+        return {"ok": True, "task_id": task.id, "already": msg == "已是暂停状态"}
 
     @app.post("/api/local/{task_id}/rerun")
     async def api_local_rerun(task_id: str) -> dict:
+        """重试 / 继续：error 或 paused（重启中断、用户暂停）→ 重提取音轨并提交。"""
         task = _uploads.get(task_id)
         if task is None:
             raise HTTPException(404, "任务不存在（已过期）")
@@ -1037,20 +1114,127 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         video = Path(task.local_path)
         if not video.is_file():
             raise HTTPException(404, "本机视频不存在，无法重试")
-        task.phase = "queued"
-        task.error = None
-        task.progress = 0.0
-        task.finished = None
-        task.job_id = None
-        task.writeback = None
-        task.audio_mb = None
-        task.wb_fails = 0
-        task.cached = False
-        _local_wb.pop(task.id, None)
-        _gate.release(task.id)  # 防御：确保无槽位残留
+        _reset_local_task(task)
         _save_uploads_state()
-        asyncio.create_task(_run_local(task, video))
+        _spawn_local(task, video)
         return {"ok": True, "task_id": task.id}
+
+    @app.post("/api/jobs/bulk")
+    async def api_jobs_bulk(body: dict) -> dict:
+        """批量操作（大批量任务场景）：action=pause/resume/retry/cancel。
+
+        task_ids → 本机扫描任务（pause/resume/retry；本机行未入服务队列，
+        无「取消」语义 → cancel 返回 error 说明）；
+        jobs → 服务任务 [{engine, job_id}]（四个动作都代理到服务侧，
+        404/409 语义与单任务端点一致）。并发上限 8，单条失败不拖垮整批。
+        """
+        action = body.get("action")
+        task_ids = body.get("task_ids") or []
+        jobs = body.get("jobs") or []
+        if action not in ("pause", "resume", "retry", "cancel"):
+            raise HTTPException(400, "action 需要 pause/resume/retry/cancel")
+        if not isinstance(task_ids, list) or not isinstance(jobs, list):
+            raise HTTPException(400, "task_ids/jobs 需要数组")
+
+        sem = asyncio.Semaphore(8)
+        results: list[dict] = []
+
+        async def _one(key: str, fn) -> None:
+            async with sem:
+                try:
+                    ok, err = await fn()
+                    if ok:
+                        results.append({"key": key, "ok": True})
+                    else:
+                        results.append({"key": key, "ok": False, "error": err})
+                except HTTPException as ex:
+                    results.append({"key": key, "ok": False, "error": str(ex.detail)})
+                except Exception as ex:  # noqa: BLE001 单条失败不拖垮整批
+                    results.append({"key": key, "ok": False, "error": str(ex)})
+
+        async def _local_one(tid: str) -> None:
+            t = _uploads.get(tid)
+            key = f"local:{tid}"
+            if t is None:
+                await _one(key, lambda: (False, "任务不存在（已过期）"))
+                return
+            if action == "pause":
+                async def _p():
+                    return _pause_local(t)  # 同步助手：包成协程再交给 _one await
+                await _one(key, _p)
+            elif action in ("resume", "retry"):
+                async def _r():
+                    if t.phase not in ("error", "paused"):
+                        verb = "恢复" if action == "resume" else "重试"
+                        return False, f"当前状态（{t.phase}）不可{verb}"
+                    if not t.local_path:
+                        return False, "无本机视频路径（浏览器上传任务请重新上传）"
+                    if not Path(t.local_path).is_file():
+                        return False, "本机视频不存在，无法重试"
+                    _reset_local_task(t)
+                    _save_uploads_state()
+                    _spawn_local(t, Path(t.local_path))
+                    return True, "ok"
+                await _one(key, _r)
+            else:
+                async def _c():
+                    return False, "本机任务尚未入服务队列，无「取消」；可「重试」重跑"
+                await _one(key, _c)
+
+        async def _serve_one(item: dict) -> None:
+            eng_name = str(item.get("engine") or "")
+            jid = str(item.get("job_id") or "")
+            key = f"{eng_name}:{jid}"
+            if not eng_name or not jid:
+                await _one(key or "invalid", lambda: (False, "缺少 engine/job_id"))
+                return
+
+            async def _s():
+                entry = store.get(eng_name)
+                if entry is None:
+                    return False, "服务不存在（已删除）"
+                eng = JavScribeEngine(eng_name, entry["url"])
+                try:
+                    if action == "pause":
+                        await eng.pause_job(jid)
+                    elif action == "resume":
+                        await eng.resume_job(jid)
+                    elif action == "retry":
+                        await eng.retry(jid)
+                    else:
+                        await eng.cancel(jid)
+                    return True, "ok"
+                except httpx.HTTPStatusError as ex:
+                    code = ex.response.status_code
+                    try:
+                        msg = ex.response.json().get("error", "")
+                    except (ValueError, AttributeError):
+                        msg = ""
+                    if code == 404:
+                        return False, msg or "任务不存在（已过期/服务重启）"
+                    if code == 409:
+                        return False, msg or "任务当前状态不允许此操作"
+                    return False, f"服务请求失败: {msg or ('HTTP ' + str(code))}"
+                except httpx.HTTPError as ex:
+                    return False, f"服务不可达: {ex.__class__.__name__}"
+                finally:
+                    await eng.close()
+
+            await _one(key, _s)
+
+        coros = ([_local_one(str(x)) for x in task_ids if str(x)]
+                 + [_serve_one(j) for j in jobs if isinstance(j, dict)])
+        if coros:
+            await asyncio.gather(*coros)
+        succeeded = sum(1 for r in results if r["ok"])
+        return {
+            "ok": True,
+            "action": action,
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results,
+        }
 
     # -- 服务设置（代理 /config，X-Api-Key 鉴权在服务侧执行）-----------------
 
@@ -1070,6 +1254,39 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         except Exception:  # noqa: BLE001
             msg = ""
         return HTTPException(code if 400 <= code < 500 else 502, f"服务请求失败: {msg or code}")
+
+    _metrics_cache: dict[str, tuple[float, dict]] = {}  # name -> (ts, payload)
+
+    @app.get("/api/engines/{name}/metrics")
+    async def api_engine_metrics(name: str) -> dict:
+        """服务监控快照（GPU/显存/调度/1h 历史）→ 前端服务卡片迷你趋势图。
+
+        旧版 serve 无 /metrics/json → unsupported（前端降级隐藏监控块）；
+        网络错误 → unreachable。2s 内存缓存摊平刷新风暴。
+        """
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        now = time.time()
+        hit = _metrics_cache.get(name)
+        if hit is not None and now - hit[0] < 2.0:
+            return hit[1]
+        eng = JavScribeEngine(name, entry["url"])
+        try:
+            try:
+                data = await eng.metrics()
+                payload = {"ok": True, "metrics": data}
+            except httpx.HTTPStatusError as ex:
+                if ex.response.status_code == 404:
+                    payload = {"ok": False, "error": "unsupported"}
+                else:
+                    payload = {"ok": False, "error": f"服务返回 HTTP {ex.response.status_code}"}
+            except httpx.HTTPError:
+                payload = {"ok": False, "error": "unreachable"}
+        finally:
+            await eng.close()
+        _metrics_cache[name] = (now, payload)
+        return payload
 
     @app.get("/api/engines/{name}/config")
     async def api_engine_config(name: str) -> dict:
@@ -1237,7 +1454,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _uploads[task.id] = task
             created.append(task.id)
             _save_uploads_state()
-            asyncio.create_task(_run_local(task, p))
+            _spawn_local(task, p)
         return {
             "ok": True,
             "files": len(created),

@@ -102,6 +102,69 @@ export interface UploadStatus {
   sub_status?: string | null;
   /** 本地字幕回写状态：ok / skipped_exists / skipped / failed:… */
   writeback?: string | null;
+  /** 用户主动暂停（工作台 0.2.12+；区别于重启中断的 paused） */
+  task_paused?: boolean;
+}
+
+/** 服务端监控快照（serve 0.2.4+ GET /metrics/json → 工作台 /api/engines/{name}/metrics） */
+export interface EngineMetricsGpu {
+  present: boolean;
+  name?: string | null;
+  util_pct?: number | null;
+  mem_used_mb?: number | null;
+  mem_total_mb?: number | null;
+}
+
+export interface EngineMetricsJobs {
+  running: number;
+  queued: number;
+  paused: number;
+  done?: number;
+  skipped?: number;
+  failed?: number;
+  canceled?: number;
+}
+
+export interface EngineMetricsHistoryPoint {
+  ts: number;
+  gpu_util: number | null;
+  gpu_mem_used_mb: number | null;
+  running: number;
+  queued: number;
+}
+
+export interface EngineMetrics {
+  ok: boolean;
+  uptime_s?: number;
+  paused?: boolean;
+  model_loaded?: boolean;
+  jobs?: EngineMetricsJobs;
+  gpu?: EngineMetricsGpu | null;
+  history?: EngineMetricsHistoryPoint[];
+}
+
+export interface MetricsResponse {
+  ok: boolean;
+  /** ok=true 时的快照 */
+  metrics?: EngineMetrics;
+  /** ok=false：unsupported（旧版服务无 /metrics/json）/ unreachable / 其他 */
+  error?: string;
+}
+
+/** POST /api/jobs/bulk 单项结果 */
+export interface BulkItem {
+  key: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface BulkResult {
+  ok: boolean;
+  action: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: BulkItem[];
 }
 
 export type ConfigType = "bool" | "enum" | "list" | "int" | "float" | "secret" | "text";

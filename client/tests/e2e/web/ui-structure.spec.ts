@@ -70,21 +70,22 @@ test("扫描面板结构（客户端部署机语义文案）", async ({ page }) 
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
   const head = page.locator(".job-head > span");
-  await expect(head).toHaveCount(7);
+  // 首列为「全选当前筛选结果」勾选框（批量操作入口）
+  await expect(head).toHaveCount(8);
   expect(await head.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["服务", "文件", "状态", "进度", "位置", "耗时", ""],
+    ["", "服务", "文件", "状态", "进度", "位置", "耗时", ""],
   );
-  const stats = page.locator("#job-stats .stat");
-  await expect(stats).toHaveCount(5);
-  expect(await stats.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["进行中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0"],
-  );
+  await expect(page.locator("#job-sel-all")).toBeVisible();
+  // 旧「统计行」已删：统计与筛选合一（筛选按钮内嵌计数）
+  expect(await page.locator("#job-stats").count()).toBe(0);
   // 全局暂停按钮（web 形态有 /api/pause；desktop 形态恒隐藏）
   await expect(page.locator("#job-pause-all")).toBeVisible();
   await expect(page.locator("#job-pause-all")).toHaveText("⏸ 暂停所有");
   const filters = page.locator("#job-filter button");
-  await expect(filters).toHaveCount(3);
-  expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["全部", "进行中", "已完成"]);
+  await expect(filters).toHaveCount(9);
+  expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual([
+    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0",
+  ]);
   await expect(filters.nth(0)).toHaveClass(/on/);
   await expect(page.locator("#job-pager")).toBeHidden();
   await expect(page.locator("#jobs-empty")).toBeVisible();
