@@ -1350,6 +1350,14 @@ body.desktop main > section.view-on { display: block; }
 }
 .cfg-foot-note { font-size: 11px; color: var(--muted); flex: 1; min-width: 200px; }
 .cfg-foot-actions { display: flex; gap: 8px; }
+/* 客户端（本机工作台）卡片：卡片内独立小页脚（独立保存，区别于底部服务端保存条） */
+.ccfg-foot {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 10px -12px 0;
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--line);
+}
+.ccfg-foot .cfg-foot-note { min-width: 0; }
 .set-note-title { font-weight: 700; margin-bottom: 4px; }
 
 /* 帮助图标 tooltip 方向变体（由 JS 按视口空间临时加类） */

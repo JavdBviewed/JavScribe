@@ -431,6 +431,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "version": APP_VERSION,
                     "profile": self.profile,
                     "device": e.cfg.get("infer", {}).get("device", "auto"),
+                    "stats": e.stats(),  # 累计终态统计（老客户端忽略新字段）
                     "jobs": [j.to_dict() for j in e.jobs],
                 },
             )

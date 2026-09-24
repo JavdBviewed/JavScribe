@@ -25,6 +25,7 @@ class EngineInfo:
     error: str = ""
     has_key: bool = False
     updated_at: float = field(default_factory=time.time)
+    stats: dict | None = None  # serve 累计终态统计（v0.2.2+；老 serve 无此字段=None）
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +38,7 @@ class EngineInfo:
             "error": self.error,
             "has_key": self.has_key,
             "updated_at": self.updated_at,
+            "stats": self.stats,
         }
 
 

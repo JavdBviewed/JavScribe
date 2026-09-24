@@ -262,7 +262,16 @@ const server = http.createServer((req, res) => {
   // ---- GET ----
   if (req.method === "GET") {
     if (!parts.length || parts[0] === "health") {
-      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+      // stats：mock 无任务窗驱逐，全量终态扫描与 serve 累计口径一致（e2e 统计数字=行计数，基线像素不变）
+      const stats = { done: 0, skipped: 0, failed: 0 };
+      for (const j of state.jobs.values()) {
+        for (const f of j.files) {
+          if (f.status === "done") stats.done++;
+          else if (f.status === "skipped") stats.skipped++;
+          else if (f.status === "error" || f.status === "canceled") stats.failed++;
+        }
+      }
+      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
     }
     if (parts[0] === "cache" && parts[1] === "check") {
       const sha1 = url.searchParams.get("sha1") || "";

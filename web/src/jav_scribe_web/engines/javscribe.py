@@ -63,6 +63,7 @@ class JavScribeEngine(EngineAdapter):
             "ok": bool(d.get("ok")),
             "device": str(d.get("device") or ""),
             "version": str(d.get("version") or ""),
+            "stats": d.get("stats"),
         }
 
     async def jobs(self) -> list[dict]:

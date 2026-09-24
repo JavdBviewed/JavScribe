@@ -61,6 +61,7 @@ LIVE_PHASES: dict[str, tuple[float, float, float | None, str]] = {
 # ---------------------------------------------------------------------------
 JOBS_HISTORY_NAME = "jobs.json"
 JOBS_HISTORY_MAX = 500  # 磁盘上限（内存表仍为 200，save 时一并修剪）
+STATS_NAME = "stats.json"  # 累计终态统计（独立于 200 内存窗，看板统计单一真源）
 
 
 def job_from_dict(d: dict) -> "Job | None":
@@ -126,6 +127,13 @@ class Engine:
         self._jobs_path = Path(data_dir) / JOBS_HISTORY_NAME if data_dir else None
         self._jobs_lock = threading.Lock()
         self._restore_job_history()
+        # 累计终态统计（done/skipped/failed，failed=error+canceled，与客户端 UI 口径一致）：
+        # 内存任务表只留最近 200 条，大批量任务下客户端按行计数必然少算；
+        # serve 在任务收尾时累计并持久化，作为看板统计的单一真源（/health.stats）。
+        self._stats = {"done": 0, "skipped": 0, "failed": 0}
+        self._counted: set[str] = set()
+        self._stats_path = Path(data_dir) / STATS_NAME if data_dir else None
+        self._load_stats()
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
         self._live_thread.start()
 
@@ -232,6 +240,7 @@ class Engine:
                 pass
             self._cancel_pending_tasks(job, "已取消")
             job.finished = time.time()
+            self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（排队中，未占用推理资源）")
             return "canceled"
@@ -284,6 +293,71 @@ class Engine:
             except OSError as e:
                 self.log(f"[engine] 任务历史写入失败（忽略）: {e}")
 
+    # ------------------------------------------------------------------
+    # 累计终态统计（stats.json）
+    # ------------------------------------------------------------------
+    def _load_stats(self) -> None:
+        if self._stats_path is None:
+            return
+        if self._stats_path.exists():
+            try:
+                raw = json.loads(self._stats_path.read_text(encoding="utf-8"))
+                for k in ("done", "skipped", "failed"):
+                    v = raw.get(k, 0)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                        self._stats[k] = int(v)
+                c = raw.get("counted")
+                if isinstance(c, list):
+                    self._counted = {str(x) for x in c}
+            except (OSError, ValueError, TypeError) as e:
+                self.log(f"[engine] 统计读取失败（清零重来）: {e}")
+                self._stats = {"done": 0, "skipped": 0, "failed": 0}
+                self._counted = set()
+            return
+        # 旧版升级：stats.json 缺失但任务表已恢复 → 从恢复的全终态任务计基线
+        self._count_terminals(self.jobs)
+
+    def _count_terminals(self, jobs: list["Job"]) -> None:
+        """累计任务终态文件计数（幂等：counted 集合按 job.id:序号 去重，
+        多收尾路径/重试/取消交接不会重复计）。任务收尾时调用——不依赖
+        200 内存窗，被窗口挤出的任务收尾也能计入。"""
+        changed = False
+        with self._jobs_lock:
+            for job in jobs:
+                for idx, t in enumerate(job.files):
+                    if t.status not in TERMINAL_STATUSES:
+                        continue
+                    key = f"{job.id}:{idx}"
+                    if key in self._counted:
+                        continue
+                    self._counted.add(key)
+                    if t.status == TaskStatus.DONE:
+                        self._stats["done"] += 1
+                    elif t.status == TaskStatus.SKIPPED:
+                        self._stats["skipped"] += 1
+                    else:  # ERROR / CANCELED
+                        self._stats["failed"] += 1
+                    changed = True
+            if changed:
+                self._save_stats()
+
+    def _save_stats(self) -> None:
+        """调用方需已持有 _jobs_lock。"""
+        if self._stats_path is None:
+            return
+        try:
+            payload = {**self._stats, "counted": sorted(self._counted)}
+            tmp = self._stats_path.with_name(self._stats_path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._stats_path)
+        except OSError as e:
+            self.log(f"[engine] 统计写入失败（忽略）: {e}")
+
+    def stats(self) -> dict:
+        """累计终态统计（客户端看板统计单一真源）。"""
+        with self._jobs_lock:
+            return dict(self._stats)
+
     def stop(self) -> None:
         self._stop_evt.set()
         if self._runner is not None:
@@ -297,6 +371,7 @@ class Engine:
             # 交接窗口：drain 弹出后、开跑前被取消 → 立即收尾，不占推理资源
             self._cancel_pending_tasks(job, "已取消")
             job.finished = time.time()
+            self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] 任务 {job.id} 已取消（开跑前）")
             self._drain_pending()
@@ -306,6 +381,7 @@ class Engine:
             self._pipeline(job)
         finally:
             job.finished = time.time()
+            self._count_terminals([job])
             self._save_jobs()
             self.log(f"[engine] ===== 任务 {job.id} 结束 =====")
             self._drain_pending()

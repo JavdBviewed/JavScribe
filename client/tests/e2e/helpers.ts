@@ -47,8 +47,10 @@ export const mockConfigMode = (req: APIRequestContext, mode: string) => mockCont
  * 等 web 端 poller 快照的任务清空（/api/jobs 直读快照）。
  * reuseExistingServer 下 web 进程跨 suite 存活：上一 suite 遗留的 running 任务
  * 在 mockReset 后仍会在快照里滞留最多一个 tick（1s），页面先渲染就会拍到残留行。
+ * 30s：web 侧 httpx 超时恰为 15s，单次请求挂起会顶满一个 tick；15s 超时与之同量级
+ * 会偶发竞态（快照刚清完前一刻超时），30s 留出完整吸收窗口。
  */
-export async function waitForJobsEmpty(req: APIRequestContext, timeoutMs = 15_000) {
+export async function waitForJobsEmpty(req: APIRequestContext, timeoutMs = 30_000) {
   const t0 = Date.now();
   let rows: unknown[] = [];
   for (;;) {

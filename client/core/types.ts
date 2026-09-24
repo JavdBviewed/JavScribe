@@ -22,6 +22,22 @@ export interface Engine {
 }
 
 /** GET /api/jobs 展平行（running 优先 + created 降序，工作台侧已排好） */
+/** 看板统计（/api/jobs/summary）：serve 累计终态计数 + 当前在途数 */
+export interface JobSummary {
+  running: number;
+  done: number;
+  skipped: number;
+  failed: number;
+}
+
+/** 客户端（本机工作台）并发设置：web 工作台 /api/client-config */
+export interface ClientConfig {
+  /** 音轨提取并发：本机同时跑 ffmpeg 的数量（1..8） */
+  extract_workers: number;
+  /** 转译并发（服务队列上限）：同时在途任务数，超出本机排队（1..16） */
+  queue_cap: number;
+}
+
 export interface JobRow {
   engine: string;
   job_id?: string | null;

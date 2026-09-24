@@ -5,7 +5,7 @@ import {
   mockReset, mockSeed, mockPause, mockResume, mockConfigMode, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
 } from "../helpers";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 const jh = { "Content-Type": "application/json" };
@@ -235,6 +235,17 @@ test("scan/submit：本机扫描提交 → 200 两条本地任务 → 派发到 
   // 本地管线：读本机视频 → 提 opus → 派发；job label = 原始视频名
   await waitForJobRow(req, (j: any) => j.file === "AKDL-001.mp4");
   await waitForJobRow(req, (j: any) => j.file === "SUB-001.mkv");
+  // 必须等两条任务回写完成并关闭：本测试不 mockReset 隔离，下一条用例的
+  // mockReset 会抹掉 serve 任务表，本地任务将滞留回写表（僵尸 15min），
+  // 之后同目录再提交（interaction 扫描全流程）会被防重跳过 → 已入队数漂移。
+  const want = ["AKDL-001.zh.srt", "SUB-001.zh.srt"];
+  const t0 = Date.now();
+  while (!want.every((n) => existsSync(path.join(SCAN_DIR, n))) && Date.now() - t0 < 90_000) {
+    await new Promise((rs) => setTimeout(rs, 500));
+  }
+  for (const n of want) expect(existsSync(path.join(SCAN_DIR, n))).toBe(true);
+  // 还原夹具干净态：扫描表用例断言仅 AKDL-002 带字幕
+  for (const n of want) unlinkSync(path.join(SCAN_DIR, n));
   expect((await req.post(`${WEB_URL}/api/scan/local/submit`, {
     data: { engine: "mock", files: [] }, headers: jh,
   })).status()).toBe(400);

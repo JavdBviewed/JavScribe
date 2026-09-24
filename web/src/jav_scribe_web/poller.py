@@ -50,21 +50,35 @@ class Poller:
                 pass
 
     async def tick(self) -> None:
+        # 临时诊断（flaky 复现用，定位后移除）：逐 tick 计时，
+        # 快照滞留超 15s 即由 tick 变慢引起。
+        import time as _t
+        _t0 = _t.monotonic()
         await asyncio.gather(*(self._refresh_one(e) for e in self._store.engines))
+        _t1 = _t.monotonic()
         for name in list(self.engines):
             if self._store.get(name) is None:
                 del self.engines[name]
                 self.jobs.pop(name, None)
+        _t2 = _t.monotonic()
         if self._on_jobs is not None:
             # 快照就绪后的本地侧副作用（如本地扫描字幕回写）；失败不阻塞轮询
             try:
                 await self._on_jobs()
             except Exception as ex:  # noqa: BLE001
                 self._log(f"[poll] on_jobs 回调失败: {ex}")
+        _t3 = _t.monotonic()
+        if _t3 - _t0 > 1.5:
+            self._log(
+                f"[poll] 慢 tick total={(_t3 - _t0) * 1000:.0f}ms "
+                f"refresh={(_t1 - _t0) * 1000:.0f}ms on_jobs={(_t3 - _t2) * 1000:.0f}ms"
+            )
 
     async def _refresh_one(self, entry: dict) -> None:
         name, url = entry["name"], entry["url"]
         adapter = self._factory(entry)
+        import time as _t
+        _t0 = _t.monotonic()
         try:
             h = await adapter.health()
             if not h.get("ok"):
@@ -85,8 +99,12 @@ class Poller:
                 version=h.get("version", ""),
                 jobs_running=running,
                 has_key=bool(entry.get("api_key")),
+                stats=h.get("stats") if isinstance(h.get("stats"), dict) else None,
             )
             self.jobs[name] = details
+            # 临时诊断（flaky 复现用，定位后移除）
+            if _t.monotonic() - _t0 > 1.5:
+                self._log(f"[poll] {name} 慢 refresh {(_t.monotonic() - _t0) * 1000:.0f}ms jobs={len(details)}")
         except Exception as ex:
             prev = self.engines.get(name)
             info = EngineInfo(name=name, url=url, online=False, error=str(ex)[:200],

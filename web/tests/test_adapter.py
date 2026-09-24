@@ -69,7 +69,8 @@ def test_health_jobs_detail() -> None:
         e._client = _client(_handler())
         try:
             h = await e.health()
-            assert h == {"ok": True, "device": "cuda", "version": "0.1.0"}
+            # 旧 serve 无 stats 字段 → None（web 看板退回行计数）
+            assert h == {"ok": True, "device": "cuda", "version": "0.1.0", "stats": None}
             jobs = await e.jobs()
             assert jobs == [JOB_SUMMARY]
             d = await e.job_detail(JOB_SUMMARY["id"])
@@ -78,6 +79,22 @@ def test_health_jobs_detail() -> None:
             assert data.decode() == SRT
             # no content-disposition from the workshop -> fallback <job_id>.srt
             assert name == "20260830-abc123.srt"
+        finally:
+            await e.close()
+    asyncio.run(run())
+
+
+def test_health_exposes_stats() -> None:
+    """serve v0.2.2+ /health 携带累计终态 stats（看板单一真源）。"""
+    async def run():
+        e = JavScribeEngine("w", BASE)
+        e._client = _client(lambda r: httpx.Response(200, json={
+            "ok": True, "device": "cuda", "version": "0.2.2",
+            "stats": {"done": 3, "skipped": 1, "failed": 0},
+        }))
+        try:
+            h = await e.health()
+            assert h["stats"] == {"done": 3, "skipped": 1, "failed": 0}
         finally:
             await e.close()
     asyncio.run(run())

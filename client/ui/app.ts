@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { ConfigItem, Engine, JobRow, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
+import type { ClientConfig, ConfigItem, Engine, JobRow, JobSummary, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -32,6 +32,7 @@ interface AppState {
   page: number;              // 任务分页：当前页（0 起）
   pageSize: number;          // 任务分页：每页行数
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
+  _summary: JobSummary | null; // 最近一次 /api/jobs/summary（serve 累计口径；null=回退行计数）
   extractMode: "auto" | "local" | "server";
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
@@ -69,6 +70,7 @@ const state: AppState = {
   page: 0,
   pageSize: 20,
   _jobs: [],
+  _summary: null,
   extractMode: savedExtract === "auto" || savedExtract === "local" || savedExtract === "server"
     ? savedExtract
     : "auto",
@@ -239,8 +241,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   async function refresh() {
     try {
-      const [health, engines, jobs] = await Promise.all([
+      const [health, engines, jobs, summary] = await Promise.all([
         t.getHealth(), t.listEngines(), t.listJobs(),
+        t.listJobsSummary ? t.listJobsSummary().catch(() => null) : Promise.resolve(null),
       ]);
       const allOnline = health.online === health.engines && health.engines > 0;
       $("health").textContent = `v${health.version} · 服务 ${health.online}/${health.engines} 在线`;
@@ -248,6 +251,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       $("foot-ver").textContent = "v" + health.version;
       renderEngines(engines);
       state._jobs = jobs;
+      state._summary = summary;
       renderJobs(jobs);
       renderSelect(engines);
       $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -691,10 +695,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function renderJobs(rows: JobRow[]) {
-    const running = rows.filter((r) => r.status === "running").length;
-    const done = rows.filter((r) => r.status === "done").length;
-    const skipped = rows.filter((r) => r.status === "skipped").length;
-    const failed = rows.filter((r) => r.status === "error" || r.status === "canceled").length;
+    // 统计单一真源：serve 累计终态计数 + 当前在途（/api/jobs/summary）。
+    // 服务端任务表只留最近 200 条，行计数在大批量任务下必然少算；
+    // summary 不可用（老服务端/请求失败）时回退现行行计数。
+    let running: number, done: number, skipped: number, failed: number;
+    if (state._summary) {
+      running = state._summary.running;
+      done = state._summary.done;
+      skipped = state._summary.skipped;
+      failed = state._summary.failed;
+    } else {
+      running = rows.filter((r) => r.status === "running").length;
+      done = rows.filter((r) => r.status === "done").length;
+      skipped = rows.filter((r) => r.status === "skipped").length;
+      failed = rows.filter((r) => r.status === "error" || r.status === "canceled").length;
+    }
     $("job-stats").innerHTML =
       `<span class="stat${running ? " s-run" : ""}">进行中 <b>${running}</b></span>` +
       `<span class="stat">完成 <b>${done}</b></span>` +
@@ -1784,6 +1799,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const GROUP_ZH: Record<string, string> = {
     subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色",
     emby: "Emby 刷新", jasna: "音频修复", scan: "扫描规则", storage: "缓存清理",
+    client: "客户端（本机工作台）",
   };
   // 组职责一句话（组标题右侧）
   const GROUP_DESC: Record<string, string> = {
@@ -1795,6 +1811,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     jasna: "识别前先对音轨降噪修复",
     scan: "服务端「扫描目录」的判定规则",
     storage: "服务端临时缓存的清理周期",
+    client: "本机提取并发与服务队列上限（只影响客户端，不改服务端设置）",
   };
   // enum 选项的中文展示（提交值仍是原始值）
   const ENUM_ZH: Record<string, Record<string, string>> = {
@@ -1940,8 +1957,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return;
     }
     body.innerHTML = '<div class="muted">加载设置中…</div>';
-    t.getConfig(name)
-      .then((items) => renderConfigForm(name, items))
+    const ccPromise = platform.kind === "web" && t.getClientConfig
+      ? t.getClientConfig().catch(() => null)  // 取不到不阻断服务端设置展示
+      : Promise.resolve<ClientConfig | null>(null);
+    Promise.all([t.getConfig(name), ccPromise])
+      .then(([items, cc]) => renderConfigForm(name, items, cc))
       .catch((err: Error) => {
         body.innerHTML = `
         <div class="set-note err">
@@ -1952,7 +1972,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
   }
 
-  function renderConfigForm(name: string, items: ConfigItem[]) {
+  function renderConfigForm(name: string, items: ConfigItem[], clientCfg: ClientConfig | null) {
     state.cfgItems = items;
     const e = (state.engines || []).find((x) => x.name === name);
     const groups: Record<string, ConfigItem[]> = {};
@@ -1975,6 +1995,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         </span>
       </div>`;
     }
+    if (clientCfg) {
+      html += `
+      <section class="cfg-sec cfg-sec-client" data-sec="client">
+        <h4 class="cfg-sec-title">${esc(GROUP_ZH.client)}${GROUP_DESC.client ? `<span class="cfg-sec-desc">${esc(GROUP_DESC.client)}</span>` : ""}</h4>
+        <div class="cfg-sec-body">
+          <div class="cfg-row ccfg-row" data-base="${clientCfg.extract_workers}">
+            <span class="cfg-lab">音轨提取并发${helpIcon("本机（客户端部署机）同时运行 ffmpeg 提取音轨的数量。越大提取越快，但本机 CPU/IO 占用越高。封顶 1 ~ 8，保存后立即生效。")}</span>
+            <input id="ccfg-extract_workers" type="number" min="1" max="8" value="${clientCfg.extract_workers}" spellcheck="false" autocomplete="off"></div>
+          <div class="cfg-row ccfg-row" data-base="${clientCfg.queue_cap}">
+            <span class="cfg-lab">转译并发（服务队列上限）${helpIcon("服务端逐条串行转译。此项为「同时在途任务数上限」≈ 服务队列深度，超出的任务在本机排队等待派发。调低可保护服务端内存/磁盘与队列稳定，也缩小服务重启时丢失排队任务的风险面。封顶 1 ~ 16，保存后立即生效。")}</span>
+            <input id="ccfg-queue_cap" type="number" min="1" max="16" value="${clientCfg.queue_cap}" spellcheck="false" autocomplete="off"></div>
+        </div>
+        <div class="ccfg-foot">
+          <span class="cfg-foot-note">只保存在客户端本机，不影响服务端</span>
+          <span id="ccfg-dirty" class="muted small">无改动</span>
+          <span class="cfg-foot-actions"><button type="button" id="ccfg-save" class="btn" hidden>保存客户端设置</button></span>
+        </div>
+      </section>`;
+    }
     for (const [g, list] of Object.entries(groups)) {
       html += `
       <section class="cfg-sec" data-sec="${esc(g)}">
@@ -1994,7 +2033,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     </div>`;
     body.innerHTML = html;
     // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
-    body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+    // （客户端卡片 .ccfg-row 独立跟踪、独立保存，不混入服务端「保存设置」）
+    body.querySelectorAll<HTMLElement>(".cfg-row:not(.ccfg-row)").forEach((row) => {
       const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
       if (!ctl) return;
       const sync = (): void => {
@@ -2015,8 +2055,46 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
     });
     applyGating(body);
+    // 客户端卡片：独立改动追踪 + 独立保存按钮（不与 serve #cfg-save 混流）
+    const ccfgRows = Array.from(body.querySelectorAll<HTMLElement>(".ccfg-row"));
+    if (ccfgRows.length) {
+      const ccDirty = (): void => {
+        let n = 0;
+        for (const row of ccfgRows) {
+          const ctl = row.querySelector("input") as HTMLInputElement;
+          const changed = ctl.value !== (row.dataset.base ?? "");
+          row.classList.toggle("dirty", changed);
+          if (changed) n++;
+        }
+        const d = $("ccfg-dirty");
+        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        const b = $("ccfg-save");
+        if (b) b.hidden = n === 0;
+      };
+      for (const row of ccfgRows) {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        ctl.addEventListener("input", ccDirty);
+        ctl.addEventListener("change", ccDirty);
+      }
+      ($("ccfg-save") as HTMLButtonElement).onclick = async () => {
+        const ew = parseInt(($("ccfg-extract_workers") as HTMLInputElement).value, 10);
+        const qc = parseInt(($("ccfg-queue_cap") as HTMLInputElement).value, 10);
+        if (isNaN(ew) || ew < 1 || ew > 8) { toast("音轨提取并发需在 1 ~ 8 之间", "err"); return; }
+        if (isNaN(qc) || qc < 1 || qc > 16) { toast("转译并发需在 1 ~ 16 之间", "err"); return; }
+        try {
+          await t.putClientConfig!({ extract_workers: ew, queue_cap: qc });
+          toast("客户端设置已保存（立即生效，无需重启）", "ok");
+          for (const row of ccfgRows) {
+            row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
+          }
+          ccDirty();
+        } catch (e) {
+          toast((e as Error).message, "err");
+        }
+      };
+    }
     ($("cfg-reset") as HTMLButtonElement).onclick = () => {
-      body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+      body.querySelectorAll<HTMLElement>(".cfg-row:not(.ccfg-row)").forEach((row) => {
         const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
         if (!ctl) return;
         const base = JSON.parse(row.dataset.base ?? '""') as boolean | string;

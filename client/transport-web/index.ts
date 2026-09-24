@@ -84,6 +84,14 @@ export const webTransport: Transport = {
 
   listJobs: () => jget<JobRow[]>("/api/jobs"),
 
+  listJobsSummary: () => jget<import("../core/types").JobSummary>("/api/jobs/summary"),
+
+  getClientConfig: () =>
+    jget<{ config: import("../core/types").ClientConfig }>("/api/client-config").then((d) => d.config),
+
+  putClientConfig: (cfg) =>
+    jput("/api/client-config", cfg),
+
   getUpdate: () => jget<UpdateInfo>("/api/update"),
 
   getResultUrl: (engine, jobId) =>

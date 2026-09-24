@@ -46,6 +46,8 @@ export interface Transport {
   putEngineKey(name: string, apiKey: string): Promise<void>;
   /** 任务看板（poller 快照展平行） */
   listJobs(): Promise<JobRow[]>;
+  /** 看板统计（web 工作台 /api/jobs/summary，serve 累计口径）；未实现则 UI 回退行计数 */
+  listJobsSummary?(): Promise<import("./types").JobSummary>;
   /** srt 下载 URL（供 <a download> / 自动下载） */
   getResultUrl(engine: string, jobId: string): string;
   /** srt 二进制（写回源目录用）；非 2xx 返回 null，由调用方重试 */
@@ -58,6 +60,9 @@ export interface Transport {
   getConfig(name: string): Promise<ConfigItem[]>;
   /** 保存设置；失败 throw(detail 或 "<status>") */
   putConfig(name: string, values: Record<string, unknown>): Promise<void>;
+  /** 客户端（本机工作台）并发设置；仅 web 工作台有，desktop 形态无此方法 */
+  getClientConfig?(): Promise<import("./types").ClientConfig>;
+  putClientConfig?(cfg: import("./types").ClientConfig): Promise<void>;
   /** 整片上传（带进度）；受理成功返回 uploadId 进入轮询 */
   uploadFile(file: File, engine: string, onProgress: UploadProgress): Promise<UploadDispatch>;
   /** 音频（opus）上传（带进度） */

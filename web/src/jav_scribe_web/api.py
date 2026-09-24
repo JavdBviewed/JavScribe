@@ -30,8 +30,133 @@ STATIC_DIR = Path(__file__).parent / "static"
 _log = logging.getLogger("jav-scribe-web")
 UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
 UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
-LOCAL_EXTRACT_CONCURRENCY = int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", "2"))
 LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放弃并标记 failed
+# 服务端任务表只留最近 200 条内存窗：本地在途任务远超此数时，早期任务会被挤出
+# 任务表，字幕回写永远等不到终态（行永久卡「进行中」）。派发完成超此时长仍
+# 查不到服务任务 → 判失败放行重新提交。
+LOCAL_WB_JOB_GONE_S = 15 * 60
+
+# ---- 客户端并发设置（本机工作台专属，不进 serve /config 白名单） ----
+# extract_workers：本机同时跑 ffmpeg 提取音轨的数量（封顶 1..8）
+# queue_cap：serve 串行转译；此项为「同时在途任务数上限」≈ 服务队列深度（封顶 1..16）
+# 默认：env 可覆盖提取并发（JAV_LOCAL_EXTRACT_CONCURRENCY，部署期设定）；
+# 界面保存的 client_config.json 优先于 env 默认。
+ENV_EXTRACT_CONCURRENCY = max(1, min(8, int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", "2"))))
+CLIENT_CONFIG_NAME = "client_config.json"
+CLIENT_CONFIG_DEFAULTS = {"extract_workers": ENV_EXTRACT_CONCURRENCY, "queue_cap": 4}
+CLIENT_CONFIG_LIMITS = {"extract_workers": (1, 8), "queue_cap": (1, 16)}
+
+
+def _load_client_config(path: Path) -> dict:
+    """读客户端并发设置；文件缺失/损坏回落默认（值按预置封顶 clamp）。"""
+    cfg = dict(CLIENT_CONFIG_DEFAULTS)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return cfg
+    if isinstance(raw, dict):
+        for k, (lo, hi) in CLIENT_CONFIG_LIMITS.items():
+            v = raw.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cfg[k] = max(lo, min(hi, int(v)))
+    return cfg
+
+
+class _Limiter:
+    """可 resize 的异步并发闸（asyncio.Semaphore 建成后无法改限）。
+
+    set_limit 立即生效：调小不中断已持有者、新获取者等待；调大唤醒等待者。
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._active = 0
+        self._cv = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def set_limit(self, limit: int) -> None:
+        limit = max(1, int(limit))
+        if limit == self._limit:
+            return
+        self._limit = limit
+        try:
+            asyncio.get_running_loop().create_task(self._wake())
+        except RuntimeError:
+            pass  # 无运行中的事件循环（启动期）：无等待者可唤醒
+
+    async def _wake(self) -> None:
+        async with self._cv:
+            self._cv.notify_all()
+
+    async def __aenter__(self) -> "_Limiter":
+        async with self._cv:
+            # asyncio.Condition.wait() 无谓词参数（与 threading 不同）：手动轮询条件
+            while self._active >= self._limit:
+                await self._cv.wait()
+            self._active += 1
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        async with self._cv:
+            self._active -= 1
+            self._cv.notify_all()
+        return False
+
+
+class _Gate:
+    """在途任务封顶：按 task id 持槽，字幕回写终态才释放。
+
+    serve 逐条串行转译，客户端在途数 ≈ 服务队列深度：封顶队列深度 →
+    保护 serve 内存/磁盘，也压缩「服务重启丢队列」的风险面。
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._held: set[str] = set()
+        self._cv = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def set_limit(self, limit: int) -> None:
+        limit = max(1, int(limit))
+        if limit == self._limit:
+            return
+        self._limit = limit
+        try:
+            asyncio.get_running_loop().create_task(self._wake())
+        except RuntimeError:
+            pass
+
+    async def _wake(self) -> None:
+        async with self._cv:
+            self._cv.notify_all()
+
+    def rehold(self, task_id: str) -> None:
+        """工作台重启恢复在途任务时认领槽位（启动期同步调用，尚无等待者）。"""
+        self._held.add(task_id)
+
+    async def acquire(self, task_id: str) -> None:
+        async with self._cv:
+            if task_id in self._held:
+                return
+            # asyncio.Condition.wait() 无谓词参数（与 threading 不同）：手动轮询条件
+            while len(self._held) >= self._limit:
+                await self._cv.wait()
+            self._held.add(task_id)
+
+    def release(self, task_id: str) -> None:
+        if task_id not in self._held:
+            return
+        self._held.discard(task_id)
+        try:
+            asyncio.get_running_loop().create_task(self._wake())
+        except RuntimeError:
+            pass
 SRT_EXTS = {".srt", ".subrip", ".vtt", ".ass", ".ssa"}  # 预览只允许字幕扩展名
 SRT_MAX_MB = 2.0  # 预览大小上限（正常 srt 远小于此）
 
@@ -223,19 +348,37 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _uploads[t.id] = t
             if t.local_path and t.job_id and not t.writeback:
                 _local_wb[t.id] = t
+                _gate.rehold(t.id)  # 重启恢复的在途任务继续占服务队列槽
         _prune_uploads()
 
     def _lock_for(engine_name: str) -> asyncio.Lock:
         return _upload_locks.setdefault(engine_name, asyncio.Lock())
 
-    # 本地扫描音轨提取并发（ffmpeg CPU 密集；派发侧另有 per-engine 串行锁）
-    _local_sem = asyncio.Semaphore(LOCAL_EXTRACT_CONCURRENCY)
+    # 客户端并发设置（设置弹窗「客户端（本机工作台）」卡片可调，立即生效）：
+    # 提取并发闸 + 在途封顶门，替代原固定 Semaphore（部署期只能 env 配）
+    _client_cfg_path = Path(data_dir) / CLIENT_CONFIG_NAME
+    _client_cfg = _load_client_config(_client_cfg_path)
+    _local_limiter = _Limiter(_client_cfg["extract_workers"])
+    _gate = _Gate(_client_cfg["queue_cap"])
+
+    def _save_client_config() -> None:
+        try:
+            tmp = _client_cfg_path.with_name(_client_cfg_path.name + ".tmp")
+            tmp.write_text(json.dumps(_client_cfg, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_client_cfg_path)
+        except OSError:
+            pass  # 落盘失败不阻塞主管线（内存值仍生效）
 
     def _prune_uploads() -> None:
         cutoff = time.time() - UPLOAD_TTL_S
         stale = [k for k, t in _uploads.items() if (t.finished or 0) and t.finished < cutoff]
         for k in stale:
             _uploads.pop(k, None)
+            # 泄漏兜底：回写表里还挂着 TTL 外任务（服务任务早被挤出 200 窗）→
+            # 一并移除并释放在途槽，防止槽位被永久占用
+            if k in _local_wb:
+                _local_wb.pop(k, None)
+                _gate.release(k)
 
     @app.get("/api/health")
     async def api_health() -> dict:
@@ -306,7 +449,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         }
         now = time.time()
         for t in _uploads.values():
-            if t.phase not in ("extracting", "dispatching", "error"):
+            if t.phase not in ("queued", "extracting", "dispatching", "error"):
                 continue
             if t.phase == "error" and t.finished and now - t.finished > UPLOAD_TTL_S:
                 continue
@@ -331,6 +474,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     "duration_s": None,
                     "position_s": None,
                     "phase_detail": {
+                        "queued": "排队中（等待转译并发位）",
                         "extracting": "提取音轨（本机）",
                         "dispatching": "派发到服务",
                     }.get(t.phase, ""),
@@ -346,6 +490,78 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             )
         )
         return rows
+
+    @app.get("/api/jobs/summary")
+    async def api_jobs_summary() -> dict:
+        """看板统计（单一真源聚合）：进行中=当前在途行数；完成/跳过/失败=
+        serve 累计终态计数（独立于 200 内存窗，大批量任务不再少算）。
+
+        老 serve（/health 无 stats 字段）退回现行行计数，保持兼容。
+        """
+        running = done = skipped = failed = 0
+        for name, info in poller.engines.items():
+            has_stats = bool(info.stats)
+            if has_stats:
+                done += int(info.stats.get("done", 0) or 0)
+                skipped += int(info.stats.get("skipped", 0) or 0)
+                failed += int(info.stats.get("failed", 0) or 0)
+            for job in poller.jobs.get(name, []):
+                files = job.get("files")
+                if files:
+                    statuses = [t.get("status") for t in files]
+                else:
+                    statuses = ["done" if job.get("state") == "finished" else "running"]
+                for st in statuses:
+                    if st in ("running", "pending"):
+                        running += 1
+                    elif not has_stats:
+                        # 老 serve 回退：终态也按行计数
+                        if st == "done":
+                            done += 1
+                        elif st == "skipped":
+                            skipped += 1
+                        elif st in ("error", "canceled"):
+                            failed += 1
+        # 本机在途管线行（排队/提取/派发）计入进行中；终态唯一真源是 serve
+        # 累计 stats（含老 serve 的行计数回退），本地不再按 writeback 重复计。
+        # 仅「无 job_id 的本机管线失败」（提取/派发/内部错误/重启中断，
+        # serve 无记录）计入失败，避免与 serve stats 双重计数。
+        for t in _uploads.values():
+            if t.phase in ("queued", "extracting", "dispatching"):
+                running += 1
+            elif t.phase == "error" and t.job_id is None:
+                failed += 1
+        return {"running": running, "done": done, "skipped": skipped, "failed": failed}
+
+    # -- 客户端并发设置（本机工作台；不进 serve /config 白名单） -------------------
+    @app.get("/api/client-config")
+    async def api_client_config_get() -> dict:
+        return {"ok": True, "config": dict(_client_cfg), "limits": CLIENT_CONFIG_LIMITS}
+
+    @app.put("/api/client-config")
+    async def api_client_config_put(body: dict) -> dict:
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body 需要是 JSON 对象")
+        changed = False
+        for k, (lo, hi) in CLIENT_CONFIG_LIMITS.items():
+            if k not in body:
+                continue
+            v = body.get(k)
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise HTTPException(400, f"{k} 需要整数")
+            v = int(v)
+            if not (lo <= v <= hi):
+                raise HTTPException(400, f"{k} 需在 {lo} ~ {hi} 之间")
+            if v != _client_cfg.get(k):
+                _client_cfg[k] = v
+                if k == "extract_workers":
+                    _local_limiter.set_limit(v)
+                else:
+                    _gate.set_limit(v)
+                changed = True
+        if changed:
+            _save_client_config()
+        return {"ok": True, "config": dict(_client_cfg)}
 
     # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
 
@@ -403,29 +619,50 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     async def _run_local(task: UploadTask, video_path: Path) -> None:
         """本地扫描管线：直接读工作台机器上的视频（不复制、不出本机），
         提取 opus 后派发给所选服务；完成后由 _local_writeback_tick 写回字幕。
+
+        并发约束：先拿「在途槽」（转译并发=服务队列上限），超额的排队等待；
+        音轨提取受 extract_workers 闸限制（本机 ffmpeg 并发）。
         """
         fd, fname = tempfile.mkstemp(suffix=".opus", prefix="javweb_loc_")
         audio_tmp = Path(fname)
         os.close(fd)
+        task.phase = "queued"
         try:
-            async with _local_sem:
-                try:
-                    size = await extract_audio_progress(
-                        video_path,
-                        audio_tmp,
-                        on_progress=lambda frac: setattr(task, "progress", frac),
-                    )
-                    task.audio_mb = round(size / 1048576, 1)
-                except Exception as ex:
-                    task.phase = "error"
-                    task.error = f"提取音频失败: {ex}"
-                    return
-            await _dispatch_task(task, audio_tmp)
-            if task.job_id:
-                _local_wb[task.id] = task
-        finally:
-            task.finished = time.time()
-            audio_tmp.unlink(missing_ok=True)
+            await _gate.acquire(task.id)
+            try:
+                async with _local_limiter:
+                    task.phase = "extracting"  # 拿到槽后进入提取阶段（行状态区分排队/提取）
+                    try:
+                        size = await extract_audio_progress(
+                            video_path,
+                            audio_tmp,
+                            on_progress=lambda frac: setattr(task, "progress", frac),
+                        )
+                        task.audio_mb = round(size / 1048576, 1)
+                    except Exception as ex:
+                        task.phase = "error"
+                        task.error = f"提取音频失败: {ex}"
+                        return
+                await _dispatch_task(task, audio_tmp)
+                if task.job_id:
+                    _local_wb[task.id] = task
+                    # 槽位继续持有，直到回写终态（_local_writeback_tick 统一释放）
+            finally:
+                if not task.job_id:
+                    # 无 job_id 的终态路径（提取失败/派发被拒）：立即释放在途槽
+                    _gate.release(task.id)
+                task.finished = time.time()
+                audio_tmp.unlink(missing_ok=True)
+        except BaseException:
+            # 预期外异常兜底：未拿到 job_id 就释放槽，防止槽位泄漏；
+            # 显式标 error，避免任务行永久卡在「排队中」
+            if not task.job_id:
+                _gate.release(task.id)
+                task.phase = "error"
+                task.error = task.error or "内部错误（任务中断，可重新提交）"
+                task.finished = task.finished or time.time()
+                _save_uploads_state()
+            raise
 
     @app.post("/api/upload", status_code=202)
     async def api_upload(file: UploadFile = File(...), engine: str = Form(...)) -> dict:
@@ -845,11 +1082,19 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         }
 
     async def _local_writeback_tick() -> None:
-        """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。"""
+        """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。
+
+        所有终态出口统一走 _wb_close：离开回写表 + 释放在途槽（槽释放唯一出口）。
+        """
         _prune_uploads()
+
+        def _wb_close(task: UploadTask) -> None:
+            _local_wb.pop(task.id, None)
+            _gate.release(task.id)
+
         for task in list(_local_wb.values()):
             if task.writeback is not None:
-                _local_wb.pop(task.id, None)
+                _wb_close(task)
                 continue
             if not task.local_path or not task.job_id:
                 continue
@@ -859,7 +1104,17 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 None,
             )
             if job is None:
-                continue  # 任务表里还没出现（或已过期）
+                # 服务任务表里查不到：要么刚派发还没进快照（秒级内出现），
+                # 要么已被 200 内存窗挤出 / 服务重启丢失。派发完成超
+                # LOCAL_WB_JOB_GONE_S 仍查不到 → 判失败放行重新提交
+                # （避免行永久卡「进行中」）。
+                if (task.finished or 0) and time.time() - task.finished > LOCAL_WB_JOB_GONE_S:
+                    task.phase = "error"
+                    task.error = "服务任务已从任务表过期（任务量大时被服务端任务窗口挤出或服务重启丢失），请重新提交"
+                    task.writeback = "failed: 服务任务已过期"
+                    _save_uploads_state()
+                    _wb_close(task)
+                continue
             files = job.get("files") or []
             fstatus = files[0].get("status") if files else None
             if job.get("state") != "finished":
@@ -868,21 +1123,21 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                         "failed: 生成失败" if fstatus == "error"
                         else "failed: 生成已取消"
                     )
-                    _local_wb.pop(task.id, None)
+                    _wb_close(task)
                 continue
             if fstatus == "skipped":
                 task.writeback = "skipped"
-                _local_wb.pop(task.id, None)
+                _wb_close(task)
                 continue
             if fstatus in ("error", "canceled"):
                 task.writeback = "failed: 生成失败" if fstatus == "error" else "failed: 生成已取消"
-                _local_wb.pop(task.id, None)
+                _wb_close(task)
                 continue
             vid = Path(task.local_path)
             entry = store.get(task.engine)
             if entry is None or not vid.is_file():
                 task.writeback = "failed: 视频已不存在"
-                _local_wb.pop(task.id, None)
+                _wb_close(task)
                 continue
             eng = JavScribeEngine(task.engine, entry["url"])
             try:
@@ -891,7 +1146,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 task.wb_fails += 1
                 if task.wb_fails >= LOCAL_WB_MAX_FAILS:
                     task.writeback = f"failed: 字幕暂不可下载（{ex}）"
-                    _local_wb.pop(task.id, None)
+                    _wb_close(task)
                 continue
             finally:
                 await eng.close()
@@ -903,7 +1158,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             target = vid.parent / Path(name).name
             if target.is_file() and target.stat().st_size > 0:
                 task.writeback = "skipped_exists"
-                _local_wb.pop(task.id, None)
+                _wb_close(task)
                 continue
             data, _fixed = sanitize_srt_bytes(data, log=_log.warning)
             try:
@@ -914,9 +1169,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 task.wb_fails += 1
                 if task.wb_fails >= LOCAL_WB_MAX_FAILS:
                     task.writeback = f"failed: 写入失败（{ex}）"
-                    _local_wb.pop(task.id, None)
+                    _wb_close(task)
                 continue
-            _local_wb.pop(task.id, None)
+            _wb_close(task)
         _save_uploads_state()
 
     try:

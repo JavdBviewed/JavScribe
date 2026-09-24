@@ -59,6 +59,9 @@ class FakeEngine:
     def job_by_id(self, _id: str):
         return None
 
+    def stats(self):
+        return {"done": 0, "skipped": 0, "failed": 0}
+
     def retry_job(self, _id: str):
         return None
 
@@ -130,6 +133,7 @@ def test_auth_and_masking() -> None:
             # 其余端点维持无鉴权
             code, body = _http("GET", base + "/health")
             assert code == 200 and body["ok"], (code, body)
+            assert body["stats"] == {"done": 0, "skipped": 0, "failed": 0}, body.get("stats")
             # 设置 key
             cfg["api"]["key"] = "k1"
             code, _ = _http("GET", base + "/config")
