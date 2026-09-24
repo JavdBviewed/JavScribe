@@ -70,7 +70,8 @@ def test_health_jobs_detail() -> None:
         try:
             h = await e.health()
             # 旧 serve 无 stats 字段 → None（web 看板退回行计数）
-            assert h == {"ok": True, "device": "cuda", "version": "0.1.0", "stats": None}
+            # paused：serve 0.2.3+ 队列暂停标志；老 serve 无此字段 → False
+            assert h == {"ok": True, "device": "cuda", "version": "0.1.0", "stats": None, "paused": False}
             jobs = await e.jobs()
             assert jobs == [JOB_SUMMARY]
             d = await e.job_detail(JOB_SUMMARY["id"])

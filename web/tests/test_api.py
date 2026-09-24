@@ -245,7 +245,7 @@ def test_retry_proxy() -> None:
     try:
         client, _ = make_client()
         r = client.post("/api/jobs/车间A/j-done/retry")
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text  # 成功重试 = 新建任务（与 serve 契约一致）
         assert r.json() == {"ok": True, "job_id": "j-new-1"}
         assert calls == ["j-done"]
         # 车间 409（无跳过的文件）-> 409 中文提示

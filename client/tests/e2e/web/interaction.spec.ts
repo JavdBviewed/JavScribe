@@ -1,11 +1,11 @@
 // 交互类：完整用户流（单文件三步动画→完成→看板→下载；整片上传回退；文件夹批量；扫描全流程；Windows 拦截；筛选×分页；retry；autosave 降级下载；小飞机跳转；删除服务）
-import { test, expect, type APIRequestContext } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import {
   waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockSpeed, cleanEngines, addEngine, MOCK_KEY, MOCK_URL, FIXTURES,
-  waitForJobsEmpty, makeScanDir,
+  waitForJobsEmpty, makeScanDir, resetPipelinePause,
 } from "../helpers";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 
@@ -17,6 +17,7 @@ let req: APIRequestContext;
 test.beforeEach(async ({ page, request }) => {
   req = request;
   await mockReset(request);
+  await resetPipelinePause(request);
   await cleanEngines(request);
   await waitForJobsEmpty(request);
   // 8s/任务：保证页面 5s 轮询能观察到 running→done（autosave 写回、看板 running 态都依赖此迁移）
@@ -25,6 +26,111 @@ test.beforeEach(async ({ page, request }) => {
   await waitForEngineOnline(page);
   await waitForEngineKey(page, "mock");
 });
+// pipeline_paused 持久化在共享 web 数据目录：用例中途失败也要复位，防拖死后续本机管线用例
+test.afterEach(async () => {
+  await resetPipelinePause(req);
+});
+
+/** 轮询等包含指定文案的 toast（避免「首个可见 toast」误匹配上一条操作的旧 toast，8s 内会共存） */
+async function expectToast(page: Page, needle: string, timeoutMs = 15_000) {
+  const t0 = Date.now();
+  for (;;) {
+    const texts = await page.locator("#toasts .toast").allTextContents();
+    if (texts.some((t) => t.includes(needle))) return;
+    if (Date.now() - t0 > timeoutMs) throw new Error(`toast 未出现: ${needle}（当前: ${texts.join(" | ") || "无"}）`);
+    await new Promise((rs) => setTimeout(rs, 100));
+  }
+}
+
+test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起 → 继续任务 → 派发完成", async ({ page }) => {
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0；
+  // scanMinSizeMb 在页面加载时读入 state，必须 reload 后设置才生效
+  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
+  await page.reload();
+  await waitForEngineOnline(page);
+  await waitForEngineKey(page, "mock");
+  page.on("dialog", (d) => d.accept());
+  // 1. 暂停所有（confirm 放行）
+  await page.click("#job-pause-all");
+  await expectToast(page, "已暂停所有任务");
+  const btn = page.locator("#job-pause-all");
+  await expect(btn).toHaveText("▶ 继续任务");
+  await expect(btn).toHaveClass(/on/);
+  // 服务卡「已暂停」tag（poller 读 /health paused：1s tick + 页面 5s 刷新）
+  await expect(page.locator('article.eng[data-name="mock"] .tag-paused')).toHaveText("已暂停", { timeout: 20_000 });
+  // 2. 本机扫描提交 → 3 条任务全部停在闸前（不提取、不派发）
+  await page.locator("#scan-path").fill(SCAN_DIR);
+  await page.click("#scan-go");
+  await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
+  await page.locator("#scan-select-all").check();
+  await page.click("#scan-submit");
+  await expectToast(page, "已入队 3 项（本机扫描）");
+  await expect(page.locator(".job-row .pill.p-paused")).toHaveCount(3, { timeout: 20_000 });
+  await expect(
+    page.locator(".job-row .cell-pos", { hasText: "已暂停（等待继续）" }).first(),
+  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#job-stats .stat.s-paused")).toContainText("已暂停 3", { timeout: 20_000 });
+  // 3. 继续任务（resume 无 confirm）
+  await page.click("#job-pause-all");
+  await expectToast(page, "已继续所有任务");
+  await expect(btn).toHaveText("⏸ 暂停所有");
+  await expect(btn).not.toHaveClass(/on/);
+  // 4. 提取+派发+转写完成 → 三条行回 done
+  for (const f of ["AKDL-001.mp4", "AKDL-002.mp4", "SUB-001.mkv"]) {
+    await expect(
+      page.locator(".job-row", { has: page.locator(".fn", { hasText: f }) }).locator(".pill.p-done"),
+    ).toBeVisible({ timeout: 60_000 });
+  }
+  // 等写回完成再还原夹具（防下一个「扫描全流程」用例的提交被防重跳过）
+  const want = [path.join(SCAN_DIR, "AKDL-001.zh.srt"), path.join(SCAN_DIR, "SUB-001.zh.srt")];
+  const t0 = Date.now();
+  while (!want.every((n) => existsSync(n)) && Date.now() - t0 < 90_000) await new Promise((rs) => setTimeout(rs, 500));
+  for (const n of want) expect(existsSync(n)).toBe(true);
+  for (const n of want) unlinkSync(n);
+});
+
+test("行级挂起：排队行 ⏸ 暂停 → 已暂停（行变暗）→ ▶ 继续 → 回排队", async ({ page }) => {
+  await mockSpeed(req, { step: 0.002, tickMs: 100 }); // running 行保持运行（409 判定依赖）
+  await mockSeed(req, { n: 2, status: "running", progress: 0.2, pending: 1 });
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-001.mp4" }) });
+  await expect(row.locator(".pill.p-pending")).toBeVisible({ timeout: 15_000 });
+  // 运行中行（seed-002）无暂停按钮（只有取消）；排队行有
+  const runRow = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-002.mp4" }) });
+  expect(await runRow.locator(".pause-job").count()).toBe(0);
+  expect(await runRow.locator(".cancel").count()).toBe(1);
+  await expect(row.locator(".pause-job")).toBeVisible({ timeout: 15_000 });
+  await row.locator(".pause-job").click();
+  await expectToast(page, "已挂起");
+  // pill 归一「已暂停」，行变暗，按钮切「▶ 继续」，取消按钮消失（暂停中不重复操作）
+  await expect(row.locator(".pill.p-paused")).toBeVisible({ timeout: 15_000 });
+  await expect(row).toHaveClass(/paused/);
+  await expect(row.locator(".resume-job")).toBeVisible({ timeout: 15_000 });
+  expect(await row.locator(".pause-job").count()).toBe(0);
+  expect(await row.locator(".cancel").count()).toBe(0);
+  // 恢复 → 回排队
+  await row.locator(".resume-job").click();
+  await expectToast(page, "已恢复排队");
+  await expect(row.locator(".pill.p-pending")).toBeVisible({ timeout: 15_000 });
+  await expect(row).not.toHaveClass(/paused/);
+});
+
+test("行级重试：失败行 ↻ 重试 → 重新入队 → 同文件新任务 running（不删已生成字幕）", async ({ page }) => {
+  // beforeEach 已设 8s/任务：重试后的新任务有可观察的 running 窗口
+  await mockSeed(req, { n: 1, status: "error", errors: 1 });
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-001.mp4" }) });
+  await expect(row.locator(".pill.p-error")).toBeVisible({ timeout: 15_000 });
+  await expect(row.locator(".sub")).toContainText("转写失败");
+  const btn = row.locator(".retry");
+  await expect(btn).toHaveText("↻ 重试");
+  await btn.click();
+  await expectToast(page, "已重新入队");
+  // 旧失败行保留 + 同文件新任务 running（两行）
+  const all = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-001.mp4" }) });
+  await expect(all.locator(".pill.p-running").first()).toBeVisible({ timeout: 20_000 });
+  await expect(all).toHaveCount(2, { timeout: 20_000 });
+});
+
+
 
 test("单文件本地提音轨全流程：chip → 三步动画 → 完成 → 看板 → 下载 srt", async ({ page }) => {
   // 1. 选文件 → chip

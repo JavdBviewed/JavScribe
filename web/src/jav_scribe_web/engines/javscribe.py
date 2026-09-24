@@ -64,6 +64,7 @@ class JavScribeEngine(EngineAdapter):
             "device": str(d.get("device") or ""),
             "version": str(d.get("version") or ""),
             "stats": d.get("stats"),
+            "paused": bool(d.get("paused", False)),
         }
 
     async def jobs(self) -> list[dict]:
@@ -134,6 +135,31 @@ class JavScribeEngine(EngineAdapter):
         返回 {ok, job_id, status}；服务 404/409 时原样抛出 HTTPStatusError。
         """
         r = await self._get_client().post(f"{self.url}/jobs/{job_id}/cancel")
+        r.raise_for_status()
+        return r.json()
+
+    async def pause_queue(self) -> dict:
+        """暂停服务队列（运行中跑完、不开新任务）。serve 0.2.3+；
+        旧镜像无此端点 → 404，原样抛出 HTTPStatusError。"""
+        r = await self._get_client().post(f"{self.url}/jobs/pause")
+        r.raise_for_status()
+        return r.json()
+
+    async def resume_queue(self) -> dict:
+        """继续服务队列。"""
+        r = await self._get_client().post(f"{self.url}/jobs/resume")
+        r.raise_for_status()
+        return r.json()
+
+    async def pause_job(self, job_id: str) -> dict:
+        """挂起单个排队任务（仅排队任务可挂起；运行中 409）。"""
+        r = await self._get_client().post(f"{self.url}/jobs/{job_id}/pause")
+        r.raise_for_status()
+        return r.json()
+
+    async def resume_job(self, job_id: str) -> dict:
+        """恢复单个挂起任务。"""
+        r = await self._get_client().post(f"{self.url}/jobs/{job_id}/resume")
         r.raise_for_status()
         return r.json()
 

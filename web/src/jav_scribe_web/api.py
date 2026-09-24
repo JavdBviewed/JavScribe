@@ -43,7 +43,7 @@ LOCAL_WB_JOB_GONE_S = 15 * 60
 # 界面保存的 client_config.json 优先于 env 默认。
 ENV_EXTRACT_CONCURRENCY = max(1, min(8, int(os.environ.get("JAV_LOCAL_EXTRACT_CONCURRENCY", "2"))))
 CLIENT_CONFIG_NAME = "client_config.json"
-CLIENT_CONFIG_DEFAULTS = {"extract_workers": ENV_EXTRACT_CONCURRENCY, "queue_cap": 4}
+CLIENT_CONFIG_DEFAULTS = {"extract_workers": ENV_EXTRACT_CONCURRENCY, "queue_cap": 4, "pipeline_paused": False}
 CLIENT_CONFIG_LIMITS = {"extract_workers": (1, 8), "queue_cap": (1, 16)}
 
 
@@ -59,6 +59,9 @@ def _load_client_config(path: Path) -> dict:
             v = raw.get(k)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 cfg[k] = max(lo, min(hi, int(v)))
+        v = raw.get("pipeline_paused")
+        if isinstance(v, bool):
+            cfg["pipeline_paused"] = v
     return cfg
 
 
@@ -182,6 +185,7 @@ def _job_rows(
         "finished": job.get("finished"),
         "source_kind": job.get("source_kind"),
         "sub_status": (local_sub_status or {}).get(job.get("id") or ""),
+        "paused": bool(job.get("paused", False)),  # serve 单任务挂起（0.2.3+）
     }
     files = job.get("files")
     if not files:
@@ -342,9 +346,11 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             if store.get(t.engine) is None:
                 continue  # 服务已删除：无轮询目标，行会永远滞留
             if not t.job_id:
-                t.phase = "error"
-                t.error = t.error or "工作台重启，任务中断（可重新提交）"
-                t.finished = t.finished or now
+                # 重启中断（含暂停中）：标「已暂停」而非失败——点「继续」即可
+                # 重新提取音轨并提交（视频在本机，不丢任务）
+                t.phase = "paused"
+                t.error = "工作台重启中断（点「继续」恢复：重新提取音轨并提交）"
+                t.finished = None
             _uploads[t.id] = t
             if t.local_path and t.job_id and not t.writeback:
                 _local_wb[t.id] = t
@@ -360,6 +366,22 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     _client_cfg = _load_client_config(_client_cfg_path)
     _local_limiter = _Limiter(_client_cfg["extract_workers"])
     _gate = _Gate(_client_cfg["queue_cap"])
+    # 全局暂停闸：set()=未暂停。暂停时新任务停在闸前（不占槽、不提取），
+    # 运行中任务跑完；重启后状态随 client_config.json 恢复
+    _pause_evt = asyncio.Event()
+    if not _client_cfg["pipeline_paused"]:
+        _pause_evt.set()
+
+    def _set_pipeline_paused(want: bool) -> bool:
+        if bool(_client_cfg.get("pipeline_paused")) == want:
+            return False
+        _client_cfg["pipeline_paused"] = want
+        _save_client_config()
+        if want:
+            _pause_evt.clear()
+        else:
+            _pause_evt.set()
+        return True
 
     def _save_client_config() -> None:
         try:
@@ -449,7 +471,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         }
         now = time.time()
         for t in _uploads.values():
-            if t.phase not in ("queued", "extracting", "dispatching", "error"):
+            if t.phase not in ("queued", "extracting", "dispatching", "error", "paused"):
                 continue
             if t.phase == "error" and t.finished and now - t.finished > UPLOAD_TTL_S:
                 continue
@@ -459,15 +481,19 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 {
                     "engine": t.engine,
                     "job_id": t.job_id or "",
+                    "task_id": t.id,
+                    "local_path": t.local_path,
                     "label": t.name,
-                    "state": "error" if t.phase == "error" else "running",
+                    "state": "error" if t.phase == "error" else (
+                        "paused" if t.phase == "paused" else "running"),
                     "created": t.created,
                     "finished": t.finished,
                     "source_kind": "upload",
                     "sub_status": t.sub_status,
                     "writeback": None,
                     "file": t.name,
-                    "status": "error" if t.phase == "error" else "running",
+                    "status": "error" if t.phase == "error" else (
+                        "paused" if t.phase == "paused" else "running"),
                     "phase": t.phase,
                     "progress": t.progress,
                     "position": "",
@@ -477,6 +503,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                         "queued": "排队中（等待转译并发位）",
                         "extracting": "提取音轨（本机）",
                         "dispatching": "派发到服务",
+                        "paused": "已暂停（等待继续）",
                     }.get(t.phase, ""),
                     "eta_s": None,
                     "message": t.error or "",
@@ -526,12 +553,23 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         # 累计 stats（含老 serve 的行计数回退），本地不再按 writeback 重复计。
         # 仅「无 job_id 的本机管线失败」（提取/派发/内部错误/重启中断，
         # serve 无记录）计入失败，避免与 serve stats 双重计数。
+        paused_local = 0
         for t in _uploads.values():
             if t.phase in ("queued", "extracting", "dispatching"):
                 running += 1
+            elif t.phase == "paused":
+                paused_local += 1
             elif t.phase == "error" and t.job_id is None:
                 failed += 1
-        return {"running": running, "done": done, "skipped": skipped, "failed": failed}
+        return {
+            "running": running,
+            "done": done,
+            "skipped": skipped,
+            "failed": failed,
+            "paused": paused_local,
+            "paused_all": bool(_client_cfg["pipeline_paused"]),
+            "engines_paused": {n: bool(i.paused) for n, i in poller.engines.items()},
+        }
 
     # -- 客户端并发设置（本机工作台；不进 serve /config 白名单） -------------------
     @app.get("/api/client-config")
@@ -563,7 +601,47 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _save_client_config()
         return {"ok": True, "config": dict(_client_cfg)}
 
+    # -- 全局暂停 / 继续（本机管线 + 所有在线服务队列） -------------------------
+    @app.post("/api/pause")
+    async def api_pause(body: dict) -> dict:
+        """body {paused: bool}。本机管线立即生效（持久化，重启不丢）；
+        同时代理所有在线服务的 serve 队列暂停/继续（serve 0.2.3+，
+        旧镜像 404 → 该引擎标记不支持，不阻塞整体）。"""
+        want = bool((body or {}).get("paused"))
+        _set_pipeline_paused(want)
+        engines_out: list[dict] = []
+        for name, info in sorted(poller.engines.items(), key=lambda kv: kv[0]):
+            if not info.online or store.get(name) is None:
+                engines_out.append({"engine": name, "ok": False, "error": "服务离线"})
+                continue
+            entry = store.get(name)
+            eng = JavScribeEngine(name, entry["url"])
+            try:
+                res = await (eng.pause_queue() if want else eng.resume_queue())
+                engines_out.append({"engine": name, "ok": True,
+                                    "paused": bool(res.get("paused"))})
+            except httpx.HTTPStatusError as ex:
+                if ex.response.status_code == 404:
+                    engines_out.append({"engine": name, "ok": False,
+                                        "error": "服务版本过旧，不支持队列暂停"})
+                else:
+                    engines_out.append({"engine": name, "ok": False,
+                                        "error": f"服务请求失败: HTTP {ex.response.status_code}"})
+            except httpx.HTTPError as ex:
+                engines_out.append({"engine": name, "ok": False, "error": f"服务不可达: {ex}"})
+            finally:
+                await eng.close()
+        return {"ok": True, "paused": bool(_client_cfg["pipeline_paused"]),
+                "engines": engines_out}
+
     # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
+
+    async def _pause_gate_wait(task: UploadTask, resume_phase: str) -> None:
+        """全局暂停闸：暂停期间停留（不占槽、不提取）；恢复后进入 resume_phase。"""
+        while _client_cfg.get("pipeline_paused"):
+            task.phase = "paused"
+            await _pause_evt.wait()
+        task.phase = resume_phase
 
     async def _dispatch_task(task: UploadTask, audio_tmp: Path) -> None:
         """把已提取好的 opus 转发给所选服务（两路上传共用）。"""
@@ -591,6 +669,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         audio_tmp = video_tmp.with_suffix(".opus")
         try:
             try:
+                await _pause_gate_wait(task, "extracting")
                 size = await extract_audio_progress(
                     video_tmp,
                     audio_tmp,
@@ -628,6 +707,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         os.close(fd)
         task.phase = "queued"
         try:
+            await _pause_gate_wait(task, "queued")
             await _gate.acquire(task.id)
             try:
                 async with _local_limiter:
@@ -805,8 +885,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         )
 
     # -- 跳过任务「仍要重新生成」(代理服务 POST /jobs/<id>/retry) --------------
+    # 成功 201（新建了一个任务，与 serve 契约一致）；4xx/5xx 由 HTTPException 覆盖
 
-    @app.post("/api/jobs/{engine}/{job_id}/retry")
+    @app.post("/api/jobs/{engine}/{job_id}/retry", status_code=201)
     async def api_retry(engine: str, job_id: str) -> dict:
         entry = store.get(engine)
         if entry is None:
@@ -845,6 +926,67 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             raise HTTPException(502, f"服务不可达: {ex}")
         finally:
             await eng.close()
+
+    # -- 任务挂起 / 恢复（代理服务 POST /jobs/<id>/pause|resume，serve 0.2.3+）--
+
+    async def _job_pause_resume(kind: str, engine: str, job_id: str) -> dict:
+        entry = store.get(engine)
+        if entry is None:
+            raise HTTPException(404, "engine not found")
+        eng = JavScribeEngine(engine, entry["url"])
+        try:
+            return await (eng.pause_job(job_id) if kind == "pause" else eng.resume_job(job_id))
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 404:
+                raise HTTPException(404, "任务不存在（已过期）")
+            if ex.response.status_code == 409:
+                try:
+                    detail = ex.response.json().get("error")
+                except (ValueError, AttributeError):
+                    detail = None
+                raise HTTPException(409, detail or "任务当前状态不允许此操作")
+            raise HTTPException(502, f"服务请求失败: HTTP {ex.response.status_code}")
+        except httpx.HTTPError as ex:
+            raise HTTPException(502, f"服务不可达: {ex}")
+        finally:
+            await eng.close()
+
+    @app.post("/api/jobs/{engine}/{job_id}/pause")
+    async def api_job_pause(engine: str, job_id: str) -> dict:
+        return await _job_pause_resume("pause", engine, job_id)
+
+    @app.post("/api/jobs/{engine}/{job_id}/resume")
+    async def api_job_resume(engine: str, job_id: str) -> dict:
+        return await _job_pause_resume("resume", engine, job_id)
+
+    # -- 本机任务重试 / 继续（error 或 重启中断的 paused 任务：重提取并提交）---
+
+    @app.post("/api/local/{task_id}/rerun")
+    async def api_local_rerun(task_id: str) -> dict:
+        task = _uploads.get(task_id)
+        if task is None:
+            raise HTTPException(404, "任务不存在（已过期）")
+        if task.phase not in ("error", "paused"):
+            raise HTTPException(409, "任务进行中，无需重试")
+        if not task.local_path:
+            raise HTTPException(409, "该任务无本机视频路径（浏览器上传任务请重新上传）")
+        video = Path(task.local_path)
+        if not video.is_file():
+            raise HTTPException(404, "本机视频不存在，无法重试")
+        task.phase = "queued"
+        task.error = None
+        task.progress = 0.0
+        task.finished = None
+        task.job_id = None
+        task.writeback = None
+        task.audio_mb = None
+        task.wb_fails = 0
+        task.cached = False
+        _local_wb.pop(task.id, None)
+        _gate.release(task.id)  # 防御：确保无槽位残留
+        _save_uploads_state()
+        asyncio.create_task(_run_local(task, video))
+        return {"ok": True, "task_id": task.id}
 
     # -- 服务设置（代理 /config，X-Api-Key 鉴权在服务侧执行）-----------------
 

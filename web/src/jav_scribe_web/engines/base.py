@@ -26,6 +26,7 @@ class EngineInfo:
     has_key: bool = False
     updated_at: float = field(default_factory=time.time)
     stats: dict | None = None  # serve 累计终态统计（v0.2.2+；老 serve 无此字段=None）
+    paused: bool = False  # serve 队列暂停（v0.2.3+；老 serve 恒 False）
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class EngineInfo:
             "has_key": self.has_key,
             "updated_at": self.updated_at,
             "stats": self.stats,
+            "paused": self.paused,
         }
 
 
@@ -65,3 +67,19 @@ class EngineAdapter(ABC):
     @abstractmethod
     async def result(self, job_id: str) -> tuple[bytes, str]:
         """Fetch the finished primary SRT; return (bytes, suggested name)."""
+
+    async def pause_queue(self) -> dict:
+        """暂停服务队列（serve 0.2.3+）。默认不支持，返回 {ok:False}。"""
+        return {"ok": False, "error": "pause not supported"}
+
+    async def resume_queue(self) -> dict:
+        """继续服务队列。默认不支持。"""
+        return {"ok": False, "error": "resume not supported"}
+
+    async def pause_job(self, job_id: str) -> dict:
+        """挂起服务单个排队任务。默认不支持。"""
+        return {"ok": False, "error": "pause not supported"}
+
+    async def resume_job(self, job_id: str) -> dict:
+        """恢复服务单个挂起任务。默认不支持。"""
+        return {"ok": False, "error": "resume not supported"}

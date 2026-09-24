@@ -432,6 +432,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "profile": self.profile,
                     "device": e.cfg.get("infer", {}).get("device", "auto"),
                     "stats": e.stats(),  # 累计终态统计（老客户端忽略新字段）
+                    "paused": e.paused,  # 队列暂停（老客户端忽略新字段）
                     "jobs": [j.to_dict() for j in e.jobs],
                 },
             )
@@ -531,7 +532,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             job = self.engine.retry_job(parts[1])
             if job is None:
-                self._send(409, {"ok": False, "error": "no retryable file（无跳过的文件，或任务已过期）"})
+                self._send(409, {"ok": False, "error": "no retryable file（无跳过或失败的文件可重试，或任务已过期）"})
             else:
                 self._send(201, {"ok": True, "job_id": job.id})
             return
@@ -542,6 +543,26 @@ class _Handler(BaseHTTPRequestHandler):
             status = self.engine.cancel_job(parts[1])
             if status == "finished":
                 self._send(409, {"ok": False, "error": "任务已结束，无需取消"})
+            else:
+                self._send(200, {"ok": True, "job_id": parts[1], "status": status})
+            return
+        if len(parts) == 2 and parts[0] == "jobs" and parts[1] in ("pause", "resume"):
+            changed = self.engine.pause_queue() if parts[1] == "pause" else self.engine.resume_queue()
+            self._send(200, {"ok": True, "paused": self.engine.paused, "changed": changed})
+            return
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] in ("pause", "resume"):
+            if self.engine.job_by_id(parts[1]) is None:
+                self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})
+                return
+            status = self.engine.pause_job(parts[1]) if parts[2] == "pause" else self.engine.resume_job(parts[1])
+            if status is None:
+                self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})
+            elif status == "finished":
+                self._send(409, {"ok": False, "error": "任务已结束，无需操作"})
+            elif status == "running":
+                self._send(409, {"ok": False, "error": "任务运行中（仅排队任务可挂起，运行中请用取消）"})
+            elif status == "not_paused":
+                self._send(409, {"ok": False, "error": "任务未在挂起状态"})
             else:
                 self._send(200, {"ok": True, "job_id": parts[1], "status": status})
             return

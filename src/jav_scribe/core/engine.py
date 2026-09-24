@@ -62,6 +62,7 @@ LIVE_PHASES: dict[str, tuple[float, float, float | None, str]] = {
 JOBS_HISTORY_NAME = "jobs.json"
 JOBS_HISTORY_MAX = 500  # 磁盘上限（内存表仍为 200，save 时一并修剪）
 STATS_NAME = "stats.json"  # 累计终态统计（独立于 200 内存窗，看板统计单一真源）
+PAUSE_NAME = "pause.json"  # 队列暂停状态（{"paused": bool}，重启恢复）
 
 
 def job_from_dict(d: dict) -> "Job | None":
@@ -94,6 +95,7 @@ def job_from_dict(d: dict) -> "Job | None":
             source_kind=str(d.get("source_kind", "local")),
             label=str(d.get("label", "") or ""),
             cancel_requested=bool(d.get("cancel_requested", False)),
+            paused=bool(d.get("paused", False)),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -134,6 +136,10 @@ class Engine:
         self._counted: set[str] = set()
         self._stats_path = Path(data_dir) / STATS_NAME if data_dir else None
         self._load_stats()
+        # 队列暂停（用户面）：运行中任务跑完、不再开新任务；状态持久化重启不丢
+        self._paused = False
+        self._pause_path = Path(data_dir) / PAUSE_NAME if data_dir else None
+        self._load_pause_state()
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
         self._live_thread.start()
 
@@ -174,10 +180,11 @@ class Engine:
             self.jobs.pop(0)
         self._save_jobs()
         if run_in_thread:
-            if self._job_thread is not None and self._job_thread.is_alive():
-                # queue behind the running job
+            if self._paused or (self._job_thread is not None and self._job_thread.is_alive()):
+                # queue behind the running job / 队列暂停中一律入队
                 self._pending_jobs.append(job)
-                self.log(f"[engine] 任务排队: {job.id}（{len(files)} 个文件）")
+                self.log(f"[engine] 任务排队: {job.id}（{len(files)} 个文件）"
+                         + ("（队列已暂停）" if self._paused else ""))
             else:
                 self._job_thread = threading.Thread(target=self._run_job, args=(job,), daemon=True)
                 self._job_thread.start()
@@ -190,9 +197,10 @@ class Engine:
         return self.submit(files, source_kind="remote", label=source_name)
 
     def retry_job(self, job_id: str) -> "Job | None":
-        """「仍要重新生成」：对任务中 SKIPPED 的文件删掉已存在字幕并重新入队。
+        """重试：SKIPPED 文件（删旧字幕/放行内嵌判定）+ ERROR 文件重新入队。
 
-        返回新任务；无跳过的文件（或任务已滚出内存）时返回 None。
+        返回新任务；无可重试文件（或任务已滚出内存）时返回 None。
+        DONE/CANCELED 不可重试。
         """
         job = self.job_by_id(job_id)
         if job is None:
@@ -200,16 +208,18 @@ class Engine:
         lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
         paths: list[Path] = []
         for task in job.files:
-            if task.status != TaskStatus.SKIPPED:
+            if task.status == TaskStatus.SKIPPED:
+                target = existing_lang_sub(task.path, lang)
+                if target is not None:
+                    target.unlink(missing_ok=True)
+                    self.log(f"[engine] 重新生成：已删除旧字幕 {target}")
+                elif str(task.message or "").startswith("跳过："):
+                    # 内嵌字幕跳过的任务：无外部字幕可删，放行内嵌判定重生成
+                    with self._inflight_lock:
+                        self._force_embedded.add(task.path.resolve())
+            elif task.status != TaskStatus.ERROR:
+                # DONE/CANCELED/PENDING/RUNNING 不重试；ERROR 无副作用，直接重入
                 continue
-            target = existing_lang_sub(task.path, lang)
-            if target is not None:
-                target.unlink(missing_ok=True)
-                self.log(f"[engine] 重新生成：已删除旧字幕 {target}")
-            elif str(task.message or "").startswith("跳过："):
-                # 内嵌字幕跳过的任务：无外部字幕可删，放行内嵌判定重生成
-                with self._inflight_lock:
-                    self._force_embedded.add(task.path.resolve())
             paths.append(task.path)
         if not paths:
             return None
@@ -256,6 +266,84 @@ class Engine:
                 t.message = msg
                 t.finished = now
                 t.eta_s = None
+
+    # ------------------------------------------------------------------
+    # 暂停 / 继续（用户面：队列级 + 单任务级）
+    # ------------------------------------------------------------------
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def _load_pause_state(self) -> None:
+        if self._pause_path is None or not self._pause_path.exists():
+            return
+        try:
+            raw = json.loads(self._pause_path.read_text(encoding="utf-8"))
+            self._paused = bool(raw.get("paused", False))
+            if self._paused:
+                self.log("[engine] 队列处于暂停状态（重启前已暂停）")
+        except (OSError, ValueError, TypeError) as e:
+            self.log(f"[engine] 暂停状态读取失败（忽略）: {e}")
+
+    def _save_pause_state(self) -> None:
+        if self._pause_path is None:
+            return
+        try:
+            tmp = self._pause_path.with_name(self._pause_path.name + ".tmp")
+            tmp.write_text(json.dumps({"paused": self._paused}), encoding="utf-8")
+            os.replace(tmp, self._pause_path)
+        except OSError as e:
+            self.log(f"[engine] 暂停状态写入失败（忽略）: {e}")
+
+    def pause_queue(self) -> bool:
+        """暂停队列：运行中任务跑完，不再开新任务。返回是否从非暂停切换为暂停。"""
+        if self._paused:
+            return False
+        self._paused = True
+        self._save_pause_state()
+        self.log("[engine] 队列已暂停（运行中任务继续跑完）")
+        return True
+
+    def resume_queue(self) -> bool:
+        """继续队列。返回是否从暂停切换为继续。"""
+        if not self._paused:
+            return False
+        self._paused = False
+        self._save_pause_state()
+        self.log("[engine] 队列已继续")
+        self._drain_pending()
+        return True
+
+    def pause_job(self, job_id: str) -> "str | None":
+        """挂起单个排队任务。返回：None=不存在；"finished"=已结束；
+        "running"=运行中不可挂起；"paused"=已挂起。"""
+        job = self.job_by_id(job_id)
+        if job is None:
+            return None
+        if job.finished is not None or job.done:
+            return "finished"
+        if job.current() is not None or job.cancel_requested:
+            return "running"
+        job.paused = True
+        self._save_jobs()
+        self.log(f"[engine] 任务 {job.id} 已挂起（排队中）")
+        return "paused"
+
+    def resume_job(self, job_id: str) -> "str | None":
+        """恢复单个挂起任务。返回：None=不存在；"finished"=已结束；
+        "not_paused"=未在挂起状态；"resumed"=已恢复。"""
+        job = self.job_by_id(job_id)
+        if job is None:
+            return None
+        if job.finished is not None or job.done:
+            return "finished"
+        if not job.paused:
+            return "not_paused"
+        job.paused = False
+        self._save_jobs()
+        self.log(f"[engine] 任务 {job.id} 已恢复排队")
+        self._drain_pending()
+        return "resumed"
 
     def _restore_job_history(self) -> None:
         if self._jobs_path is None or not self._jobs_path.exists():
@@ -367,6 +455,12 @@ class Engine:
     # Job execution
     # ------------------------------------------------------------------
     def _run_job(self, job: Job) -> None:
+        if job.paused:
+            # 交接窗口：drain 弹出后、开跑前被挂起 → 回到队首，不占推理资源
+            self._pending_jobs.insert(0, job)
+            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前）")
+            self._drain_pending()
+            return
         if job.cancel_requested:
             # 交接窗口：drain 弹出后、开跑前被取消 → 立即收尾，不占推理资源
             self._cancel_pending_tasks(job, "已取消")
@@ -387,8 +481,19 @@ class Engine:
             self._drain_pending()
 
     def _drain_pending(self) -> None:
+        if self._paused:
+            return
+        t = self._job_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            return
         while self._pending_jobs:
-            job = self._pending_jobs.pop(0)
+            job = self._pending_jobs[0]
+            if job.paused:
+                if all(j.paused for j in self._pending_jobs):
+                    break  # 全被挂起：无任务可跑，等 resume
+                self._pending_jobs.append(self._pending_jobs.pop(0))
+                continue  # 挂起者移尾，找下一个
+            self._pending_jobs.pop(0)
             self._job_thread = threading.Thread(target=self._run_job, args=(job,), daemon=True)
             self._job_thread.start()
             break

@@ -33,6 +33,7 @@ interface AppState {
   pageSize: number;          // 任务分页：每页行数
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
   _summary: JobSummary | null; // 最近一次 /api/jobs/summary（serve 累计口径；null=回退行计数）
+  _jobActive: Map<string, boolean>; // engine|job_id -> 该任务是否有文件运行中（单任务挂起可用性）
   extractMode: "auto" | "local" | "server";
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
@@ -71,6 +72,7 @@ const state: AppState = {
   pageSize: 20,
   _jobs: [],
   _summary: null,
+  _jobActive: new Map(),
   extractMode: savedExtract === "auto" || savedExtract === "local" || savedExtract === "server"
     ? savedExtract
     : "auto",
@@ -88,7 +90,7 @@ const PLANE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="current
 
 const STATUS_ZH: Record<string, string> = {
   running: "运行中", done: "完成", error: "失败",
-  skipped: "跳过", canceled: "已取消", pending: "排队",
+  skipped: "跳过", canceled: "已取消", pending: "排队", paused: "已暂停",
 };
 
 function fmtDuration(s: number | null | undefined): string {
@@ -554,6 +556,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <span class="tag">${esc(e.device || "—")}</span>
       <span class="tag">v${esc(e.version || "—")}</span>
       <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
+      ${e.paused ? `<span class="tag tag-paused" title="服务队列已挂起：运行中任务跑完后不再开新任务（看板「继续任务」或单任务「继续」恢复）">已暂停</span>` : ""}
       ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
     </div>`;
   }
@@ -613,9 +616,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function jobRowData(j: JobRow, now: number) {
     const pct = Math.round((j.progress || 0) * 100);
     const isRun = j.status === "running";
-    // 位置列：运行中显示当前处理阶段（服务端日志事件驱动），终态显示时间轴位置
-    const pos = isRun
-      ? (j.phase_detail || "—")
+    // 服务单任务挂起：行 status 仍是 pending，展示态归一为「已暂停」
+    const st = j.paused ? "paused" : j.status;
+    const paused = st === "paused";
+    // 位置列：运行中/已暂停显示当前处理阶段（服务端日志事件驱动），终态显示时间轴位置
+    const pos = isRun || paused
+      ? (j.phase_detail || (paused ? "已暂停（等待继续）" : "—"))
       : (j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—"));
     const elapsed = j.created ? fmtDuration((j.finished || now) - j.created) : "—";
     let eta = "";
@@ -656,11 +662,33 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<span class="wb-tag sub-exist" title="提交前检测到${SUB_SRC[j.sub_status]}，经确认继续生成">已有字幕</span>`
       : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
-    const retry = j.status === "skipped" && j.job_id && !state.retried.has(retryKey)
-      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
-      : (j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
-    // 取消（运行中/排队）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
-    const cancel = (j.status === "running" || j.status === "pending") && j.job_id
+    const isServeRow = !!j.job_id;
+    const jobActive = isServeRow && state._jobActive.get(retryKey) === true;
+    // 跳过（服务行）：删旧字幕重新生成
+    const retry = isServeRow && j.status === "skipped" && !state.retried.has(retryKey)
+      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" data-mode="regen" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
+      : (isServeRow && j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
+    // 失败（服务行，serve 0.2.3+）：直接重新入队，不删已生成字幕
+    const srvRetry = isServeRow && j.status === "error" && !state.retried.has(retryKey)
+      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" data-mode="error" title="将该文件重新入队生成（不删已生成字幕）">&#8635; 重试</button>`
+      : "";
+    // 单任务挂起/恢复（服务行，serve 0.2.3+；仅排队中且任务空闲可挂起，运行中请用取消）
+    const pauseJobBtn = isServeRow && !!t.pauseJob && !j.paused && j.status === "pending" && !jobActive
+      ? `<button type="button" class="dl-btn pause-job" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="挂起排队中的任务（不占服务并发；运行中的任务请改用取消）">&#9208; 暂停</button>`
+      : "";
+    const resumeJobBtn = isServeRow && !!t.resumeJob && j.paused
+      ? `<button type="button" class="dl-btn resume-job" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="恢复挂起的任务，重新排队等待服务并发">&#9654; 继续</button>`
+      : "";
+    // 本机管线行（工作台本机任务：无 job_id 但有 task_id + 本机视频路径）：
+    // 失败→重试 / 已暂停→继续（均=重提取音轨并重提交）；浏览器上传任务无本机路径，不给按钮
+    const isLocalRow = !isServeRow && !!j.task_id && !!j.local_path && !!t.rerunLocal;
+    const localAct = isLocalRow && (j.status === "error" || j.status === "paused")
+      ? (j.status === "paused"
+        ? `<button type="button" class="dl-btn resume-job rerun-local" data-tid="${esc(j.task_id)}" data-mode="resume" title="继续：重新提取音轨并重新提交（本机视频需仍存在）">&#9654; 继续</button>`
+        : `<button type="button" class="dl-btn retry rerun-local" data-tid="${esc(j.task_id)}" data-mode="error" title="重试：重新提取音轨并重新提交（本机视频需仍存在）">&#8635; 重试</button>`)
+      : "";
+    // 取消（运行中/排队，未挂起）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
+    const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
       : "";
     // 换服务重跑（仅 desktop）：终态行复用本地音轨缓存向其他服务提交新任务
@@ -669,15 +697,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [j.status, j.engine, j.file, sub, dl, pv, retry, rerunBtn, pos, wb, ss, cancel].join("\u0001");
+    const core = [j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
       <div class="job-cell">${esc(j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(j.status)}"><i></i>${STATUS_ZH[j.status] || esc(j.status)}</span>${wb}${ss}</div>
+      <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${pv}${retry}${rerunBtn}${cancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -699,6 +727,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 服务端任务表只留最近 200 条，行计数在大批量任务下必然少算；
     // summary 不可用（老服务端/请求失败）时回退现行行计数。
     let running: number, done: number, skipped: number, failed: number;
+    const pausedCount = state._summary && typeof state._summary.paused === "number"
+      ? state._summary.paused
+      : rows.filter((r) => r.status === "paused" || r.paused).length;
     if (state._summary) {
       running = state._summary.running;
       done = state._summary.done;
@@ -714,7 +745,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       `<span class="stat${running ? " s-run" : ""}">进行中 <b>${running}</b></span>` +
       `<span class="stat">完成 <b>${done}</b></span>` +
       `<span class="stat">跳过 <b>${skipped}</b></span>` +
-      `<span class="stat">失败 <b>${failed}</b></span>`;
+      `<span class="stat">失败 <b>${failed}</b></span>` +
+      `<span class="stat${pausedCount ? " s-paused" : ""}">已暂停 <b>${pausedCount}</b></span>`;
+    renderPauseAllBtn();
+
+    // 单任务挂起可用性：同任务任一文件运行中 → 服务侧拒绝挂起（409），行级「暂停」隐藏
+    const jobActive = new Map<string, boolean>();
+    for (const r of rows) {
+      if (r.job_id && r.status === "running") jobActive.set(r.engine + "|" + r.job_id, true);
+    }
+    state._jobActive = jobActive;
 
     const filtered = visibleRows(rows);
 
@@ -744,13 +784,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         row._html = d.html;
         row.innerHTML = d.html;
         if (j.created) row.dataset.created = String(j.created);
+        row.classList.toggle("paused", j.paused === true || j.status === "paused");
         list.appendChild(row);
         rowMap.set(key, row);
       } else if (row._core !== d.core) {
         row._core = d.core;
         row._html = d.html;
         row.innerHTML = d.html;
-        row.className = "job-grid job-row" + (j.status === "running" ? " running" : "");
+        row.className = "job-grid job-row" + (j.status === "running" ? " running" : "")
+          + (j.paused || j.status === "paused" ? " paused" : "");
       }
       patchJobRow(row, d.pct, d.eta, d.pos, d.elapsed);
     }
@@ -766,10 +808,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function visibleRows(rows: JobRow[]) {
     return rows.filter((r) =>
       state.filter === "all" ? true :
-      // 进行中 = 运行中 + 排队（serve pending）；已完成 = 全部终态（done/失败/跳过/已取消）
+      // 进行中 = 运行中 + 排队（serve pending）+ 已暂停；已完成 = 全部终态（done/失败/跳过/已取消）
       state.filter === "running"
-        ? r.status === "running" || r.status === "pending"
-        : r.status !== "running" && r.status !== "pending");
+        ? r.status === "running" || r.status === "pending" || r.status === "paused" || r.paused
+        : r.status !== "running" && r.status !== "pending" && r.status !== "paused" && !r.paused);
   }
 
   function renderPager(total: number) {
@@ -809,6 +851,54 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   jobList.onclick = async (ev) => {
+    // 本机管线任务 重试/继续（重提取音轨并重提交）
+    const rl = (ev.target as HTMLElement).closest(".rerun-local") as HTMLButtonElement | null;
+    if (rl && !rl.disabled && t.rerunLocal) {
+      const tid = rl.dataset.tid || "";
+      const isResume = rl.dataset.mode === "resume";
+      rl.disabled = true; rl.textContent = isResume ? "继续中…" : "重试中…";
+      try {
+        await t.rerunLocal(tid);
+        toast(isResume ? "已继续（重新提取音轨并重新提交）" : "已重新提交（重新提取音轨）", "ok");
+      } catch (e) {
+        toast(`${isResume ? "继续" : "重试"}失败：${(e as Error).message}`, "err");
+        rl.disabled = false; rl.textContent = isResume ? "▶ 继续" : "↻ 重试";
+      }
+      refresh();
+      return;
+    }
+    // 单任务挂起（排队中）
+    const pb = (ev.target as HTMLElement).closest(".pause-job") as HTMLButtonElement | null;
+    if (pb && !pb.disabled && t.pauseJob) {
+      const eng = pb.dataset.eng || "", jid = pb.dataset.jid || "";
+      const name = pb.closest(".job-row")?.querySelector(".fn")?.textContent || "";
+      pb.disabled = true; pb.textContent = "挂起中…";
+      try {
+        await t.pauseJob(eng, jid);
+        toast(`「${name}」已挂起（不占服务并发，可随时继续）`, "ok");
+      } catch (e) {
+        toast(`挂起失败：${(e as Error).message}`, "err");
+        pb.disabled = false; pb.textContent = "⏸ 暂停";
+      }
+      refresh();
+      return;
+    }
+    // 单任务恢复（挂起 → 重新排队）
+    const rj = (ev.target as HTMLElement).closest(".resume-job") as HTMLButtonElement | null;
+    if (rj && !rj.disabled && t.resumeJob) {
+      const eng = rj.dataset.eng || "", jid = rj.dataset.jid || "";
+      const name = rj.closest(".job-row")?.querySelector(".fn")?.textContent || "";
+      rj.disabled = true; rj.textContent = "恢复中…";
+      try {
+        await t.resumeJob(eng, jid);
+        toast(`「${name}」已恢复排队`, "ok");
+      } catch (e) {
+        toast(`恢复失败：${(e as Error).message}`, "err");
+        rj.disabled = false; rj.textContent = "▶ 继续";
+      }
+      refresh();
+      return;
+    }
     const rb = (ev.target as HTMLElement).closest(".rerun") as HTMLButtonElement | null;
     if (rb && !rb.disabled) {
       if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
@@ -843,17 +933,69 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const name = tr?.querySelector(".fn")?.textContent || "";
     const jid = b.dataset.jid || "", eng = b.dataset.eng || "";
     state.retried.add(eng + "|" + jid);
-    b.disabled = true; b.textContent = "重新生成中…";
+    const isErrRetry = b.dataset.mode === "error";
+    b.disabled = true; b.textContent = isErrRetry ? "重试中…" : "重新生成中…";
     try {
       const d = await t.retryJob(eng, jid);
       const oldInfo = state.writeBackJobs.get(eng + "|" + jid);
       if (oldInfo) state.writeBackJobs.set(eng + "|" + d.jobId, oldInfo);
-      toast(`「${name}」已删旧字幕并重新提交 → 任务 ${d.jobId}`, "ok");
+      toast(isErrRetry
+        ? `「${name}」已重新入队 → 任务 ${d.jobId}`
+        : `「${name}」已删旧字幕并重新提交 → 任务 ${d.jobId}`, "ok");
       refresh();
     } catch (e) {
       state.retried.delete(eng + "|" + jid);
-      toast(`重新生成失败：${(e as Error).message}`, "err");
+      toast(`${isErrRetry ? "重试" : "重新生成"}失败：${(e as Error).message}`, "err");
       refresh();
+    }
+  };
+
+  // ---------- 全局暂停 / 继续（web 工作台：本机管线闸 + 各在线服务队列代理） ----------
+  // 按钮显隐跟随 transport 能力（desktop 形态无 /api/pause → 恒隐藏，像素不变）
+  function renderPauseAllBtn() {
+    const btn = $("job-pause-all") as HTMLButtonElement;
+    if (!t.pauseAll) { btn.hidden = true; return; }
+    const pausedAll = !!state._summary?.paused_all;
+    btn.hidden = false;
+    btn.classList.toggle("on", pausedAll);
+    const label = pausedAll ? "▶ 继续任务" : "⏸ 暂停所有";
+    if (btn.textContent !== label) btn.textContent = label;
+    if (state.busy) btn.disabled = true;
+  }
+
+  ($("job-pause-all") as HTMLButtonElement).onclick = async () => {
+    if (!t.pauseAll) return;
+    if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    const want = !state._summary?.paused_all;
+    const btn = $("job-pause-all") as HTMLButtonElement;
+    if (want) {
+      const ok = window.confirm(
+        "暂停所有任务？\n\n" +
+        "· 本机管线（音轨提取 / 派发）不再开新任务，排队中的立即挂起\n" +
+        "· 各在线服务队列同步挂起；运行中的任务会跑完当前影片\n" +
+        "· 已入队的批量任务不受影响，随时可「继续任务」恢复\n\n" +
+        "适合在发布新版客户端前冻结队列，避免发版期间任务丢失。",
+      );
+      if (!ok) return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await t.pauseAll(want);
+      const bad = res.engines.filter((e) => !e.ok);
+      const goodN = res.engines.length - bad.length;
+      const badTxt = bad.map((e) => `${e.engine}：${e.error || "失败"}`).join("；");
+      if (bad.length) {
+        toast(`${want ? "已暂停" : "已继续"}本机管线${goodN ? ` + ${goodN} 个服务队列` : ""}；${badTxt}`, "err");
+      } else {
+        toast(want
+          ? `已暂停所有任务（本机管线 + ${goodN} 个服务队列）`
+          : "已继续所有任务", "ok");
+      }
+      refresh();
+    } catch (e) {
+      toast(`${want ? "暂停" : "继续"}失败：${(e as Error).message}`, "err");
+    } finally {
+      btn.disabled = state.busy;
     }
   };
 

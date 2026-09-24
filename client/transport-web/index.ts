@@ -1,7 +1,9 @@
 // web 形态 transport：所有请求走工作台 /api/*（FastAPI 聚合器，API Key 藏服务端）。
 // 端点与迁移前 app.js 内联 fetch/XHR 完全一致，行为 1:1。
 
-import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
+import {
+  TransportError, type PauseAllResult, type Transport, type UploadDispatch, type UploadProgress,
+} from "../core/transport";
 import type {
   ConfigItem, Engine, Health, JobRow, FsBrowseResult, ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
@@ -29,6 +31,19 @@ async function jput(url: string, body: unknown): Promise<void> {
     body: JSON.stringify(body),
   });
   if (r.ok) return;
+  let msg = String(r.status);
+  try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch (_e) {}
+  throw new TransportError(msg);
+}
+
+/** 带 detail 的 POST 写操作：成功返回 JSON，失败 throw(detail 或 "<status>") */
+async function jpost<T>(url: string, body?: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (r.ok) return (await r.json()) as T;
   let msg = String(r.status);
   try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch (_e) {}
   throw new TransportError(msg);
@@ -132,6 +147,19 @@ export const webTransport: Transport = {
     try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch (_e) {}
     throw new TransportError(msg);
   },
+
+  // 全局暂停/继续：本机管线闸 + 代理所有在线服务队列（离线/版本过旧逐个降级，不阻塞整体）
+  pauseAll: (paused) => jpost<PauseAllResult>("/api/pause", { paused }),
+  // 单任务挂起/恢复（serve 0.2.3+；409 透传服务侧文案：运行中不可挂起等）
+  pauseJob: (engine, jobId) =>
+    jpost<{ ok: boolean; job_id: string; status: string }>(
+      `/api/jobs/${encodeURIComponent(engine)}/${encodeURIComponent(jobId)}/pause`),
+  resumeJob: (engine, jobId) =>
+    jpost<{ ok: boolean; job_id: string; status: string }>(
+      `/api/jobs/${encodeURIComponent(engine)}/${encodeURIComponent(jobId)}/resume`),
+  // 本机任务 重试/继续：error 或 已暂停 且本机视频仍在 → 重提取重提交
+  rerunLocal: (taskId) =>
+    jpost<{ ok: boolean; task_id: string }>(`/api/local/${encodeURIComponent(taskId)}/rerun`),
 
   getConfig: (name) =>
     jgetOrDetail<{ items: ConfigItem[] }>(

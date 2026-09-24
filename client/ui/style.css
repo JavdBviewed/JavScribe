@@ -24,6 +24,8 @@
   --err: #cc3340;
   --err-soft: rgba(204, 51, 64, 0.12);
   --skip: #8a8577;
+  --pause: #5c6f82;
+  --pause-soft: rgba(92, 111, 130, 0.12);
   --scanline: none;
   --shadow: 0 1px 2px rgba(32, 36, 42, 0.05), 0 8px 24px -12px rgba(32, 36, 42, 0.18);
   --shadow-lift: 0 2px 4px rgba(32, 36, 42, 0.06), 0 14px 30px -12px rgba(32, 36, 42, 0.25);
@@ -230,6 +232,7 @@ input:focus, select:focus {
   background: var(--surface-2);
 }
 .tag.hot { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.tag.tag-paused { color: var(--pause); border-color: var(--pause); background: var(--pause-soft); }
 .wb-tag {
   font-size: 10.5px;
   font-weight: 500;
@@ -306,6 +309,8 @@ input:focus, select:focus {
 .stat b { font-weight: 700; color: var(--fg); }
 .stat.s-run { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .stat.s-run b { color: inherit; }
+.stat.s-paused { border-color: var(--pause); color: var(--pause); background: var(--pause-soft); }
+.stat.s-paused b { color: inherit; }
 .seg {
   display: flex;
   padding: 3px;
@@ -330,6 +335,16 @@ input:focus, select:focus {
   background: var(--accent-soft);
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+.job-pause-all {
+  border-color: var(--line-strong);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.job-pause-all.on {
+  border-color: var(--pause);
+  color: var(--pause);
+  background: var(--pause-soft);
 }
 
 /* ---------- jobs ---------- */
@@ -422,6 +437,10 @@ input:focus, select:focus {
 .p-done { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
 .p-error { color: var(--err); background: var(--err-soft); border-color: transparent; }
 .p-skipped { color: var(--skip); }
+.p-paused { color: var(--pause); background: var(--pause-soft); border-color: transparent; }
+.p-paused i { animation: none; opacity: 0.65; }
+/* 已挂起行：整行降饱和提示（不遮数据） */
+.job-row.paused { opacity: 0.78; }
 .prog { display: flex; align-items: center; gap: 8px; }
 .bar {
   flex: 1;
@@ -464,6 +483,9 @@ input:focus, select:focus {
 .dl-btn:active { transform: scale(0.96); }
 
 .job-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+/* 「⏸ 暂停」（行级挂起排队任务）：中性灰，区别于绿色下载键 */
+.dl-btn.pause-job { border-color: var(--pause); color: var(--pause); background: var(--pause-soft); }
+.dl-btn.pause-job:hover { box-shadow: 0 3px 10px -3px var(--pause); }
 /* 「仍要重新生成」：accent 琥珀色，区别于绿色下载键 */
 .dl-btn.retry { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .dl-btn.retry:hover { box-shadow: 0 3px 10px -3px var(--accent); }

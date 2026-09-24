@@ -75,10 +75,13 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
     ["服务", "文件", "状态", "进度", "位置", "耗时", ""],
   );
   const stats = page.locator("#job-stats .stat");
-  await expect(stats).toHaveCount(4);
+  await expect(stats).toHaveCount(5);
   expect(await stats.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["进行中 0", "完成 0", "跳过 0", "失败 0"],
+    ["进行中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0"],
   );
+  // 全局暂停按钮（web 形态有 /api/pause；desktop 形态恒隐藏）
+  await expect(page.locator("#job-pause-all")).toBeVisible();
+  await expect(page.locator("#job-pause-all")).toHaveText("⏸ 暂停所有");
   const filters = page.locator("#job-filter button");
   await expect(filters).toHaveCount(3);
   expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["全部", "进行中", "已完成"]);

@@ -19,6 +19,8 @@ export interface Engine {
   device?: string | null;
   jobs_running?: number;
   error?: string | null;
+  /** 服务队列已挂起（serve 0.2.3+ /health.paused；旧服务无此字段） */
+  paused?: boolean;
 }
 
 /** GET /api/jobs 展平行（running 优先 + created 降序，工作台侧已排好） */
@@ -28,6 +30,12 @@ export interface JobSummary {
   done: number;
   skipped: number;
   failed: number;
+  /** 本机管线已暂停的行数（工作台 0.2.10+；老工作台无此字段） */
+  paused?: number;
+  /** 全局暂停开关（本机管线闸 + 各服务队列的目标态） */
+  paused_all?: boolean;
+  /** 各服务队列实际挂起状态（name -> paused） */
+  engines_paused?: Record<string, boolean>;
 }
 
 /** 客户端（本机工作台）并发设置：web 工作台 /api/client-config */
@@ -36,6 +44,8 @@ export interface ClientConfig {
   extract_workers: number;
   /** 转译并发（服务队列上限）：同时在途任务数，超出本机排队（1..16） */
   queue_cap: number;
+  /** 管线全局暂停（工作台持久化，重启不丢；与 /api/pause 联动） */
+  pipeline_paused?: boolean;
 }
 
 export interface JobRow {
@@ -56,6 +66,12 @@ export interface JobRow {
   created?: number | null;
   finished?: number | null;
   source_kind?: string | null;
+  /** 服务任务被单任务挂起（serve 0.2.3+ /jobs 行字段；排队挂起时行 status 仍是 pending） */
+  paused?: boolean;
+  /** 本机管线任务 id（仅工作台本机行：暂停/继续→重提取重提交用） */
+  task_id?: string | null;
+  /** 本机视频路径（仅本机扫描/监听行有；浏览器上传任务为 null → 无重试/继续按钮） */
+  local_path?: string | null;
   /** 本地扫描任务：提交前检测到的字幕状态（external/embedded/named）——制作图「已有字幕」提示 */
   sub_status?: string | null;
   output_files?: string[];
@@ -69,7 +85,7 @@ export interface UploadStatus {
   engine: string;
   name: string;
   size_mb: number;
-  phase: "extracting" | "dispatching" | "done" | "error";
+  phase: "extracting" | "dispatching" | "done" | "error" | "paused";
   progress: number;
   created: number;
   finished?: number | null;

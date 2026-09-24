@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-CiufW81V.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-2KvG_wJ1.css">
+  <script type="module" crossorigin src="/assets/index-D3csiJgR.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DHSkM0c-.css">
 </head>
 <body>
 <header>
@@ -182,6 +182,8 @@
         <button type="button" data-f="running">进行中</button>
         <button type="button" data-f="finished">已完成</button>
       </div>
+      <button type="button" id="job-pause-all" class="btn job-pause-all" hidden
+        title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">

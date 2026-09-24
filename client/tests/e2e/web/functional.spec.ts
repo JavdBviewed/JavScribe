@@ -3,6 +3,7 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES, makeScanDir,
   mockReset, mockSeed, mockPause, mockResume, mockConfigMode, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
+  resetPipelinePause, mockSpeed,
 } from "../helpers";
 import path from "node:path";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
@@ -17,8 +18,13 @@ let req: APIRequestContext;
 test.beforeEach(async ({ request }) => {
   req = request;
   await mockReset(request);
+  await resetPipelinePause(request);
   await cleanEngines(request);
   await waitForJobsEmpty(request);
+});
+// pipeline_paused 持久化在共享 web 数据目录：用例中途失败也要复位，防拖死后续本机管线用例
+test.afterEach(async () => {
+  await resetPipelinePause(req);
 });
 
 test("服务 CRUD 全路径", async () => {
@@ -55,8 +61,13 @@ test("upload-audio 全链路：只传 opus → 202 → done → srt 可下载", 
   const { upload_id } = await resp.json();
 
   // mock 收到的就是 opus 本身（字节级相等）→ 证明「只传音频」
+  // 202 是受理应答，派发是 web 后台异步任务 → 轮询等派发落 mock（防竞态）
+  await expect
+    .poll(async () => (await (await req.get(`${MOCK_URL}/_mock/uploads`)).json() as unknown[]).length, {
+      timeout: 10_000,
+    })
+    .toBe(1);
   const up = await (await req.get(`${MOCK_URL}/_mock/uploads`)).json();
-  expect(up).toHaveLength(1);
   expect(up[0].size).toBe(opus.length);
   expect(up[0].source).toBe("test-a.mp4");
 
@@ -141,7 +152,7 @@ test("retry：跳过任务 → 201 新任务；无跳过文件 → 409", async (
   await mockSeed(req, { n: 1, status: "skipped", skipped: 1 });
   const skipped = await waitForJobRow(req, (j: any) => j.status === "skipped");
   const r1 = await req.post(`${WEB_URL}/api/jobs/mock/${skipped.job_id}/retry`, { data: {} });
-  expect(r1.status()).toBe(200);
+  expect(r1.status()).toBe(201); // 成功重试 = 新建任务（serve 契约）
   const { job_id: newId } = await r1.json();
   expect(newId).toBeTruthy();
   // 新任务是 running（非 skipped）→ 再 retry 409
@@ -249,6 +260,129 @@ test("scan/submit：本机扫描提交 → 200 两条本地任务 → 派发到 
   expect((await req.post(`${WEB_URL}/api/scan/local/submit`, {
     data: { engine: "mock", files: [] }, headers: jh,
   })).status()).toBe(400);
+});
+
+test("pause API：全局暂停/继续（本机管线持久化 + 服务队列代理 + 离线引擎明细）", async () => {
+  // 暂停
+  const p1 = await req.post(`${WEB_URL}/api/pause`, { data: { paused: true }, headers: jh });
+  expect(p1.status()).toBe(200);
+  const d1 = await p1.json();
+  expect(d1.ok).toBe(true);
+  expect(d1.paused).toBe(true);
+  expect(d1.engines).toEqual([{ engine: "mock", ok: true, paused: true }]);
+  // mock 侧队列确实冻结（/health 带 paused，与 serve 0.2.3 契约一致）
+  const h1 = await (await req.get(`${MOCK_URL}/health`, { headers: { "x-api-key": MOCK_KEY } })).json();
+  expect(h1.paused).toBe(true);
+  // summary：paused_all 立即生效；engines_paused 走 poller 快照（1s tick）等一拍
+  await expect.poll(async () => {
+    const s2 = await (await req.get(`${WEB_URL}/api/jobs/summary`)).json();
+    return s2.paused_all === true && s2.engines_paused?.mock === true;
+  }, { timeout: 10_000 }).toBe(true);
+  // 幂等：重复暂停不报错
+  expect((await req.post(`${WEB_URL}/api/pause`, { data: { paused: true }, headers: jh })).status()).toBe(200);
+  // 离线引擎：条目带原因，不阻塞整体
+  await addEngine(req, { name: "offline-x", url: "http://127.0.0.1:9999" });
+  await waitForEngineListed(req, "offline-x");
+  const d3 = await (await req.post(`${WEB_URL}/api/pause`, { data: { paused: true }, headers: jh })).json();
+  const off = d3.engines.find((e: any) => e.engine === "offline-x");
+  expect(off.ok).toBe(false);
+  expect(off.error).toContain("服务离线");
+  const mok = d3.engines.find((e: any) => e.engine === "mock");
+  expect(mok.ok).toBe(true);
+  expect(mok.paused).toBe(true);
+  // 继续
+  const d4 = await (await req.post(`${WEB_URL}/api/pause`, { data: { paused: false }, headers: jh })).json();
+  expect(d4.paused).toBe(false);
+  const h2 = await (await req.get(`${MOCK_URL}/health`, { headers: { "x-api-key": MOCK_KEY } })).json();
+  expect(h2.paused).toBe(false);
+  await expect.poll(async () => {
+    const s2 = await (await req.get(`${WEB_URL}/api/jobs/summary`)).json();
+    return s2.paused_all === false && s2.engines_paused?.mock === false;
+  }, { timeout: 10_000 }).toBe(true);
+});
+
+test("job pause/resume API：排队可挂起；运行中 409；未挂起 resume 409", async () => {
+  // 慢速推进：保证 running 行在整个用例期间不会跑完（409 文案依赖「运行中」判定）
+  await mockSpeed(req, { step: 0.005, tickMs: 100 });
+  await mockSeed(req, { n: 2, status: "running", progress: 0.3, pending: 1 });
+  const pend = await waitForJobRow(req, (j: any) => j.status === "pending" && j.job_id);
+  const run = await waitForJobRow(req, (j: any) => j.status === "running" && j.job_id && j.job_id !== pend.job_id);
+  // 排队 → 挂起
+  const p1 = await req.post(`${WEB_URL}/api/jobs/mock/${pend.job_id}/pause`);
+  expect(p1.status()).toBe(200);
+  expect((await p1.json()).status).toBe("paused");
+  // 快照行带 paused 标记（status 仍 pending，展示态归一「已暂停」）
+  const pausedRow = await waitForJobRow(req, (j: any) => j.job_id === pend.job_id && j.paused === true);
+  expect(pausedRow.status).toBe("pending");
+  // 运行中 → 409（文案透传服务侧）
+  const p2 = await req.post(`${WEB_URL}/api/jobs/mock/${run.job_id}/pause`);
+  expect(p2.status()).toBe(409);
+  expect((await p2.json()).detail).toContain("任务运行中");
+  // 未挂起 → resume 409
+  const p3 = await req.post(`${WEB_URL}/api/jobs/mock/${run.job_id}/resume`);
+  expect(p3.status()).toBe(409);
+  expect((await p3.json()).detail).toContain("任务未在挂起状态");
+  // 恢复
+  const p4 = await req.post(`${WEB_URL}/api/jobs/mock/${pend.job_id}/resume`);
+  expect(p4.status()).toBe(200);
+  expect((await p4.json()).status).toBe("resumed");
+  await waitForJobRow(req, (j: any) => j.job_id === pend.job_id && j.paused === false);
+});
+
+test("error 任务 retry API：201 新任务重新入队；无重试项（已完成）409", async () => {
+  await mockSpeed(req, { step: 0.005, tickMs: 100 });
+  await mockSeed(req, { n: 2, status: "done", errors: 1 });
+  const errRow = await waitForJobRow(req, (j: any) => j.status === "error" && j.job_id);
+  expect(errRow.message).toContain("转写失败");
+  const r1 = await req.post(`${WEB_URL}/api/jobs/mock/${errRow.job_id}/retry`);
+  expect(r1.status()).toBe(201);
+  const d1 = await r1.json();
+  expect(d1.ok).toBe(true);
+  expect(d1.job_id).toBeTruthy();
+  expect(d1.job_id).not.toBe(errRow.job_id);
+  // 新任务同文件重新入队（running）
+  const nj = await waitForJobRow(req, (j: any) => j.job_id === d1.job_id && j.status === "running");
+  expect(nj.file).toBe("seed-001.mp4");
+  // 已完成任务无可重试项 → 409
+  const doneRow = await waitForJobRow(req, (j: any) => j.status === "done" && j.job_id && j.job_id !== errRow.job_id);
+  const r2 = await req.post(`${WEB_URL}/api/jobs/mock/${doneRow.job_id}/retry`);
+  expect(r2.status()).toBe(409);
+  // web 代理统一中文映射（serve 原文在 error 字段，不透传 detail）
+  expect((await r2.json()).detail).toContain("重新生成");
+});
+
+test("全局暂停闸：暂停期间提交停在 paused，恢复后提取+派发完成并回写", async () => {
+  await req.post(`${WEB_URL}/api/pause`, { data: { paused: true }, headers: jh });
+  const r = await req.post(`${WEB_URL}/api/scan/local/submit`, {
+    data: { engine: "mock", files: [path.join(SCAN_DIR, "AKDL-001.mp4")] },
+    headers: jh,
+  });
+  expect(r.status()).toBe(200);
+  const { upload_ids } = await r.json();
+  expect(upload_ids).toHaveLength(1);
+  const tid = upload_ids[0];
+  // 暂停中：任务停在闸前（phase=paused，不提取、不派发）
+  await expect.poll(
+    async () => (await (await req.get(`${WEB_URL}/api/uploads/${tid}`)).json()).phase,
+    { timeout: 10_000 },
+  ).toBe("paused");
+  expect(await (await req.get(`${MOCK_URL}/_mock/uploads`)).json()).toHaveLength(0);
+  // 恢复 → 提取 → 派发（phase=done 即服务已受理，job_id 就位）
+  await req.post(`${WEB_URL}/api/pause`, { data: { paused: false }, headers: jh });
+  let d: any = null;
+  for (let i = 0; i < 60; i++) {
+    d = await (await req.get(`${WEB_URL}/api/uploads/${tid}`)).json();
+    if (d.phase === "done" || d.phase === "error") break;
+    await new Promise((rs) => setTimeout(rs, 300));
+  }
+  expect(d.phase).toBe("done");
+  expect(d.job_id).toBeTruthy();
+  // 本机回写：字幕落回视频旁（与 scan/submit 用例同款还原）
+  const srtPath = path.join(SCAN_DIR, "AKDL-001.zh.srt");
+  const t0 = Date.now();
+  while (!existsSync(srtPath) && Date.now() - t0 < 90_000) await new Promise((rs) => setTimeout(rs, 500));
+  expect(existsSync(srtPath)).toBe(true);
+  unlinkSync(srtPath);
 });
 
 test("UI 持久化：autosave / 提取模式 / 所选服务 刷新后保持", async ({ page }) => {

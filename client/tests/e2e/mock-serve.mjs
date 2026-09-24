@@ -65,6 +65,7 @@ const state = {
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
   apiKeyMode: "ok",     // ok | no-key
   paused: false,
+  queuePaused: false,   // 用户面队列暂停（/jobs/pause|resume，与 serve 0.2.3 一致；mock 无队列，冻结全部在途）
   uploadDelayMs: 0,    // 测试控速：PUT /upload 收到全部字节后延迟应答（桌面端「上传中」帧基线用）
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
@@ -103,6 +104,7 @@ function jobOf(files, { source_kind = "remote", label = "", id } = {}) {
     source_kind,
     label,
     files,
+    paused: false,
   };
   state.jobs.set(j.id, j);
   return j;
@@ -128,7 +130,8 @@ function jobToDict(j, detail = false) {
     done: j.files.filter((t) => t.status === "done").length,
     skipped: j.files.filter((t) => t.status === "skipped").length,
     failed: j.files.filter((t) => t.status === "error").length,
-    state: j.files.every((t) => ["done", "skipped", "canceled"].includes(t.status)) ? "finished" : "running",
+    state: j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status)) ? "finished" : "running",
+    paused: j.paused,
   };
   const cur = j.files.find((t) => t.status === "running");
   if (cur) d.current = { ...cur };
@@ -141,8 +144,9 @@ function srtFor(name) {
 
 // ---- 推进 running 任务 ----
 setInterval(() => {
-  if (state.paused) return;
+  if (state.paused || state.queuePaused) return;
   for (const j of state.jobs.values()) {
+    if (j.paused) continue;
     for (const t of j.files) {
       if (t.status !== "running") continue;
       t.progress = Math.min(1, t.progress + state.step);
@@ -191,7 +195,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; return send(200, { ok: true }); }
       if (sub === "version") {
         return readBody().then((b) => {
           const v = b && JSON.parse(b).version;
@@ -215,16 +219,21 @@ const server = http.createServer((req, res) => {
       }
       if (sub === "seed") {
         return readBody().then((b) => {
-          const { n = 25, status = "done", skipped = 0, progress = 0 } = b ? JSON.parse(b) : {};
+          // 前 skipped 个 skipped、再 errors 个 error、再 pending 个 pending、其余 status
+          const { n = 25, status = "done", skipped = 0, errors = 0, pending = 0, progress = 0 } = b ? JSON.parse(b) : {};
           for (let i = 0; i < n; i++) {
-            const st = i < skipped ? "skipped" : status;
+            const st = i < skipped ? "skipped"
+              : i < skipped + errors ? "error"
+              : i < skipped + errors + pending ? "pending"
+              : status;
             const t = makeTask(`/media/jav/seed-${String(i + 1).padStart(3, "0")}.mp4`, {
               status: st, progress: st === "done" ? 1 : (st === "running" ? progress : 0),
-              phase: st === "done" ? "done" : "subtitling",
+              phase: st === "done" ? "done" : st === "pending" ? "queued" : "subtitling",
               started: Date.now() / 1000 - 600 - i * 30,
               finished: st === "done" ? Date.now() / 1000 - 600 + 40 - i * 30 : null,
               output_files: st === "done" ? [`/mock/out/seed-${String(i + 1).padStart(3, "0")}.zh.srt`] : [],
-              message: st === "skipped" ? "字幕已存在 /media/jav/seed-x.zh.srt" : "",
+              message: st === "skipped" ? "字幕已存在 /media/jav/seed-x.zh.srt"
+                : st === "error" ? "转写失败（mock）：模拟的推理错误" : "",
             });
             const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${String(i + 1).padStart(3, "0")}` });
             // 确定性 created（间隔 60s，seed-n 最新）：created 降序的分页断言不依赖真实毫秒
@@ -271,7 +280,7 @@ const server = http.createServer((req, res) => {
           else if (f.status === "error" || f.status === "canceled") stats.failed++;
         }
       }
-      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
     }
     if (parts[0] === "cache" && parts[1] === "check") {
       const sha1 = url.searchParams.get("sha1") || "";
@@ -415,13 +424,38 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ---- POST /jobs/pause|resume（用户面队列暂停，mock 无队列：冻结全部在途）----
+  if (req.method === "POST" && parts.length === 2 && parts[0] === "jobs" && (parts[1] === "pause" || parts[1] === "resume")) {
+    const changed = parts[1] === "pause" ? !state.queuePaused : state.queuePaused;
+    state.queuePaused = parts[1] === "pause";
+    return send(200, { ok: true, paused: state.queuePaused, changed });
+  }
+
+  // ---- POST /jobs/<id>/pause|resume（单任务挂起）----
+  if (req.method === "POST" && parts.length === 3 && parts[0] === "jobs" && (parts[2] === "pause" || parts[2] === "resume")) {
+    const j = state.jobs.get(parts[1]);
+    if (!j) return sendErr(404, "job not found（任务不存在或已过期）");
+    const finished = j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status));
+    if (finished) return sendErr(409, "任务已结束，无需操作");
+    if (parts[2] === "pause") {
+      if (j.files.some((t) => t.status === "running")) {
+        return sendErr(409, "任务运行中（仅排队任务可挂起，运行中请用取消）");
+      }
+      j.paused = true;
+      return send(200, { ok: true, job_id: parts[1], status: "paused" });
+    }
+    if (!j.paused) return sendErr(409, "任务未在挂起状态");
+    j.paused = false;
+    return send(200, { ok: true, job_id: parts[1], status: "resumed" });
+  }
+
   // ---- POST /jobs/<id>/retry ----
   if (req.method === "POST" && parts.length === 3 && parts[0] === "jobs" && parts[2] === "retry") {
     const j = state.jobs.get(parts[1]);
     if (!j) return sendErr(404, "job not found（任务不存在或已过期）");
-    const skipped = j.files.filter((t) => t.status === "skipped");
-    if (!skipped.length) return sendErr(409, "no retryable file（无跳过的文件，或任务已过期）");
-    const nj = jobOf(skipped.map((t) => makeTask(t.path, { status: "running", message: "重新生成" })), { source_kind: j.source_kind, label: j.label });
+    const retriable = j.files.filter((t) => t.status === "skipped" || t.status === "error");
+    if (!retriable.length) return sendErr(409, "no retryable file（无跳过或失败的文件可重试，或任务已过期）");
+    const nj = jobOf(retriable.map((t) => makeTask(t.path, { status: "running", message: "重新生成" })), { source_kind: j.source_kind, label: j.label });
     return send(201, { ok: true, job_id: nj.id });
   }
 

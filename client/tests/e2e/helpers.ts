@@ -38,6 +38,20 @@ export async function mockControl(req: APIRequestContext, path: string, body?: u
 }
 
 export const mockReset = (req: APIRequestContext) => mockControl(req, "reset");
+
+/**
+ * 全局暂停复位（幂等，失败忽略）：pipeline_paused 持久化在共享 web 数据目录的
+ * client_config.json，某用例中途失败没走 resume 会拖死后续所有本机管线用例
+ * （scan/submit、upload 全停在闸前）。每个触及本机管线的套件 beforeEach/afterEach 各一次。
+ */
+export async function resetPipelinePause(req: APIRequestContext) {
+  await req
+    .post(`${WEB_URL}/api/pause`, {
+      data: { paused: false },
+      headers: { "Content-Type": "application/json" },
+    })
+    .catch(() => {});
+}
 export const mockPause = (req: APIRequestContext) => mockControl(req, "pause");
 export const mockResume = (req: APIRequestContext) => mockControl(req, "resume");
 export const mockSeed = (req: APIRequestContext, body: unknown) => mockControl(req, "seed", body);
@@ -121,7 +135,9 @@ export function shot(page: Page, name: string, opts?: { fullPage?: boolean; elem
   const png = name.endsWith(".png") || name.endsWith(".webp") ? name : name + ".png";
   if (opts?.element) {
     return expect(page.locator(opts.element).first()).toHaveScreenshot(png, {
-      maxDiffPixels: 0,
+      // 弹窗/卡片圆角边框存在 ±15px 级亚像素 AA 抖动（两次渲染随机取帧），
+      // 真实 UI 变化在数百 px 以上，容差 20 只吸收 AA
+      maxDiffPixels: 20,
       animations: "disabled",
     });
   }

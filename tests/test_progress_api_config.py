@@ -52,6 +52,7 @@ class FakeEngine:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
         self.jobs: list = []
+        self.paused = False
 
     def log(self, _msg: str) -> None:
         pass

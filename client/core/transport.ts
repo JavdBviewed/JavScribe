@@ -11,6 +11,24 @@ import type {
 
 export type UploadProgress = (loadedBytes: number, totalBytes: number, pct: number) => void;
 
+/** 全局暂停/继续时单个引擎的执行结果（工作台 /api/pause 返回） */
+export interface PauseEngineResult {
+  engine: string;
+  ok: boolean;
+  /** ok 时：该服务队列挂起后的实际状态 */
+  paused?: boolean;
+  /** 失败文案（离线 / 版本过旧不支持等） */
+  error?: string;
+}
+
+/** POST /api/pause 受理结果：本机管线立即生效 + 各在线服务队列代理结果 */
+export interface PauseAllResult {
+  ok: boolean;
+  /** 本机管线当前暂停态（持久化） */
+  paused: boolean;
+  engines: PauseEngineResult[];
+}
+
 /** 上传（整片/音频）受理结果：202 → ok；非 202 → 错误文案。cached=服务端命中内容缓存（免上传） */
 export type UploadDispatch =
   | { ok: true; uploadId: string; sizeMb: number; cached?: boolean }
@@ -56,6 +74,15 @@ export interface Transport {
   retryJob(engine: string, jobId: string): Promise<{ jobId: string }>;
   /** 取消任务：排队立即收尾 / 运行中协作中止；已结束 throw("任务已结束，无需取消") */
   cancelJob(engine: string, jobId: string): Promise<{ status: string }>;
+  /** 全局暂停/继续（web 工作台：本机管线闸 + 代理所有在线服务队列）；
+   *  本机侧立即生效，服务侧逐个返回（离线/版本过旧不阻塞整体）；desktop 形态无此方法 */
+  pauseAll?(paused: boolean): Promise<PauseAllResult>;
+  /** 挂起单个服务任务（serve 0.2.3+；仅排队中可挂起，运行中 409）；失败 throw(detail) */
+  pauseJob?(engine: string, jobId: string): Promise<{ ok: boolean; job_id: string; status: string }>;
+  /** 恢复单个挂起的服务任务；失败 throw(detail) */
+  resumeJob?(engine: string, jobId: string): Promise<{ ok: boolean; job_id: string; status: string }>;
+  /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
+  rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 服务端设置项；Key 错误/版本过旧等 throw(detail 或 "HTTP <status>") */
   getConfig(name: string): Promise<ConfigItem[]>;
   /** 保存设置；失败 throw(detail 或 "<status>") */
