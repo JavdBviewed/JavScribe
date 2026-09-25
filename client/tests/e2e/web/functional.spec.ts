@@ -542,6 +542,92 @@ test("本机任务 暂停/继续：单任务 + 批量（暂停态落盘持久化
   }
 });
 
+test("本机任务改派：排队/暂停可改道（显式→auto→显式）；已入服务队列不可改；批量改派", async () => {
+  const m2ctl = (p2: string, body?: unknown) =>
+    req.post(`http://127.0.0.1:8302/_mock/${p2}`, {
+      data: body === undefined ? "{}" : body,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  await addEngine(req, { name: "mock2", url: "http://127.0.0.1:8302", api_key: MOCK_KEY });
+  await waitForEngineListed(req, "mock2");
+
+  const extra = path.join(SCAN_DIR, "REAS-001.mp4");
+  copyFileSync(fx("video-a.mp4"), extra);
+  try {
+    // 在途封顶 1：A 持槽到回写完成，B 稳定停在排队（可反复改派不丢任务）
+    expect((await req.put(`${WEB_URL}/api/client-config`, { data: { queue_cap: 1 }, headers: jh })).status()).toBe(200);
+    await mockSpeed(req, { step: 0.01, tickMs: 100 });
+
+    // 显式绑定 mock 提交（复刻 09-25「整批绑死单台」的提交方式）
+    const r = await req.post(`${WEB_URL}/api/scan/local/submit`, {
+      data: { engine: "mock", files: [path.join(SCAN_DIR, "AKDL-001.mp4"), extra] },
+      headers: jh,
+    });
+    expect(r.status()).toBe(200);
+    const { upload_ids } = (await r.json()) as { upload_ids: string[] };
+    const [tidA, tidB] = upload_ids;
+    const up = async (id: string) => (await (await req.get(`${WEB_URL}/api/uploads/${id}`)).json()) as any;
+
+    await expect.poll(async () => (await up(tidA)).job_id, { timeout: 30_000 }).toBeTruthy();
+    await expect.poll(async () => (await up(tidB)).phase === "queued", { timeout: 10_000 }).toBe(true);
+
+    // 排队中单条改派：mock → mock2 → auto（等待登记实时跟随新服务组）
+    let d = await req.post(`${WEB_URL}/api/local/${tidB}/reassign`, { data: { engine: "mock2" }, headers: jh });
+    expect(d.status()).toBe(200);
+    expect((await up(tidB)).engine).toBe("mock2");
+    d = await req.post(`${WEB_URL}/api/local/${tidB}/reassign`, { data: { engine: "auto" }, headers: jh });
+    expect(d.status()).toBe(200);
+    expect((await up(tidB)).engine).toBe("auto");
+    // 服务不存在 → 404；缺 engine → 400
+    expect((await req.post(`${WEB_URL}/api/local/${tidB}/reassign`, { data: { engine: "nope" }, headers: jh })).status()).toBe(404);
+    expect((await req.post(`${WEB_URL}/api/local/${tidB}/reassign`, { data: {}, headers: jh })).status()).toBe(400);
+
+    // A 已入服务队列 → 不可改派（409 透传）
+    const pA = await req.post(`${WEB_URL}/api/local/${tidA}/reassign`, { data: { engine: "mock2" }, headers: jh });
+    expect(pA.status()).toBe(409);
+    expect((await pA.json()).detail).toContain("已提交服务队列");
+
+    // 暂停 B → 批量改派回 mock2（paused 态同样可改；bulk assign 路径）
+    expect((await req.post(`${WEB_URL}/api/local/${tidB}/pause`)).status()).toBe(200);
+    const db = await (await req.post(`${WEB_URL}/api/jobs/bulk`, {
+      data: { action: "assign", engine: "mock2", task_ids: [tidB] }, headers: jh,
+    })).json() as any;
+    expect(db.succeeded).toBe(1);
+    expect(db.failed).toBe(0);
+    expect((await up(tidB)).engine).toBe("mock2");
+
+    // 服务行不可改派 → 单条 error，不拖垮整批
+    const db2 = await (await req.post(`${WEB_URL}/api/jobs/bulk`, {
+      data: { action: "assign", engine: "mock", task_ids: [], jobs: [{ engine: "mock", job_id: (await up(tidA)).job_id }] },
+      headers: jh,
+    })).json() as any;
+    expect(db2.succeeded).toBe(0);
+    expect(db2.failed).toBe(1);
+    expect(db2.results[0].error).toContain("仅支持本机");
+
+    // 继续 B → 派发到 mock2（字节落 mock2 而非 mock）；两条 srt 均回写本机
+    const dr = await (await req.post(`${WEB_URL}/api/jobs/bulk`, {
+      data: { action: "resume", task_ids: [tidB] }, headers: jh,
+    })).json() as any;
+    expect(dr.succeeded).toBe(1);
+    const want = ["AKDL-001.zh.srt", "REAS-001.zh.srt"];
+    const t0 = Date.now();
+    while (!want.every((n) => existsSync(path.join(SCAN_DIR, n))) && Date.now() - t0 < 90_000) {
+      await new Promise((rs) => setTimeout(rs, 500));
+    }
+    for (const n of want) expect(existsSync(path.join(SCAN_DIR, n))).toBe(true);
+    const up2 = (await (await req.get("http://127.0.0.1:8302/_mock/uploads")).json()) as any[];
+    expect(up2.some((u) => u.source === "REAS-001.mp4")).toBe(true);
+  } finally {
+    for (const n of ["AKDL-001.zh.srt", "REAS-001.zh.srt"]) rmSync(path.join(SCAN_DIR, n), { force: true });
+    rmSync(extra, { force: true });
+    await req.put(`${WEB_URL}/api/client-config`, { data: { queue_cap: 4 }, headers: jh }).catch(() => {});
+    await m2ctl("reset").catch(() => {});
+    await req.delete(`${WEB_URL}/api/engines/mock2`).catch(() => {});
+  }
+});
+
 test("metrics：/api/engines/{name}/metrics（GPU 快照 / 旧版服务 unsupported / 不可达 unreachable）", async () => {
   // mock 默认无 GPU → gpu=null（前端降级队列深度曲线）；历史预填 40 点
   const g1 = await (await req.get(`${WEB_URL}/api/engines/mock/metrics`)).json() as any;

@@ -168,9 +168,15 @@ export const webTransport: Transport = {
   pauseLocalTask: (taskId) =>
     jpost<{ ok: boolean; task_id: string; already?: boolean }>(
       `/api/local/${encodeURIComponent(taskId)}/pause`),
+  // 本机任务改派目的地服务（仅排队/已暂停；auto=派发时刻实时选最闲 → 409 透传）
+  reassignLocal: (taskId, engine) =>
+    jpost<{ ok: boolean; task_id: string; engine: string }>(
+      `/api/local/${encodeURIComponent(taskId)}/reassign`, { engine }),
   // 批量操作：taskIds=本机行，jobs=服务行（去重后）；单条失败不 throw
-  bulkJobs: (action, taskIds, jobs) =>
-    jpost<BulkResult>("/api/jobs/bulk", { action, task_ids: taskIds, jobs }),
+  // assign 动作需要 engine（auto 或已注册服务名），仅对本机排队/暂停行生效
+  bulkJobs: (action, taskIds, jobs, engine) =>
+    jpost<BulkResult>("/api/jobs/bulk",
+      { action, task_ids: taskIds, jobs, ...(engine ? { engine } : {}) }),
   // 服务监控快照（serve 0.2.4+；旧版服务 404 → ok=false unsupported）
   engineMetrics: (name) =>
     jget<MetricsResponse>("/api/engines/" + encodeURIComponent(name) + "/metrics"),

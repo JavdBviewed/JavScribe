@@ -87,11 +87,14 @@ export interface Transport {
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
   pauseLocalTask?(taskId: string): Promise<{ ok: boolean; task_id: string; already?: boolean }>;
-  /** 批量操作（400+ 场景）：pause/resume/retry/cancel；单条失败不 throw，结果逐条列出 */
+  /** 本机管线任务改派目的地服务（仅排队/已暂停，未提交服务；engine=auto 为派发时刻实时选最闲）；失败 throw(detail)；未实现则 UI 隐藏控件 */
+  reassignLocal?(taskId: string, engine: string): Promise<{ ok: boolean; task_id: string; engine: string }>;
+  /** 批量操作（400+ 场景）：pause/resume/retry/cancel/assign（assign 需 engine，仅本机排队/暂停行）；单条失败不 throw，结果逐条列出 */
   bulkJobs?(
-    action: "pause" | "resume" | "retry" | "cancel",
+    action: "pause" | "resume" | "retry" | "cancel" | "assign",
     taskIds: string[],
     jobs: { engine: string; job_id: string }[],
+    engine?: string,
   ): Promise<import("./types").BulkResult>;
   /** 服务监控快照（GPU/显存/调度/1h 历史）；ok=false 表示旧版服务不支持或服务不可达 */
   engineMetrics?(name: string): Promise<import("./types").MetricsResponse>;

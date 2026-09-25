@@ -82,6 +82,7 @@
         <span class="field-label">选择服务<span class="help" tabindex="0" data-tip="选择由哪台字幕服务端处理：音轨上传到该服务、字幕在该服务上生成。选「⚖ 自动均衡」（≥2 台服务时出现）则每台新任务派发时实时分给在途任务最少的在线服务；服务卡片上的「参与均衡」可临时把某台移出均衡池。">?</span></span>
         <select id="engine-select"></select>
       </label>
+      <div class="muted small" id="engine-hint"></div>
       <label class="field">
         <span class="field-label">音轨提取<span class="help" tabindex="0" data-tip="自动：小文件（≤1.6GB）在你自己的浏览器里提音轨、只传音频；大文件或本地提取失败时改传整片，由所选服务提取。浏览器本地首次约需下载 30MB 引擎，之后有缓存。">?</span></span>
         <select id="extract-select">
@@ -195,6 +196,8 @@
       <button type="button" class="dl-btn bulk-act" data-act="resume" title="继续所选：本机暂停/失败行重新提取音轨并提交；服务挂起行恢复排队">&#9654; 继续</button>
       <button type="button" class="dl-btn bulk-act" data-act="retry" title="重试所选：失败/跳过的服务任务重新入队；本机失败行重新提取提交">&#8635; 重试</button>
       <button type="button" class="dl-btn bulk-act" data-act="cancel" title="取消所选服务任务：排队立即终止，运行中检查点中止，已生成字幕保留">&#10006; 取消</button>
+      <select id="job-bulk-engine" class="bulk-engine-sel" title="改派目的地服务（仅本机排队/暂停行生效）"></select>
+      <button type="button" class="dl-btn bulk-act assign" data-act="assign" title="把所选本机排队/暂停任务改派到左侧选定服务：排队中实时改道，自动=派发时刻按实时负载选最闲">&#8680; 改派</button>
       <button type="button" class="icon-btn bulk-clear" title="清除全部选择">&#10005;</button>
     </div>
     <div id="job-list" class="table-wrap"></div>

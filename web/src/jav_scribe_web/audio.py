@@ -79,7 +79,10 @@ async def extract_audio_progress(
                 continue
             if duration <= 0:
                 continue
-            frac = min(1.0, int(line.strip()[12:]) / (duration * 1_000_000))
+            v = line.strip()[12:]
+            if not v.isdigit():  # ffmpeg 可能输出 N/A（无输出时间戳）
+                continue
+            frac = min(1.0, int(v) / (duration * 1_000_000))
             if frac - last >= 0.01:  # throttle: at most ~100 callbacks
                 last = frac
                 if on_progress is not None:

@@ -390,6 +390,21 @@ input:focus, select:focus {
   animation: rise 0.18s ease both;
 }
 .bulk-bar #job-bulk-info { font-size: 12.5px; font-weight: 700; color: var(--accent); margin-right: 4px; }
+.bulk-bar .bulk-engine-sel {
+  font: inherit; font-size: 12px; padding: 4px 6px; max-width: 170px;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--panel2, transparent);
+  color: var(--fg); margin-right: 2px;
+}
+.bulk-bar .bulk-act.assign { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.bulk-bar .bulk-act.assign:hover { box-shadow: 0 3px 10px -3px var(--accent); }
+.job-actions .reassign-sel {
+  font: inherit; font-size: 11.5px; padding: 3px 4px; max-width: 128px;
+  border-radius: 7px; border: 1px solid var(--line); background: var(--panel2, transparent); color: var(--fg);
+}
+.job-actions .reassign-go { padding: 4px 8px; border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.job-actions .reassign-go:hover { box-shadow: 0 3px 10px -3px var(--accent); }
+.job-actions .reassign-go:disabled { opacity: 0.6; cursor: default; box-shadow: none; }
+#engine-hint { margin: -3px 0 7px 2px; max-width: 520px; }
 .bulk-bar .bulk-act { margin: 0; }
 .bulk-bar .bulk-clear { margin-left: auto; color: var(--muted); }
 .bulk-bar .bulk-clear:hover { color: var(--err); }

@@ -159,12 +159,13 @@ class _Gate:
         """工作台重启恢复在途任务时认领槽位（启动期同步调用，尚无等待者）。"""
         self._held[task_id] = engine
 
-    async def acquire(self, task_id: str, engine: str = "") -> None:
+    async def acquire(self, task_id: str, get_engine) -> None:
+        """get_engine 每次唤醒重读：排队期间任务被「改派」时，等待登记与公平
+        判定立即跟随新服务组（实时改道，无需重提交）。"""
         async with self._cv:
             if task_id in self._held:
                 return
-            waiters = self._waiters.setdefault(engine, set())
-            waiters.add(task_id)
+            self._waiters.setdefault(get_engine(), set()).add(task_id)
         try:
             # 批量恢复场景：让并发等待者先完成登记，再做公平判定——否则恢复瞬间
             # 的空槽会被登记最早的长队列服务在「独自判定」时抢先吃掉
@@ -172,14 +173,23 @@ class _Gate:
             async with self._cv:
                 # asyncio.Condition.wait() 无谓词参数（与 threading 不同）：手动轮询条件。
                 # 有空槽且本服务在途数不超过等待服务中最少者 → 让位更轻的、取槽
-                while (
-                    len(self._held) >= self._limit
-                    or self._load(engine) > self._min_waiter_load()
-                ):
+                while True:
+                    engine = get_engine()
+                    if task_id not in self._waiters.get(engine, ()):
+                        # 改派生效：等待登记迁移到新服务组
+                        for s in self._waiters.values():
+                            s.discard(task_id)
+                        self._waiters.setdefault(engine, set()).add(task_id)
+                    if (
+                        len(self._held) < self._limit
+                        and self._load(engine) <= self._min_waiter_load()
+                    ):
+                        self._held[task_id] = engine
+                        break
                     await self._cv.wait()
-                self._held[task_id] = engine
         finally:
-            waiters.discard(task_id)
+            for s in list(self._waiters.values()):
+                s.discard(task_id)
 
     def release(self, task_id: str) -> None:
         if task_id not in self._held:
@@ -400,6 +410,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     _rr = itertools.count()
 
     def _auto_candidates() -> list[tuple[int, str]]:
+        """候选 = 在线且参与均衡的服务；负载 = 服务端在途任务数 + 本机已承诺给
+        该服务的在途槽（提取完待派发/等回写），比只看 serve 快照更贴近真实排队。"""
         out: list[tuple[int, str]] = []
         for entry in store.engines:
             if not entry.get("enabled", True):
@@ -407,7 +419,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             info = poller.engines.get(entry["name"])
             if info is None or not info.online:
                 continue
-            out.append((max(0, info.jobs_running), entry["name"]))
+            base = max(0, info.jobs_running)
+            local = sum(1 for e in _gate._held.values() if e == entry["name"])
+            out.append((base + local, entry["name"]))
         return out
 
     def pick_engine() -> str:
@@ -820,7 +834,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         task.phase = "queued"
         try:
             await _pause_gate_wait(task, "queued")
-            await _gate.acquire(task.id, task.engine)
+            await _gate.acquire(task.id, lambda: task.engine)
             try:
                 async with _local_limiter:
                     task.phase = "extracting"  # 拿到槽后进入提取阶段（行状态区分排队/提取）
@@ -1147,22 +1161,66 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         _spawn_local(task, video)
         return {"ok": True, "task_id": task.id}
 
+    def _reassign_local(task: UploadTask, engine: str) -> tuple[bool, str]:
+        """改派目的地服务：仅限未提交服务的任务（queued/paused，无 job_id）。
+        排队中任务的等待登记立即跟随新服务（_Gate 动态重读）；auto 在派发时刻
+        按实时负载解析。已进入提取/派发的不可改（上传可能已在途）。"""
+        if task.job_id:
+            return False, "已提交服务队列，等其完成即可"
+        if task.phase not in ("queued", "paused"):
+            return False, f"当前状态（{task.phase}）不支持改派（仅限排队/已暂停）"
+        if engine == AUTO:
+            if not _auto_candidates():
+                return False, "没有可分配的服务（全部离线或未参与均衡）"
+        elif store.get(engine) is None:
+            return False, "服务不存在"
+        task.engine = engine
+        _save_uploads_state()
+        return True, "ok"
+
+    @app.post("/api/local/{task_id}/reassign")
+    async def api_local_reassign(task_id: str, body: dict) -> dict:
+        """改派本机任务的目的地服务（排队/已暂停可用；auto=派发时刻实时选最闲）。"""
+        task = _uploads.get(task_id)
+        if task is None:
+            raise HTTPException(404, "任务不存在（已过期）")
+        engine = str((body or {}).get("engine") or "").strip()
+        if not engine:
+            raise HTTPException(400, "engine 必填（auto 或已注册服务名）")
+        if engine != AUTO and store.get(engine) is None:
+            raise HTTPException(404, "服务不存在")
+        ok, msg = _reassign_local(task, engine)
+        if not ok:
+            raise HTTPException(409, msg)
+        await _gate._wake()  # 排队中的等待者立即按新服务重判
+        return {"ok": True, "task_id": task.id, "engine": engine}
+
     @app.post("/api/jobs/bulk")
     async def api_jobs_bulk(body: dict) -> dict:
-        """批量操作（大批量任务场景）：action=pause/resume/retry/cancel。
+        """批量操作（大批量任务场景）：action=pause/resume/retry/cancel/assign。
 
-        task_ids → 本机扫描任务（pause/resume/retry；本机行未入服务队列，
+        task_ids → 本机扫描任务（pause/resume/retry；assign=改派目的地服务，
+        仅排队/已暂停可用，body 需带 engine；本机行未入服务队列，
         无「取消」语义 → cancel 返回 error 说明）；
-        jobs → 服务任务 [{engine, job_id}]（四个动作都代理到服务侧，
-        404/409 语义与单任务端点一致）。并发上限 8，单条失败不拖垮整批。
+        jobs → 服务任务 [{engine, job_id}]（其余动作都代理到服务侧，
+        404/409 语义与单任务端点一致；assign 不适用）。并发上限 8，单条失败不拖垮整批。
         """
         action = body.get("action")
         task_ids = body.get("task_ids") or []
         jobs = body.get("jobs") or []
-        if action not in ("pause", "resume", "retry", "cancel"):
-            raise HTTPException(400, "action 需要 pause/resume/retry/cancel")
+        if action not in ("pause", "resume", "retry", "cancel", "assign"):
+            raise HTTPException(400, "action 需要 pause/resume/retry/cancel/assign")
         if not isinstance(task_ids, list) or not isinstance(jobs, list):
             raise HTTPException(400, "task_ids/jobs 需要数组")
+        assign_engine = ""
+        if action == "assign":
+            assign_engine = str(body.get("engine") or "").strip()
+            if not assign_engine:
+                raise HTTPException(400, "assign 需要 engine（auto 或已注册服务名）")
+            if assign_engine == AUTO:
+                pass  # 候选存在性在逐条 _reassign_local 内校验（可给出更细错误）
+            elif store.get(assign_engine) is None:
+                raise HTTPException(404, "服务不存在")
 
         sem = asyncio.Semaphore(8)
         results: list[dict] = []
@@ -1204,6 +1262,11 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     _spawn_local(t, Path(t.local_path))
                     return True, "ok"
                 await _one(key, _r)
+            elif action == "assign":
+                async def _a():
+                    ok2, msg2 = _reassign_local(t, assign_engine)
+                    return ok2, msg2
+                await _one(key, _a)
             else:
                 async def _c():
                     return False, "本机任务尚未入服务队列，无「取消」；可「重试」重跑"
@@ -1229,6 +1292,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                         await eng.resume_job(jid)
                     elif action == "retry":
                         await eng.retry(jid)
+                    elif action == "assign":
+                        return False, "改派仅支持本机排队/暂停任务（已入服务队列的不可改道）"
                     else:
                         await eng.cancel(jid)
                     return True, "ok"

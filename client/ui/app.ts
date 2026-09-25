@@ -706,6 +706,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return j.engine + "|" + (j.job_id || "") + "|" + (j.file || "") + "|" + (j.created || "");
   }
 
+  // 改派目的地选项：auto（派发时刻实时选最闲）+ 已注册服务；cur 预置当前绑定
+  function reassignOptions(cur: string): string {
+    const curOk = cur === "auto" || (state.engines || []).some((e) => e.name === cur);
+    const opts = [`<option value="auto"${cur === "auto" ? " selected" : ""}>⚖ 自动</option>`];
+    for (const e of state.engines || []) {
+      if (e.enabled === false) continue;
+      opts.push(`<option value="${esc(e.name)}"${e.name === cur ? " selected" : ""}>${esc(e.name)}${e.online ? "" : "（离线）"}</option>`);
+    }
+    return curOk && cur !== "auto" ? opts.join("") : opts.join("");
+  }
+
   function jobRowData(j: JobRow, now: number) {
     const key = jobKey(j);
     const sel = state.selected.has(key);
@@ -786,6 +797,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const localPauseBtn = isLocalRow && !!t.pauseLocalTask && j.status === "running"
       ? `<button type="button" class="dl-btn pause-local" data-tid="${esc(j.task_id)}" title="暂停本机管线：停止排队/提取；恢复需重新提取音轨并提交">&#9208; 暂停</button>`
       : "";
+    // 本机行改派目的地服务（仅排队/已暂停、未提交服务）：实时改道——
+    // 排队中等待登记立即跟随新服务组；auto=派发时刻按实时负载选最闲
+    const reassignCtl = isLocalRow && !!t.reassignLocal && !j.job_id
+      && (j.phase === "queued" || j.phase === "paused")
+      ? `<select class="reassign-sel" data-tid="${esc(j.task_id)}" title="改派目的地服务（排队/暂停中实时生效）">${reassignOptions(j.engine)}</select>`
+        + `<button type="button" class="dl-btn reassign-go" data-tid="${esc(j.task_id)}" title="应用改派">&#10230;</button>`
+      : "";
     // 取消（运行中/排队，未挂起）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
     const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
@@ -796,7 +814,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, rerunBtn, pos, wb, ss, cancel].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel].join("\u0001");
     const html = `
       <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
@@ -805,7 +823,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
-      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${rerunBtn}${cancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -1028,6 +1046,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       refresh();
       return;
     }
+    // 本机行改派目的地服务（排队/已暂停实时生效）
+    const rg = (ev.target as HTMLElement).closest(".reassign-go") as HTMLButtonElement | null;
+    if (rg && !rg.disabled && t.reassignLocal) {
+      const tid = rg.dataset.tid || "";
+      const sel = rg.closest(".job-row")?.querySelector<HTMLSelectElement>(".reassign-sel");
+      const engine = sel?.value || "auto";
+      rg.disabled = true; rg.textContent = "…";
+      try {
+        await t.reassignLocal(tid, engine);
+        toast(engine === "auto"
+          ? "已改派为自动均衡（派发时刻按实时负载选最闲服务）"
+          : `已改派到「${engine}」`, "ok");
+      } catch (e) {
+        toast(`改派失败：${(e as Error).message}`, "err");
+      }
+      rg.disabled = false; rg.innerHTML = "&#10230;";
+      refresh();
+      return;
+    }
     // 单任务恢复（挂起 → 重新排队）
     const rj = (ev.target as HTMLElement).closest(".resume-job") as HTMLButtonElement | null;
     if (rj && !rj.disabled && t.resumeJob) {
@@ -1194,7 +1231,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     selAll.indeterminate = sel > 0 && sel < state._filteredKeys.length;
   }
 
-  const BULK_ACT_ZH: Record<string, string> = { pause: "暂停", resume: "继续", retry: "重试", cancel: "取消" };
+  const BULK_ACT_ZH: Record<string, string> = { pause: "暂停", resume: "继续", retry: "重试", cancel: "取消", assign: "改派" };
 
   function renderBulkBar() {
     const bar = $("job-bulk-bar");
@@ -1203,6 +1240,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     bar.hidden = false;
     const info = $("job-bulk-info");
     if (info) info.textContent = `已选 ${n} 项`;
+    // 改派目标下拉：auto + 已注册服务（sig 无变化不重建，避免吃掉用户选择）
+    const sel = $("job-bulk-engine") as HTMLSelectElement | null;
+    if (sel) {
+      const opts = (state.engines || []).filter((e) => e.enabled !== false);
+      const sig = "auto|" + opts.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
+      if (sel.dataset.sig !== sig) {
+        sel.dataset.sig = sig;
+        sel.innerHTML = `<option value="auto">⚖ 自动均衡（实时选最闲）</option>`
+          + opts.map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${e.online ? "" : "（离线）"}</option>`).join("");
+      }
+    }
   }
 
   const bulkBar = $("job-bulk-bar");
@@ -1220,9 +1268,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const btn = t0.closest<HTMLButtonElement>(".bulk-act");
     if (!btn || btn.disabled) return;
-    const act = btn.dataset.act as "pause" | "resume" | "retry" | "cancel";
+    const act = btn.dataset.act as "pause" | "resume" | "retry" | "cancel" | "assign";
     if (typeof t.bulkJobs !== "function") { toast("当前工作台版本不支持批量操作", "err"); return; }
     if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    const bulkEngine = act === "assign"
+      ? (($("job-bulk-engine") as HTMLSelectElement | null)?.value || "auto")
+      : "";
     // 勾选行拆成两类：本机任务（task_id，无 job_id）/ 服务任务（engine+job_id 去重）
     const taskIds: string[] = [];
     const jobs: Array<{ engine: string; job_id: string }> = [];
@@ -1237,6 +1288,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
     }
     if (!taskIds.length && !jobs.length) { toast("所选行暂无可操作任务（多为已完成行）", "err"); return; }
+    if (act === "assign" && !taskIds.length) { toast("改派仅支持本机排队/暂停行（服务行已入队，不可改道）", "err"); return; }
     if (act === "cancel") {
       const ok = window.confirm(
         `确认取消选中的 ${jobs.length ? jobs.length + " 个服务任务" : "任务"}？\n` +
@@ -1247,7 +1299,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     for (const b of Array.from(bulkBar.querySelectorAll<HTMLButtonElement>(".bulk-act"))) b.disabled = true;
     try {
-      const res = await t.bulkJobs(act, taskIds, jobs);
+      const res = await t.bulkJobs(act, taskIds, act === "assign" ? [] : jobs, bulkEngine || undefined);
+      if (act === "assign") jobs.length = 0; // 改派只作用于本机行，避免误报服务行结果
       const fails = res.results.filter((x) => !x.ok);
       if (res.failed) {
         const detail = fails.slice(0, 3).map((f) => `${f.key}：${f.error || "失败"}`).join("；");
@@ -1294,6 +1347,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
+  const engineHint = $("engine-hint") as HTMLDivElement | null;
+  function updateEngineHint() {
+    if (!engineHint) return;
+    const v = engineSelect.value;
+    engineHint.textContent = v === "auto"
+      ? "⚖ 自动均衡：每个任务派发时刻按实时负载选最闲服务（推荐）；任务表内可逐条/批量改派"
+      : (v ? `已绑定「${v}」：整批只发该服务、不参与均衡（任务表内可改派）` : "");
+  }
+
   function renderSelect(engines: Engine[]) {
     const sel = engineSelect;
     if (!engines.length) {
@@ -1313,6 +1375,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const sig = (canAuto ? "auto|" : "") + pool.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
     if (sel.dataset.sig === sig) {
       updateGo();
+      updateEngineHint();
       return;
     }
     const prev = sel.value;
@@ -1323,15 +1386,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     sel.innerHTML = autoOpt + pool
       .map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${engineHostHint(e)}${e.online ? "" : "（离线）"}</option>`)
       .join("");
-    // 现存选中（用户手选）> 持久化值 > 第一项
+    // 现存选中（用户本次手选）> auto（默认：派发时刻实时调度）> 第一项。
+    // 不再回读 localStorage 记忆值——历史记忆值导致整批静默绑死单台服务（09-25 批）。
     const prevValid = !!prev && (prev === "auto" ? canAuto : pool.some((e) => e.name === prev));
     if (prevValid) sel.value = prev;
-    else {
-      const saved = localStorage.getItem("javweb_engine");
-      const savedValid = !!saved && (saved === "auto" ? canAuto : pool.some((e) => e.name === saved));
-      if (savedValid) sel.value = saved;
-    }
+    else if (canAuto) sel.value = "auto";
     updateGo();
+    updateEngineHint();
   }
 
   function pendingCount() {
@@ -1355,6 +1416,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   engineSelect.onchange = () => {
     // 即时持久化：手选即生效，轮询刷新/重启后保留（修复「选了远程却提交到本地服务端」）
     if (engineSelect.value) localStorage.setItem("javweb_engine", engineSelect.value);
+    updateEngineHint();
     updateGo();
     watchPump();
   };
