@@ -67,6 +67,19 @@ def _extract_max_s() -> float:
     return 10800.0
 
 
+def _extract_retries() -> int:
+    """提取卡死后的自动重试次数（默认 2 次）。
+
+    实测（2026-09-25，DVMM-299 / MIDA-574-破解）：ffmpeg 7.1.5 会在特定文件
+    的特定位置间歇性长时间停滞（20s~数分钟，全线程 futex 睡眠，非磁盘 IO、
+    非解码坏包），重跑常可一次通过。卡死判定触发后换新 ffmpeg 进程重提取，
+    让管线自愈；其它错误（解码/IO/参数）不重试。
+    """
+    with contextlib.suppress(ValueError):
+        return int(os.environ.get("JAVWEB_EXTRACT_RETRIES", "2"))
+    return 2
+
+
 def _proc_cpu_ticks(pid: int) -> int | None:
     """子进程累计 CPU 时间片（utime+stime，Linux /proc）；不可用时 None。"""
     try:
@@ -190,3 +203,28 @@ async def extract_audio(src: Path) -> tuple[Path, int]:
     tmp = Path(name)
     size = await extract_audio_progress(src, tmp)
     return tmp, size
+
+
+async def extract_audio_retrying(
+    src: Path,
+    dest: Path,
+    on_progress: Callable[[float], None] | None = None,
+) -> int:
+    """extract_audio_progress + 卡死自动重试。
+
+    仅「提取卡死」判定触发自动重试（换进程重提取，进度回 0 重新爬）；
+    解码错误、IO 错误等直接抛出不重试。总尝试 = 1 + JAVWEB_EXTRACT_RETRIES
+    （默认 2，即最多 3 轮）；仍卡死时报错带已重试次数。
+    """
+    max_attempts = 1 + _extract_retries()
+    for attempt in range(max_attempts):
+        try:
+            return await extract_audio_progress(src, dest, on_progress=on_progress)
+        except AudioError as ex:
+            stuck = "提取卡死" in str(ex)
+            if not stuck or attempt + 1 >= max_attempts:
+                if stuck and attempt > 0:
+                    raise AudioError(f"{ex}（已自动重试 {attempt} 次）") from ex
+                raise
+            # 下一轮 extract_audio_progress 开头会把进度拉回 0.0
+    raise AssertionError("unreachable")

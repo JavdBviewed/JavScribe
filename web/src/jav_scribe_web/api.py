@@ -20,7 +20,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, localscan
-from .audio import extract_audio_progress, probe_duration
+from .audio import extract_audio_progress, extract_audio_retrying, probe_duration
 from .config import EngineStore
 from .engines.javscribe import JavScribeEngine
 from .poller import Poller
@@ -791,7 +791,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         try:
             try:
                 await _pause_gate_wait(task, "extracting")
-                size = await extract_audio_progress(
+                size = await extract_audio_retrying(
                     video_tmp,
                     audio_tmp,
                     on_progress=lambda frac: setattr(task, "progress", frac),
@@ -846,7 +846,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 async with _local_limiter:
                     task.phase = "extracting"  # 拿到槽后进入提取阶段（行状态区分排队/提取）
                     try:
-                        size = await extract_audio_progress(
+                        size = await extract_audio_retrying(
                             video_path,
                             audio_tmp,
                             on_progress=lambda frac: setattr(task, "progress", frac),

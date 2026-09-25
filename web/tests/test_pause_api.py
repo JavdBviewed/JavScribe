@@ -33,11 +33,11 @@ RUNNING_JOB = {
 
 def _make_client(td: str):
     store = EngineStore(td)
-    store.add("车间A", "http://10.0.0.1:8300")
+    store.add("车间A", "http://127.0.0.1:18301")
     store.add("车间B", "http://10.0.0.2:8300")
     poller = Poller(store)
     poller.engines = {
-        "车间A": EngineInfo("车间A", "http://10.0.0.1:8300", online=True, device="cuda",
+        "车间A": EngineInfo("车间A", "http://127.0.0.1:18301", online=True, device="cuda",
                             version="0.2.3", jobs_running=1),
         "车间B": EngineInfo("车间B", "http://10.0.0.2:8300", online=False, error="boom"),
     }
@@ -167,10 +167,10 @@ def test_rerun_local_paused_task() -> None:
         return 1024.0
 
     orig_p, orig_r = JavScribeEngine.pause_queue, JavScribeEngine.resume_queue
-    orig_extract = api_mod.extract_audio_progress
+    orig_extract = api_mod.extract_audio_retrying
     JavScribeEngine.pause_queue = fake_pause  # type: ignore[method-assign]
     JavScribeEngine.resume_queue = fake_pause  # type: ignore[method-assign]
-    api_mod.extract_audio_progress = blocking_extract  # type: ignore[assignment]
+    api_mod.extract_audio_retrying = blocking_extract  # type: ignore[assignment]
     try:
         with tempfile.TemporaryDirectory() as td:
             video = Path(td) / "FAKE-002.mp4"
@@ -196,7 +196,7 @@ def test_rerun_local_paused_task() -> None:
                 _wait_phase(client, tid, {"error"}, timeout=20)
     finally:
         JavScribeEngine.pause_queue, JavScribeEngine.resume_queue = orig_p, orig_r
-        api_mod.extract_audio_progress = orig_extract
+        api_mod.extract_audio_retrying = orig_extract
     print("  test_rerun_local_paused_task OK")
 
 

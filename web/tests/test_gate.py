@@ -15,13 +15,13 @@ def test_gate_capacity_and_rehold() -> None:
 
     async def scenario() -> None:
         g = _Gate(2)
-        await g.acquire("a", "svc-a")
+        await g.acquire("a", lambda: "svc-a")
         g.rehold("b", "svc-b")  # 重启恢复：同步认领槽
         assert g.held_count() == 2
         got = asyncio.Event()
 
         async def waiter() -> None:
-            await g.acquire("c", "svc-a")
+            await g.acquire("c", lambda: "svc-a")
             got.set()
 
         t = asyncio.create_task(waiter())
@@ -40,12 +40,12 @@ def test_gate_fairness_prevents_starvation() -> None:
 
     async def scenario() -> None:
         g = _Gate(2)
-        await g.acquire("a1", "svc-a")  # svc-a 在途 2 占满（127 长队列场景）
-        await g.acquire("a2", "svc-a")
+        await g.acquire("a1", lambda: "svc-a")  # svc-a 在途 2 占满（127 长队列场景）
+        await g.acquire("a2", lambda: "svc-a")
         order: list[str] = []
 
         async def wait_and_record(tid: str, eng: str) -> None:
-            await g.acquire(tid, eng)
+            await g.acquire(tid, lambda: eng)
             order.append(eng)
 
         tasks = [asyncio.create_task(wait_and_record(f"a{i}", "svc-a")) for i in range(3, 13)]
@@ -74,13 +74,13 @@ def test_gate_burst_resume_free_slot_to_lighter_engine() -> None:
 
     async def scenario() -> None:
         g = _Gate(4)
-        await g.acquire("a1", "svc-a")  # svc-a 在途 3 占多数（重启恢复场景）
-        await g.acquire("a2", "svc-a")
-        await g.acquire("a3", "svc-a")
+        await g.acquire("a1", lambda: "svc-a")  # svc-a 在途 3 占多数（重启恢复场景）
+        await g.acquire("a2", lambda: "svc-a")
+        await g.acquire("a3", lambda: "svc-a")
         order: list[str] = []
 
         async def wait_and_record(tid: str, eng: str) -> None:
-            await g.acquire(tid, eng)
+            await g.acquire(tid, lambda: eng)
             order.append(eng)
 
         # 一次性涌入（等价于 bulk resume）：svc-a 长队列在前，svc-b 仅 1 条
@@ -102,12 +102,12 @@ def test_gate_fairness_converges_balanced() -> None:
 
     async def scenario() -> None:
         g = _Gate(3)
-        await g.acquire("a1", "svc-a")
-        await g.acquire("b1", "svc-b")
+        await g.acquire("a1", lambda: "svc-a")
+        await g.acquire("b1", lambda: "svc-b")
         order: list[str] = []
 
         async def wait_and_record(tid: str, eng: str) -> None:
-            await g.acquire(tid, eng)
+            await g.acquire(tid, lambda: eng)
             order.append(eng)
 
         tasks = [asyncio.create_task(wait_and_record(f"a{i}", "svc-a")) for i in range(2, 7)]
@@ -141,11 +141,11 @@ def test_gate_set_limit_wakes() -> None:
 
     async def scenario() -> None:
         g = _Gate(1)
-        await g.acquire("a", "svc-a")
+        await g.acquire("a", lambda: "svc-a")
         got = asyncio.Event()
 
         async def waiter() -> None:
-            await g.acquire("b", "svc-b")
+            await g.acquire("b", lambda: "svc-b")
             got.set()
 
         t = asyncio.create_task(waiter())
