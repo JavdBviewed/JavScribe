@@ -54,6 +54,7 @@ const TITLEBAR_NAV = `
 `;
 
 // 原 web header 块（brand + hud）——桌面构建整体替换为 titlebar + nav（#health/#clock 迁入 titlebar）
+// 注：web header 里的仓库链接药丸随整块替换在桌面端自然移除（桌面壳有自更新/发布渠道，不放外链）
 const WEB_HEADER_BLOCK = `<header>
   <div class="brand">
     <span class="brand-dot" id="brand-dot"></span>
@@ -63,10 +64,23 @@ const WEB_HEADER_BLOCK = `<header>
     </div>
   </div>
   <div class="hud">
-    <span id="health" class="hud-item">连接中…</span>
+    <span class="hud-item"><span id="health">连接中…</span><span class="help" tabindex="0" data-tip="客户端版本 · 在线服务数：每 5 秒轮询一次。在线 = 服务端可达并正常上报；显示离线时检查服务端网络或容器是否在运行。">?</span></span>
     <span id="clock" class="hud-item mono">--:--:--</span>
+    <a class="hud-item repo-pill" href="https://github.com/JavdBviewed/JavScribe" target="_blank" rel="noopener noreferrer" title="JavScribe 开源仓库 · GitHub">
+      <svg class="repo-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span class="repo-name">JavScribe 仓库</span>
+    </a>
   </div>
 </header>
+`;
+
+// 视图 tab 条（web 形态）——桌面端用侧边栏导航，整体移除
+const VIEW_TABS_BLOCK = `<nav id="view-tabs" class="view-tabs" role="tablist" aria-label="视图切换">
+  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true">生成字幕</button>
+  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false">字幕任务<span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
+  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false">字幕服务</button>
+</nav>
+
 `;
 
 // 原 web footer 块（版本 + 更新 chip + 节奏提示）——桌面构建整体移除（#foot-ver/#up-chip 迁入新壳）
@@ -74,7 +88,7 @@ const WEB_FOOTER_BLOCK = `<footer>
   <span class="mono">JAVSCRIBE-WEB</span>
   <span id="foot-ver" class="muted mono"></span>
   <span id="up-chip" class="up-chip" role="button" tabindex="0" hidden></span>
-  <span class="muted">看板 5s · 生成 1s</span>
+  <span class="muted">看板 5s · 生成 1s<span class="help" tabindex="0" data-tip="页面自动刷新节奏：任务看板与服务状态每 5 秒轮询一次；生成进行中每秒轮询一次进度。">?</span></span>
 </footer>
 `;
 
@@ -84,6 +98,7 @@ const REWRITES = [
   ["<html lang=\"zh-CN\">", "<html lang=\"zh-CN\" class=\"desktop\">"],
   ["<body>", "<body class=\"desktop\">"],
   [WEB_HEADER_BLOCK, TITLEBAR_NAV],
+  [VIEW_TABS_BLOCK, ""],
   [WEB_FOOTER_BLOCK, ""],
   ["mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class=\"help\" tabindex=\"0\" data-tip=\"默认在你自己的浏览器里提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片，原片只到所选服务，不出该服务所在机器。\">?</span>",
    "mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class=\"help\" tabindex=\"0\" data-tip=\"在本机提取音轨，只上传 ~35MB 音频（无大小限制）；选「整片直传字幕服务」时完整视频直接传给所选服务。\">?</span>"],

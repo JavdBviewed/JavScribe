@@ -57,6 +57,9 @@ logs/
 # ---------- e2e 测试夹具（故意提交的媒体小文件） ----------
 !client/tests/e2e/fixtures/**
 
+# ---------- 内置示例音频（客户端试听 demo，故意提交的小文件） ----------
+!client/vendor/demo/**
+
 # ---------- Node / 前端工具 ----------
 node_modules/
 test-results/

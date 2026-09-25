@@ -124,6 +124,127 @@ header {
 }
 #clock { font-variant-numeric: tabular-nums; color: var(--fg); }
 
+/* 仓库链接：与 HUD 同形制的药丸，hover 点亮琥珀 */
+.repo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.repo-mark { flex: none; opacity: 0.9; }
+.repo-pill:hover, .repo-pill:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  transform: translateY(-1px);
+  outline: none;
+}
+.repo-pill:active { transform: translateY(0); }
+
+/* ---------- demo 效果速览 ---------- */
+.demo-card {
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 10px 14px 12px;
+  box-shadow: var(--shadow);
+}
+.demo-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.demo-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.demo-title { font-weight: 600; font-size: 13px; }
+.demo-play-btn { padding: 5px 12px; font-size: 12px; margin-left: 4px; }
+.demo-time { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.demo-caption { margin-top: 10px; display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+.demo-cue { flex: 1 1 300px; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.demo-jp { color: var(--muted); font-size: 13px; }
+.demo-zh {
+  margin-top: 3px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: color 0.25s, text-shadow 0.25s;
+}
+.demo-card.playing .demo-zh { color: var(--accent); text-shadow: 0 0 22px var(--accent-soft); }
+.demo-srt {
+  margin: 0;
+  flex: 0 1 250px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--hover-surface);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  white-space: pre;
+  overflow-x: auto;
+}
+@media (max-width: 640px) {
+  .demo-time { margin-left: 0; width: 100%; }
+}
+
+/* ---------- 视图 tab（web 形态；desktop 用侧边栏，见 body.desktop 规则） ---------- */
+.view-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 10px 28px 0;
+}
+.view-tab {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.view-tab:hover { color: var(--fg); border-color: var(--line-strong); }
+.view-tab.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.tab-badge {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  line-height: 1.4;
+}
+.view-tab.on .tab-badge { background: var(--fg); color: var(--bg); }
+
+/* web 形态视图切换：非 view-on 区块隐藏（desktop 有 body.desktop 专属规则） */
+main > section { display: none; }
+main > section.view-on { display: block; }
+
 /* ---------- layout ---------- */
 main {
   position: relative;
@@ -458,6 +579,7 @@ input:focus, select:focus {
 }
 .pg-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .pg-btn:disabled { opacity: 0.35; cursor: default; }
+.pg-btn.txt { width: auto; padding: 0 12px; font-size: 12px; }
 .job-head {
   display: grid;
   grid-template-columns: 28px 116px minmax(210px, 1fr) 116px 200px 126px 86px 96px;

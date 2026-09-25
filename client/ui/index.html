@@ -19,8 +19,18 @@
   <div class="hud">
     <span class="hud-item"><span id="health">连接中…</span><span class="help" tabindex="0" data-tip="客户端版本 · 在线服务数：每 5 秒轮询一次。在线 = 服务端可达并正常上报；显示离线时检查服务端网络或容器是否在运行。">?</span></span>
     <span id="clock" class="hud-item mono">--:--:--</span>
+    <a class="hud-item repo-pill" href="https://github.com/JavdBviewed/JavScribe" target="_blank" rel="noopener noreferrer" title="JavScribe 开源仓库 · GitHub">
+      <svg class="repo-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span class="repo-name">JavScribe 仓库</span>
+    </a>
   </div>
 </header>
+
+<nav id="view-tabs" class="view-tabs" role="tablist" aria-label="视图切换">
+  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true">生成字幕</button>
+  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false">字幕任务<span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
+  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false">字幕服务</button>
+</nav>
 
 <main>
   <section id="sec-engines">
@@ -50,9 +60,28 @@
     </div>
   </section>
 
-  <section id="sec-dispatch">
+  <section id="sec-dispatch" class="view-on">
     <div class="sec-head">
       <div class="sec-title"><span class="kicker">Generate</span><h2>生成字幕</h2></div>
+    </div>
+
+    <div id="demo-card" class="demo-card">
+      <div class="demo-head">
+        <span class="demo-kicker">Demo</span>
+        <span class="demo-title">效果速览：日语 → 中文字幕</span>
+        <button type="button" id="demo-play" class="btn demo-play-btn">&#9654; 试听</button>
+        <span id="demo-time" class="demo-time mono">0:00 / 0:03</span>
+      </div>
+      <div class="demo-caption">
+        <div class="demo-cue">
+          <span class="demo-jp">こんにちは、中国万歳！</span>
+          <span class="demo-zh" id="demo-zh">你好啊，中国万岁！</span>
+        </div>
+        <pre class="demo-srt mono" aria-label="示例 SRT">1
+00:00:00,300 --> 00:00:02,900
+你好啊，中国万岁！</pre>
+      </div>
+      <audio id="demo-audio" preload="auto" src="/demo/ja-hello.mp3"></audio>
     </div>
 
     <div id="drop" role="button" tabindex="0" aria-label="选择影片文件">
@@ -130,6 +159,7 @@
           <span id="scan-count" class="muted small mono"></span>
         </div>
         <div id="scan-table" class="table-wrap"></div>
+        <div id="scan-pager" class="pager" hidden></div>
       </div>
       <div class="scan-actions">
         <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 开始生成（0 项）</button>

@@ -27,6 +27,8 @@ interface AppState {
   scanMapped: boolean;
   scanResolvedPath: string;
   scanChecked: Set<string>;
+  scanPage: number;          // 扫描列表当前页（0 起；勾选态全局维护，与翻页互不影响）
+  lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
   scanMinSizeMb: number;     // 「忽略小于」阈值（MB，localStorage 持久化）
   scanNamingC: string;       // 文件名独立 C 语义：has_sub / no_sub / off
   page: number;              // 任务分页：当前页（0 起）
@@ -59,6 +61,8 @@ const state: AppState = {
   scanMapped: false,
   scanResolvedPath: "",
   scanChecked: new Set(),
+  scanPage: 0,
+  lastScan: null,
   scanMinSizeMb: (() => {
     // 注意 Number(null) === 0：新浏览器（无持久化值）必须落到默认 200，
     // 否则阈值静默变 0，过小/坏文件会被默认勾选并提交（QA 5.5b 暴露）
@@ -171,6 +175,35 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const line2 = $("line-2");
   const jobPager = $("job-pager");
   const jobList = $("job-list");
+
+  // ---------- 效果速览 demo：内置日语示例音频 → 中文字幕（试听 + 字幕点亮） ----------
+  const demoCard = $("demo-card") as HTMLDivElement | null;
+  const demoAudio = $("demo-audio") as HTMLAudioElement | null;
+  const demoPlay = $("demo-play") as HTMLButtonElement | null;
+  const demoTime = $("demo-time") as HTMLSpanElement | null;
+  if (demoCard && demoAudio && demoPlay && demoTime) {
+    const fmtDT = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+    const demoSync = () => {
+      const total = Number.isFinite(demoAudio.duration) && demoAudio.duration > 0 ? demoAudio.duration : 3.1;
+      demoTime.textContent = `${fmtDT(demoAudio.currentTime)} / ${fmtDT(total)}`;
+      demoCard.classList.toggle("playing", !demoAudio.paused && !demoAudio.ended);
+      demoPlay.innerHTML = demoAudio.paused
+        ? (demoAudio.ended ? "&#8635; 重听" : "&#9654; 试听")
+        : "&#9208; 暂停";
+    };
+    demoPlay.onclick = () => {
+      if (demoAudio.paused) {
+        if (demoAudio.ended) demoAudio.currentTime = 0;
+        demoAudio.play().catch(() => toast("示例音频播放失败（浏览器自动播放策略可能拦截，点一次重试）", "err"));
+      } else {
+        demoAudio.pause();
+      }
+      demoSync();
+    };
+    for (const ev of ["timeupdate", "play", "pause", "ended", "loadedmetadata"] as const) {
+      demoAudio.addEventListener(ev, demoSync);
+    }
+  }
 
   // 扫描提示按形态区分：HTML 默认 web 文案；桌面形态下「本机」= 本机磁盘
   if (platform.kind === "desktop") {
@@ -311,6 +344,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // 桌面壳导航徽标钩子：web 形态恒空操作（无 .nav-badge 节点）
   let viewBadge: (n: number) => void = () => {};
+
+  // web 壳顶部视图 tab 钩子：desktop 形态恒空操作（桌面用侧边栏）
+  let webShowView: (v: "dispatch" | "jobs" | "engines") => void = () => {};
 
   // ---- web 形态：GET /api/update（独立链路，失败静默，绝不拖累主刷新） ----
   let updateWeb: UpdateInfo | null = null;
@@ -1917,8 +1953,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           engine, videoName: file.name, dirHandle: state._fsFileDir || null,
           videoPath: (file as FolderFile)._localPath || null,
         });
-        showStatus(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}，见上方任务表`, "ok");
+        showStatus(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
         toast(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
+        if (platform.kind === "web") webShowView("jobs"); // 提交即进任务看板
         finishDispatch(true);
         refresh();
       } else {
@@ -1954,12 +1991,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     showStatus(
       okN === queue.length
-        ? `批量完成：已提交 ${okN}/${queue.length} 项，见上方任务表`
+        ? `批量完成：已提交 ${okN}/${queue.length} 项，见「字幕任务」`
         : `批量完成：成功 ${okN}/${queue.length} 项，其余失败（可重新选择文件夹）`,
       okN ? "ok" : "err"
     );
     finishBatch();
     refresh();
+    if (platform.kind === "web" && okN > 0) webShowView("jobs"); // 批量完成进任务看板
   }
 
   function finishBatch() {
@@ -2720,6 +2758,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         naming_c: state.scanNamingC,
       });
       state.scanItems = d.items || [];
+      state.lastScan = d;
+      state.scanPage = 0; // 每次新扫描回到第一页
       state.scanMapped = d.mapped === true;
       state.scanResolvedPath = d.path || "";
       // 默认勾选：无字幕且不过小；已有字幕 / 过小的留待用户显式勾选
@@ -2751,12 +2791,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       $("scan-table").innerHTML =
         '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名'
       + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
+      renderScanPager(0);
     } else {
+      const PAGE = 100;
+      const pages = Math.max(1, Math.ceil(items.length / PAGE));
+      const pg = Math.min(Math.max(0, state.scanPage), pages - 1);
+      const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
       $("scan-table").innerHTML = `
       <table class="scan-table">
         <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
         <tbody>
-          ${items.map((i) => {
+          ${pageItems.map((i) => {
             const langs = (i.embedded_langs || []).join("/") || "—";
             const subCell = i.subtitle_status === "external"
               ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span><button type="button" class="srt-pv" data-srt="${esc(i.subtitle ? siblingOf(i.path, i.subtitle) : "")}" title="预览字幕内容">预览</button>`
@@ -2787,10 +2832,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           updateScanSummary();
         };
       });
+      renderScanPager(items.length);
     }
     $("scan-results").hidden = false;
     $("scan-submit").hidden = false;
     updateScanSummary(d.truncated);
+  }
+
+  // 扫描结果翻页（大量文件场景；勾选态全局维护，与当前页无关）
+  function renderScanPager(total: number) {
+    const el = $("scan-pager");
+    const PAGE = 100;
+    const pages = Math.max(1, Math.ceil(total / PAGE));
+    if (pages <= 1) { el.hidden = true; el.innerHTML = ""; return; }
+    const pg = Math.min(Math.max(0, state.scanPage), pages - 1);
+    const go = (next: number) => {
+      const clamped = Math.min(Math.max(0, next), pages - 1);
+      if (clamped === state.scanPage) return;
+      state.scanPage = clamped;
+      if (state.lastScan) renderScanResults(state.lastScan);
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    };
+    el.innerHTML = `
+      <button type="button" class="pg-btn txt" id="spg-prev"${pg === 0 ? " disabled" : ""}>← 上一页</button>
+      <span class="pg-info mono">第 ${pg + 1} / ${pages} 页 · 共 ${total} 个文件</span>
+      <button type="button" class="pg-btn txt" id="spg-next"${pg >= pages - 1 ? " disabled" : ""}>下一页 →</button>`;
+    el.hidden = false;
+    (el.querySelector("#spg-prev") as HTMLButtonElement).onclick = () => go(pg - 1);
+    (el.querySelector("#spg-next") as HTMLButtonElement).onclick = () => go(pg + 1);
   }
 
   function updateScanSummary(truncated?: boolean) {
@@ -2866,10 +2935,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
       state.scanItems = [];
       state.scanChecked = new Set();
+      state.lastScan = null;
+      state.scanPage = 0;
+      $("scan-pager").hidden = true;
       $("scan-results").hidden = true;
       $("scan-submit").hidden = true;
       $("scan-table").innerHTML = "";
       refresh();
+      if (platform.kind === "web") webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
       toast((e as Error).message, "err");
     } finally {
@@ -3217,6 +3290,36 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         d.toggleMax();
       });
     }
+  }
+
+  // ---------- web 壳：顶部视图 tab（生成字幕 / 字幕任务 / 字幕服务；desktop 用侧边栏，整块不执行） ----------
+  if (platform.kind === "web") {
+    const VIEWS_W = ["dispatch", "jobs", "engines"] as const;
+    type ViewW = (typeof VIEWS_W)[number];
+    const secsW: Record<ViewW, HTMLElement> = {
+      dispatch: $("sec-dispatch"), jobs: $("sec-jobs"), engines: $("sec-engines"),
+    };
+    const tabItems = Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab[data-view]"));
+    const tabBadge = $("tab-jobs-badge") as HTMLElement | null;
+    let savedW = "dispatch";
+    try { savedW = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
+    const initialW: ViewW = VIEWS_W.includes(savedW as ViewW) ? (savedW as ViewW) : "dispatch";
+    webShowView = (view: ViewW) => {
+      for (const v of VIEWS_W) secsW[v].classList.toggle("view-on", v === view);
+      for (const it of tabItems) {
+        const on = it.dataset.view === view;
+        it.classList.toggle("on", on);
+        it.setAttribute("aria-selected", on ? "true" : "false");
+      }
+      try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
+    };
+    webShowView(initialW);
+    for (const it of tabItems) it.addEventListener("click", () => webShowView(it.dataset.view as ViewW));
+    viewBadge = (n: number) => {
+      if (!tabBadge) return;
+      tabBadge.hidden = n <= 0;
+      if (n > 0) tabBadge.textContent = String(n);
+    };
   }
 
   refresh();
