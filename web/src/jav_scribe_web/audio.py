@@ -52,18 +52,30 @@ def probe_duration(src: Path) -> float:
         return 0.0
 
 
-def _extract_stall_s() -> float:
-    """无 ffmpeg 进度输出多久判定提取停滞（默认 10 分钟）。"""
+def _extract_stuck_s() -> float:
+    """卡死判定窗口：三种活动信号（进度输出/CPU 时间片/输出文件增长）
+    全部静止超过该时长才判死锁（默认 2 分钟）。活着但慢的提取不会被杀。"""
     with contextlib.suppress(ValueError):
-        return float(os.environ.get("JAVWEB_EXTRACT_STALL_S", "600"))
-    return 600.0
+        return float(os.environ.get("JAVWEB_EXTRACT_STUCK_S", "120"))
+    return 120.0
 
 
 def _extract_max_s() -> float:
-    """提取总时长兜底上限（默认 3h，防 duration=0 且 IO 极慢的无限等待）。"""
+    """提取总时长兜底上限（默认 3h，防进程活着但永不产出输出的极端情况）。"""
     with contextlib.suppress(ValueError):
         return float(os.environ.get("JAVWEB_EXTRACT_MAX_S", "10800"))
     return 10800.0
+
+
+def _proc_cpu_ticks(pid: int) -> int | None:
+    """子进程累计 CPU 时间片（utime+stime，Linux /proc）；不可用时 None。"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read().decode("ascii", "replace")
+        fields = data[data.rfind(")") + 2:].split()
+        return int(fields[11]) + int(fields[12])
+    except Exception:
+        return None
 
 
 async def extract_audio_progress(
@@ -76,12 +88,14 @@ async def extract_audio_progress(
     Progress is ffmpeg ``out_time_us`` relative to the probed container
     duration; when the duration is unknown the callback is only invoked
     with 0.0 (start) and 1.0 (finish). Raises AudioError on failure.
-    看门狗：ffmpeg 长时间无任何进度输出（IO 挂死/futex 死锁）或总时长
-    超限 → kill 进程并抛 AudioError，避免永久占用在途槽拖死整条队列。
+    卡死识别：每 10s 无进度输出时检查 ffmpeg 是否仍活着（CPU 时间片在涨
+    或输出文件在增长即视为活着）；三信号全部静止满 stuck_s（默认 120s）
+    才判死锁 kill + AudioError；总时长 max_s（默认 3h）兜底。
+    避免永久占用在途槽拖死整条队列，也不会误杀活着但慢的提取。
     Returns the output size in bytes.
     """
     duration = probe_duration(src)
-    stall_s = _extract_stall_s()
+    stuck_s = _extract_stuck_s()
     max_s = _extract_max_s()
     started = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
@@ -92,6 +106,10 @@ async def extract_audio_progress(
     )
     assert proc.stdout is not None
     last = -1.0
+    # 卡死识别三信号：最近一次活动时刻 / 上次采样的 CPU 时间片 / 上次输出文件大小
+    last_activity = time.monotonic()
+    last_ticks = _proc_cpu_ticks(proc.pid)
+    last_size = dest.stat().st_size if dest.exists() else 0
     if on_progress is not None:
         on_progress(0.0)
     try:
@@ -101,18 +119,30 @@ async def extract_audio_progress(
                 raise AudioError(f"提取总时长超限（>{max_s / 3600:.1f}h）")
             try:
                 line = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=min(stall_s, remaining)
+                    proc.stdout.readline(), timeout=min(10.0, remaining)
                 )
             except asyncio.TimeoutError:
-                elapsed = time.monotonic() - started
-                if elapsed >= max_s:
-                    raise AudioError(f"提取总时长超限（>{max_s / 3600:.1f}h）")
-                raise AudioError(
-                    f"提取停滞超时（{stall_s / 60:.0f} 分钟无 ffmpeg 进度输出，"
-                    f"已强制结束；可重试，若反复停滞请检查影片文件/IO）"
-                )
+                # 10s 无新输出：做活性检查（不是盲目计超时）——
+                # CPU 时间片在涨 = 还在解码/读取；输出文件在涨 = 还在写盘
+                now = time.monotonic()
+                ticks = _proc_cpu_ticks(proc.pid)
+                if ticks is not None and last_ticks is not None and ticks > last_ticks:
+                    last_activity = now
+                last_ticks = ticks if ticks is not None else last_ticks
+                size = dest.stat().st_size if dest.exists() else 0
+                if size > last_size:
+                    last_activity = now
+                last_size = size
+                if now - last_activity >= stuck_s:
+                    raise AudioError(
+                        f"提取卡死（{stuck_s:.0f} 秒内 ffmpeg 无 CPU 活动、"
+                        f"输出文件无增长、无进度输出，判定进程死锁，已强制结束；"
+                        f"可重试，若反复卡死请检查影片文件/存储 IO）"
+                    )
+                continue
             if not line:
                 break
+            last_activity = time.monotonic()  # 有输出 = 活着
             if not line.startswith(b"out_time_us="):
                 continue
             if duration <= 0:

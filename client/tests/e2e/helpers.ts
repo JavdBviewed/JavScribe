@@ -127,6 +127,16 @@ export async function freezeForShot(page: Page, req: APIRequestContext) {
     }
     document.querySelectorAll<HTMLElement>(".cell-elapsed").forEach((el) => (el.style.visibility = "hidden"));
     document.querySelectorAll(".eta").forEach((el) => (el.textContent = ""));
+    // 版本文本归一化：基线不烙版本号（v0.2.x 每次 bump 字形都变）
+    const walk = (n: Node): void => {
+      if (n.nodeType === 3) {
+        const t = n.nodeValue ?? "";
+        if (t.search(/\bv\d+\.\d+\.\d+\b/) !== -1) n.nodeValue = t.replace(/\bv\d+\.\d+\.\d+\b/g, "v0.0.0");
+      } else if (n.childNodes.length) {
+        n.childNodes.forEach(walk);
+      }
+    };
+    document.body.childNodes.forEach(walk);
   });
 }
 
