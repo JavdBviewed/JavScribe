@@ -386,13 +386,20 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 )
             except (TypeError, ValueError):
                 continue
-            if store.get(t.engine) is None:
-                continue  # 服务已删除：无轮询目标，行会永远滞留
+            # engine=auto 且尚未派发（无 job_id）的任务：store 里没有 "auto"
+            # 条目，不能整行丢弃——恢复为暂停，派发时刻再按负载解析服务
+            eng_missing = t.engine != AUTO and store.get(t.engine) is None
+            if t.job_id and eng_missing:
+                continue  # 服务已删除：在途 job 无轮询目标，行会永远滞留
             if not t.job_id:
                 # 重启中断（含暂停中）：标「已暂停」而非失败——点「继续」即可
                 # 重新提取音轨并提交（视频在本机，不丢任务）
                 t.phase = "paused"
-                t.error = "工作台重启中断（点「继续」恢复：重新提取音轨并提交）"
+                t.error = (
+                    "重启中断且绑定服务已删除（请改派服务后点「继续」）"
+                    if eng_missing
+                    else "工作台重启中断（点「继续」恢复：重新提取音轨并提交）"
+                )
                 t.finished = None
             _uploads[t.id] = t
             if t.local_path and t.job_id and not t.writeback:

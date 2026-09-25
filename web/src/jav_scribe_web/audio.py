@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import subprocess
+import time
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -50,6 +52,20 @@ def probe_duration(src: Path) -> float:
         return 0.0
 
 
+def _extract_stall_s() -> float:
+    """无 ffmpeg 进度输出多久判定提取停滞（默认 10 分钟）。"""
+    with contextlib.suppress(ValueError):
+        return float(os.environ.get("JAVWEB_EXTRACT_STALL_S", "600"))
+    return 600.0
+
+
+def _extract_max_s() -> float:
+    """提取总时长兜底上限（默认 3h，防 duration=0 且 IO 极慢的无限等待）。"""
+    with contextlib.suppress(ValueError):
+        return float(os.environ.get("JAVWEB_EXTRACT_MAX_S", "10800"))
+    return 10800.0
+
+
 async def extract_audio_progress(
     src: Path,
     dest: Path,
@@ -60,9 +76,14 @@ async def extract_audio_progress(
     Progress is ffmpeg ``out_time_us`` relative to the probed container
     duration; when the duration is unknown the callback is only invoked
     with 0.0 (start) and 1.0 (finish). Raises AudioError on failure.
+    看门狗：ffmpeg 长时间无任何进度输出（IO 挂死/futex 死锁）或总时长
+    超限 → kill 进程并抛 AudioError，避免永久占用在途槽拖死整条队列。
     Returns the output size in bytes.
     """
     duration = probe_duration(src)
+    stall_s = _extract_stall_s()
+    max_s = _extract_max_s()
+    started = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
         *audio_args(src, dest),
         "-progress", "pipe:1",
@@ -74,7 +95,24 @@ async def extract_audio_progress(
     if on_progress is not None:
         on_progress(0.0)
     try:
-        while line := await proc.stdout.readline():
+        while True:
+            remaining = max_s - (time.monotonic() - started)
+            if remaining <= 0:
+                raise AudioError(f"提取总时长超限（>{max_s / 3600:.1f}h）")
+            try:
+                line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=min(stall_s, remaining)
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - started
+                if elapsed >= max_s:
+                    raise AudioError(f"提取总时长超限（>{max_s / 3600:.1f}h）")
+                raise AudioError(
+                    f"提取停滞超时（{stall_s / 60:.0f} 分钟无 ffmpeg 进度输出，"
+                    f"已强制结束；可重试，若反复停滞请检查影片文件/IO）"
+                )
+            if not line:
+                break
             if not line.startswith(b"out_time_us="):
                 continue
             if duration <= 0:
@@ -88,6 +126,13 @@ async def extract_audio_progress(
                 if on_progress is not None:
                     on_progress(frac)
         _out, err = await proc.communicate()
+    except AudioError:
+        # 看门狗触发：杀 ffmpeg 防孤儿进程，保留错误信息
+        with contextlib.suppress(BaseException):
+            proc.kill()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), 3)
+        raise
     except asyncio.CancelledError:
         # 任务被取消（用户暂停/工作台停机）：先杀 ffmpeg 防孤儿进程，再传播
         with contextlib.suppress(BaseException):
