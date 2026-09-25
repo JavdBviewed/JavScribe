@@ -105,6 +105,9 @@ async def extract_audio_progress(
     或输出文件在增长即视为活着）；三信号全部静止满 stuck_s（默认 120s）
     才判死锁 kill + AudioError；总时长 max_s（默认 3h）兜底。
     避免永久占用在途槽拖死整条队列，也不会误杀活着但慢的提取。
+    stderr 由专用排水任务持续排空（保留尾部 8KB 用于报错）：坏音轨会让
+    ffmpeg 打出数十 MB 解码错误，不排空会写满管道使 ffmpeg 阻塞在
+    write() 上、整个提取冻结（v0.2.20 修复的 DVMM-299/MIDA-574 根因）。
     Returns the output size in bytes.
     """
     duration = probe_duration(src)
@@ -118,6 +121,23 @@ async def extract_audio_progress(
         stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdout is not None
+    assert proc.stderr is not None
+    # stderr 专用排水任务：坏音轨（如损坏的 AAC 流）会让 ffmpeg 打出数十 MB
+    # 解码错误日志；stderr 管道若不消费会先写满 64KB 流控缓冲再写满 OS 管道，
+    # ffmpeg 随即阻塞在 write() 上——整个提取「冻结」（无 CPU/无进度/无写入），
+    # 曾被误判为磁盘/线程问题。必须持续排空 stderr（只保留尾部 8KB 供报错）。
+    err_tail: bytearray = bytearray()
+
+    async def _drain_stderr() -> None:
+        while True:
+            chunk = await proc.stderr.read(65536)
+            if not chunk:
+                break
+            err_tail.extend(chunk)
+            if len(err_tail) > 8192:
+                del err_tail[: len(err_tail) - 8192]
+
+    drain_task = asyncio.create_task(_drain_stderr())
     last = -1.0
     # 卡死识别三信号：最近一次活动时刻 / 上次采样的 CPU 时间片 / 上次输出文件大小
     last_activity = time.monotonic()
@@ -168,13 +188,18 @@ async def extract_audio_progress(
                 last = frac
                 if on_progress is not None:
                     on_progress(frac)
-        _out, err = await proc.communicate()
+        # 正常结束：先等进程被收割（returncode 落定；stdout EOF 与收割回调
+        # 存在竞态，不等待会把 None 误判为失败），再排空 stderr 收尾
+        await proc.wait()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(drain_task, 10)
     except AudioError:
         # 看门狗触发：杀 ffmpeg 防孤儿进程，保留错误信息
         with contextlib.suppress(BaseException):
             proc.kill()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), 3)
+        drain_task.cancel()
         raise
     except asyncio.CancelledError:
         # 任务被取消（用户暂停/工作台停机）：先杀 ffmpeg 防孤儿进程，再传播
@@ -182,7 +207,9 @@ async def extract_audio_progress(
             proc.kill()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), 3)
+        drain_task.cancel()
         raise
+    err = bytes(err_tail)
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         dest.unlink(missing_ok=True)
         raise AudioError(f"ffmpeg failed: {err.decode(errors='replace')[-300:]}")

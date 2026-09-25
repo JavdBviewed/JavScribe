@@ -121,6 +121,114 @@ class _FakeStuck:
         return self.result
 
 
+def _flood_args(src, dest) -> list[str]:
+    """假 ffmpeg：先打 ~288KB stderr 洪峰（> 64KB 流控 + 64KB 管道），
+    再给 progress 行。模拟坏音轨下 ffmpeg 的解码错误洪峰（v0.2.20 根因）。"""
+    script = (
+        f"echo data > {dest}; "
+        "echo out_time_us=500000; "
+        "i=0; while [ $i -lt 9000 ]; do "
+        "printf 'fake decode error line abcdef 0123456789\\n' >&2; "
+        "i=$((i+1)); done; "
+        "echo out_time_us=1000000; echo progress=end"
+    )
+    return ["sh", "-c", script]
+
+
+def test_stderr_flood_does_not_deadlock() -> None:
+    """stderr 洪峰（30MB 级）不得阻塞提取：排水任务必须持续排空 stderr 管道。
+    无排水时 ffmpeg 会阻塞在 write() 上，本测试将以超时失败。"""
+    from jav_scribe_web import audio
+    orig = audio.audio_args
+    audio.audio_args = _flood_args  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "missing.mp4"  # probe 失败 -> duration=0，不影响
+            dest = Path(td) / "out.opus"
+            seen: list[float] = []
+
+            async def _run() -> int:
+                return await asyncio.wait_for(
+                    audio.extract_audio_progress(src, dest, on_progress=seen.append),
+                    timeout=60,
+                )
+
+            try:
+                size = asyncio.run(_run())
+            finally:
+                dest.unlink(missing_ok=True)
+            assert size > 0
+            assert seen[0] == 0.0 and seen[-1] == 1.0
+    finally:
+        audio.audio_args = orig
+
+
+def test_extract_waits_for_exit_before_returncode() -> None:
+    """stdout EOF 与子进程收割存在竞态：读 returncode 前必须 proc.wait()，
+    否则并发提取时 returncode=None 被误判为失败（0.2.21 修复）。"""
+    from jav_scribe_web import audio
+    orig_create = asyncio.create_subprocess_exec
+    wait_calls = []
+
+    async def spy_create(*a, **k):
+        p = await orig_create(*a, **k)
+        orig_wait = p.wait
+
+        async def wrapped():
+            r = await orig_wait()
+            wait_calls.append(1)
+            return r
+
+        p.wait = wrapped  # type: ignore[method-assign]
+        return p
+
+    orig_args = audio.audio_args
+    asyncio.create_subprocess_exec = spy_create  # type: ignore[assignment]
+    audio.audio_args = _flood_args  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "missing.mp4"
+            dest = Path(td) / "out.opus"
+
+            async def _run() -> int:
+                return await asyncio.wait_for(
+                    audio.extract_audio_progress(src, dest), timeout=60
+                )
+
+            try:
+                asyncio.run(_run())
+            finally:
+                dest.unlink(missing_ok=True)
+            assert wait_calls, "must await process exit before reading returncode"
+    finally:
+        asyncio.create_subprocess_exec = orig_create  # type: ignore[assignment]
+        audio.audio_args = orig_args
+
+
+def test_stderr_tail_in_error_message() -> None:
+    """ffmpeg 非 0 退出时，报错应携带 stderr 尾部（来自排水任务的环缓冲）。"""
+    from jav_scribe_web import audio
+
+    def _fail_args(src, dest) -> list[str]:
+        return ["sh", "-c", f"echo data > {dest}; echo MARKER-STDERR-XYZ >&2; exit 1"]
+
+    orig = audio.audio_args
+    audio.audio_args = _fail_args  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "missing.mp4"
+            dest = Path(td) / "out.opus"
+            try:
+                asyncio.run(audio.extract_audio_progress(src, dest))
+                raise AssertionError("expected AudioError")
+            except AudioError as ex:
+                assert "MARKER-STDERR-XYZ" in str(ex), str(ex)
+            finally:
+                dest.unlink(missing_ok=True)
+    finally:
+        audio.audio_args = orig
+
+
 def test_retrying_passes_first_try() -> None:
     from jav_scribe_web import audio
     fake = _FakeStuck(0)
