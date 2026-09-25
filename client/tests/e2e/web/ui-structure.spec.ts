@@ -1,6 +1,6 @@
 // UI 结构类：关键 DOM 断言（id/class/aria、文案、列序、chip 文案）
 import { test, expect } from "@playwright/test";
-import { WEB_URL, waitForEngineOnline, mockReset, cleanEngines, waitForJobsEmpty } from "../helpers";
+import { WEB_URL, waitForEngineOnline, mockReset, cleanEngines, waitForJobsEmpty, goTab } from "../helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await mockReset(request);
@@ -26,6 +26,44 @@ test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("#sec-engines .kicker")).toHaveText("Services");
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
+});
+
+test("视图 tab 条：三 tab 默认「生成字幕」+ 点击切换 + localStorage 持久化", async ({ page }) => {
+  const tabs = page.locator("#view-tabs .view-tab");
+  await expect(tabs).toHaveCount(3);
+  await expect(tabs.nth(0)).toHaveText("生成字幕");
+  await expect(tabs.nth(1)).toContainText("字幕任务");
+  await expect(tabs.nth(2)).toHaveText("字幕服务");
+  // 默认视图 = 生成字幕：view-on + aria-selected 跟随，其余板块隐藏
+  await expect(tabs.nth(0)).toHaveClass(/on/);
+  await expect(tabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
+  await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
+  await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
+  // 点击切换：view-on 与 aria-selected 移动
+  await tabs.nth(2).click();
+  await expect(tabs.nth(2)).toHaveClass(/on/);
+  await expect(tabs.nth(2)).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
+  await expect(page.locator("#sec-dispatch")).not.toHaveClass(/view-on/);
+  // localStorage 持久化：reload 后仍停在「字幕服务」
+  await page.reload();
+  await waitForEngineOnline(page);
+  await expect(page.locator("#view-tabs .view-tab.on")).toHaveText("字幕服务");
+  await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
+});
+
+test("页头仓库链接 + demo 试听卡结构", async ({ page }) => {
+  const pill = page.locator(".repo-pill");
+  await expect(pill).toHaveAttribute("href", "https://github.com/JavdBviewed/JavScribe");
+  await expect(pill).toHaveAttribute("target", "_blank");
+  await expect(pill).toContainText("JavScribe 仓库");
+  // demo 卡：日语原声 + 中文翻译 + SRT 示例 + 可播放音频（内置容器静态资产）
+  await expect(page.locator("#demo-card")).toBeVisible();
+  await expect(page.locator("#demo-play")).toContainText("试听");
+  await expect(page.locator(".demo-jp")).toHaveText("こんにちは、中国万歳！");
+  await expect(page.locator("#demo-zh")).toHaveText("你好啊，中国万岁！");
+  await expect(page.locator("#demo-audio")).toHaveAttribute("src", "/demo/ja-hello.mp3");
 });
 
 test("拖放区结构", async ({ page }) => {
@@ -69,6 +107,7 @@ test("扫描面板结构（客户端部署机语义文案）", async ({ page }) 
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
+  await goTab(page, "jobs");
   const head = page.locator(".job-head > span");
   // 首列为「全选当前筛选结果」勾选框（批量操作入口）
   await expect(head).toHaveCount(8);
@@ -102,6 +141,7 @@ test("页脚与 modal/toast 结构", async ({ page }) => {
 });
 
 test("预设服务卡片结构（小飞机跳转 + 版本/设备/运行 tag）", async ({ page, request }) => {
+  await goTab(page, "engines");
   const svcVer = ((await (await request.get(`${WEB_URL}/api/health`)).json()) as { version: string }).version;
   const card = page.locator('article.eng[data-name="mock"]');
   await expect(card).toHaveClass(/on/);

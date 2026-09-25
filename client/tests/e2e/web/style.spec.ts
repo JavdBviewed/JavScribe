@@ -3,7 +3,7 @@
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import {
   waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockPause, cleanEngines, freezeForShot, shot, triggerToast,
-  addEngine, MOCK_KEY, FIXTURES, waitForJobsEmpty, makeScanDir,
+  addEngine, MOCK_KEY, FIXTURES, waitForJobsEmpty, makeScanDir, goTab,
 } from "../helpers";
 import path from "node:path";
 
@@ -29,6 +29,7 @@ test("整页空态（服务在线，无任务）", async ({ page }) => {
 });
 
 test("服务卡片区块", async ({ page }) => {
+  await goTab(page, "engines");
   await freezeForShot(page, req);
   await shot(page, "style-02-engine-card", { element: "#sec-engines" });
 });
@@ -64,9 +65,12 @@ test("流水线：三步完成态", async ({ page }) => {
   await page.setInputFiles("#file", fx("video-a.mp4"));
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
-  // 完成信号：meta-dispatch 出现任务 id（dispatch-status 与之同时可见，不能 .or 双选）
-  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible({ timeout: 90_000 });
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 90_000 });
+  // 完成信号：提交成功先弹 toast（body 级，不受切视图影响）；此时已自动切到任务看板
+  await expect(page.locator("#toasts .toast.ok", { hasText: "已提交到" })).toBeVisible({ timeout: 90_000 });
+  // 切回派发页再断言终态并截
+  await goTab(page, "dispatch");
+  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await page.waitForTimeout(200);
   await freezeForShot(page, req);
   await shot(page, "style-06-pipeline-done", { element: "#sec-dispatch" });
@@ -75,6 +79,7 @@ test("流水线：三步完成态", async ({ page }) => {
 test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
   await mockPause(req); // 先停：running 行不会在页面刷新前进成 done
   await mockSeed(req, { n: 1, status: "running", progress: 0.37 });
+  await goTab(page, "jobs");
   await page.locator(".job-row.running").waitFor({ timeout: 15_000 });
   await page.waitForTimeout(400);
   await freezeForShot(page, req);
@@ -83,6 +88,7 @@ test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
 
 test("任务看板：已完成 + 分页器", async ({ page }) => {
   await mockSeed(req, { n: 25, status: "done" });
+  await goTab(page, "jobs");
   await page.click('#job-filter [data-f="done"]');
   await expect(page.locator("#job-pager")).toBeVisible();
   await page.locator("#pg-next").click();
@@ -94,6 +100,7 @@ test("任务看板：已完成 + 分页器", async ({ page }) => {
 
 test("设置弹窗：未登记 Key 表单", async ({ page }) => {
   await addEngine(req, { name: "nokey", url: "http://127.0.0.1:8301" });
+  await goTab(page, "engines");
   await page.locator('article.eng[data-name="nokey"] .icon-btn.set').waitFor({ timeout: 15_000 });
   await page.click('article.eng[data-name="nokey"] .icon-btn.set');
   await expect(page.locator("#key-input")).toBeVisible({ timeout: 5_000 });
@@ -103,6 +110,7 @@ test("设置弹窗：未登记 Key 表单", async ({ page }) => {
 });
 
 test("设置弹窗：配置表单（8 组白名单）", async ({ page }) => {
+  await goTab(page, "engines");
   await page.click('article.eng .icon-btn.set');
   await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
   // 展开弹窗内部滚动，整表单入帧
@@ -138,6 +146,7 @@ test("toast 三种态", async ({ page }) => {
 
 test("离线服务卡片（eng-err）", async ({ page }) => {
   await addEngine(req, { name: "offline-svc", url: "http://127.0.0.1:9999" });
+  await goTab(page, "engines");
   await page.locator('article.eng[data-name="offline-svc"] .eng-err').waitFor({ timeout: 15_000 });
   await page.waitForTimeout(200);
   await freezeForShot(page, req);

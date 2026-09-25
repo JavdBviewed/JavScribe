@@ -88,6 +88,16 @@ export async function waitForEngineOnline(page: Page) {
 }
 
 /**
+ * web 形态视图 tab 切换（desktop 形态用侧边栏，此助手仅 web e2e 用）。
+ * 派发成功（单文件/批量/扫描提交）后 app 会自动切到「字幕任务」，
+ * 再操作「生成字幕 / 字幕服务」区块前必须先切回对应 tab。
+ */
+export async function goTab(page: Page, view: "dispatch" | "jobs" | "engines") {
+  await page.locator(`.view-tab[data-view="${view}"]`).click();
+  await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
+}
+
+/**
  * 等页面 state.engines 里该引擎的 API Key 就位。
  * 冷启动竞态：cleanEngines 刚 PUT 完 key 时，poller 首轮快照可能还是 has_key=false，
  * scan-go / ⚙ 会走「请先登记 API Key」toast 提前返回。页面 5s 刷新后自愈，

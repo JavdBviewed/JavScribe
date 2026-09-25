@@ -2,7 +2,7 @@
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import {
   WEB_URL, mockReset, mockSeed, mockPause, cleanEngines,
-  waitForJobsEmpty, waitForEngineOnline, resetPipelinePause, mockControl,
+  waitForJobsEmpty, waitForEngineOnline, resetPipelinePause, mockControl, goTab,
 } from "../helpers";
 
 let req: APIRequestContext;
@@ -27,6 +27,7 @@ async function seedSix(page: Page) {
     async () => (await (await req.get(`${WEB_URL}/api/jobs`)).json() as unknown[]).length,
     { timeout: 15_000 },
   ).toBe(6);
+  await goTab(page, "jobs");
   await expect(jobRows(page)).toHaveCount(6, { timeout: 15_000 });
 }
 
@@ -66,6 +67,7 @@ test("勾选 + 批量操作条：全选 3 行批量暂停（含运行中 → 2 �
   await mockPause(req);
   await page.goto("/");
   await waitForEngineOnline(page);
+  await goTab(page, "jobs");
   await expect(jobRows(page)).toHaveCount(3, { timeout: 15_000 });
 
   const bar = page.locator("#job-bulk-bar");
@@ -100,6 +102,7 @@ test("勾选 + 批量操作条：全选 3 行批量暂停（含运行中 → 2 �
 test("服务卡监控：无 GPU → 队列深度曲线；开 GPU → 利用率+显存文案", async ({ page }) => {
   await page.goto("/");
   await waitForEngineOnline(page);
+  await goTab(page, "engines");
   const box = page.locator(".eng-metrics");
   // mock 默认无 GPU + 历史预填 40 点 → sparkline 立即可见
   await expect(box.locator("svg.spark")).toBeVisible({ timeout: 15_000 });

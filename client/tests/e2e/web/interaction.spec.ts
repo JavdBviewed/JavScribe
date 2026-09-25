@@ -2,10 +2,11 @@
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import {
   waitForEngineOnline, waitForEngineKey, mockReset, mockSeed, mockSpeed, cleanEngines, addEngine, MOCK_KEY, MOCK_URL, FIXTURES,
-  waitForJobsEmpty, makeScanDir, resetPipelinePause,
+  waitForJobsEmpty, makeScanDir, resetPipelinePause, goTab,
 } from "../helpers";
 import path from "node:path";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import os from "node:os";
+import { readFileSync, existsSync, unlinkSync, mkdirSync, rmSync, copyFileSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 
@@ -51,14 +52,17 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await waitForEngineKey(page, "mock");
   page.on("dialog", (d) => d.accept());
   // 1. 暂停所有（confirm 放行）
+  await goTab(page, "jobs");
   await page.click("#job-pause-all");
   await expectToast(page, "已暂停所有任务");
   const btn = page.locator("#job-pause-all");
   await expect(btn).toHaveText("▶ 继续任务");
   await expect(btn).toHaveClass(/on/);
   // 服务卡「已暂停」tag（poller 读 /health paused：1s tick + 页面 5s 刷新）
+  await goTab(page, "engines");
   await expect(page.locator('article.eng[data-name="mock"] .tag-paused')).toHaveText("已暂停", { timeout: 20_000 });
   // 2. 本机扫描提交 → 3 条任务全部停在闸前（不提取、不派发）
+  await goTab(page, "dispatch");
   await page.locator("#scan-path").fill(SCAN_DIR);
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
@@ -93,6 +97,7 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
 test("行级挂起：排队行 ⏸ 暂停 → 已暂停（行变暗）→ ▶ 继续 → 回排队", async ({ page }) => {
   await mockSpeed(req, { step: 0.002, tickMs: 100 }); // running 行保持运行（409 判定依赖）
   await mockSeed(req, { n: 2, status: "running", progress: 0.2, pending: 1 });
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-001.mp4" }) });
   await expect(row.locator(".pill.p-pending")).toBeVisible({ timeout: 15_000 });
   // 运行中行（seed-002）无暂停按钮（只有取消）；排队行有
@@ -118,6 +123,7 @@ test("行级挂起：排队行 ⏸ 暂停 → 已暂停（行变暗）→ ▶ �
 test("行级重试：失败行 ↻ 重试 → 重新入队 → 同文件新任务 running（不删已生成字幕）", async ({ page }) => {
   // beforeEach 已设 8s/任务：重试后的新任务有可观察的 running 窗口
   await mockSeed(req, { n: 1, status: "error", errors: 1 });
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "seed-001.mp4" }) });
   await expect(row.locator(".pill.p-error")).toBeVisible({ timeout: 15_000 });
   await expect(row.locator(".sub")).toContainText("转写失败");
@@ -152,12 +158,17 @@ test("单文件本地提音轨全流程：chip → 三步动画 → 完成 → �
 
   // 3. 音频上传 + 提交（「上传音频 X / Y MB」也是瞬态，断言终态）
   await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
+  // 提交成功先弹 toast 再自动切任务看板（sec-dispatch 被隐藏，#step-dispatch 终态原页抓不到）
+  // → 用 body 级 toast 观察，再切回派发页断言终态
+  await expect(page.locator("#toasts .toast.ok", { hasText: "已提交到" })).toBeVisible({ timeout: 30_000 });
+  await goTab(page, "dispatch");
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
   await expect(page.locator("#toasts .toast.ok").first()).toBeVisible();
 
   // 4. 看板出现 running 行（标题带运行数）→ 完成
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
   await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
   await expect(page).toHaveTitle(/\(1\) JavScribe 字幕工作台/);
@@ -178,6 +189,8 @@ test("任务行细节：阶段文案 / ETA 倒计时 / 耗时逐秒 / 下载命�
   await page.setInputFiles("#file", fx("video-a.mp4"));
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
+  // 提交成功自动切到任务看板
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
   // 运行中：位置列 = 服务端阶段文案（非时间轴位置），ETA 带「剩 ~」
   await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
@@ -205,6 +218,7 @@ test("下载名回归：空 label + hash 名音轨任务 → 下载按钮用任�
     data: { sha1 }, headers: { "Content-Type": "application/json" },
   })).json() as { ok: boolean; job_id: string };
   expect(seed.ok).toBe(true);
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: `${sha1}.opus` }) });
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 15_000 });
   const name = await row.locator(".job-actions a.dl-btn").getAttribute("download");
@@ -219,10 +233,13 @@ test("整片上传回退路径（extract-select=server）：上传视频→提�
   await page.click("#dispatch-go");
   await expect(page.locator("#step-upload .step-name")).toHaveText("上传视频");
   await expect(page.locator("#step-extract .step-name")).toHaveText("提取音频");
-  await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 60_000 });
-  // 「提取音频中 · N%」是瞬态（服务端 ffmpeg 对 72KB 文件秒级完成），断言终态
-  await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 90_000 });
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 60_000 });
+  // 小文件全管线秒级完成（上传→提取→提交），提交成功先弹 toast 再自动切任务看板
+  //（sec-dispatch 被隐藏，中间 step 终态原页抓不到）→ 用 body 级 toast 观察，再切回派发页断言终态
+  await expect(page.locator("#toasts .toast.ok", { hasText: "已提交到" })).toBeVisible({ timeout: 90_000 });
+  await goTab(page, "dispatch");
+  await expect(page.locator("#step-upload.done")).toBeVisible();
+  await expect(page.locator("#step-extract.done")).toBeVisible();
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
@@ -234,11 +251,12 @@ test("文件夹批量：chip 文案 → 顺序流水线 1/2 → 批量完成（�
   await page.click("#dispatch-go");
   await expect(page.locator("#meta-upload", { hasText: "文件 1/2 ·" })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator("#meta-upload", { hasText: "文件 2/2 ·" })).toBeVisible({ timeout: 120_000 });
-  await expect(page.locator("#dispatch-status.ok", { hasText: "批量完成：已提交 2/2 项" })).toBeVisible({ timeout: 120_000 });
-  // 两条任务行；video-c（有字幕）不上传
-  await expect(page.locator(".job-row .fn", { hasText: "video-a.mp4" })).toBeVisible({ timeout: 15_000 });
+  // 批量完成后自动切到任务看板：先断言任务行，再切回派发页断言终态文案
+  await expect(page.locator(".job-row .fn", { hasText: "video-a.mp4" })).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(".job-row .fn", { hasText: "video-b.mkv" })).toBeVisible();
   expect(await page.locator(".job-row .fn", { hasText: "video-c.mp4" }).count()).toBe(0);
+  await goTab(page, "dispatch");
+  await expect(page.locator("#dispatch-status.ok", { hasText: "批量完成：已提交 2/2 项" })).toBeVisible({ timeout: 30_000 });
 });
 
 test("文件夹 chip 移除后派单禁用", async ({ page }) => {
@@ -283,6 +301,39 @@ test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → �
   await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
 });
 
+test("扫描翻页：105 文件 → 2 页 → 翻页重渲染，勾选态跨页保留", async ({ page }) => {
+  // 105 个小视频（>100/页 → 2 页）；minsize 置 0 防「过小」干扰
+  const dir = path.join(os.tmpdir(), "javweb-scan-pager-e2e");
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  for (let i = 1; i <= 105; i++) {
+    copyFileSync(fx("video-a.mp4"), path.join(dir, `PAG-${String(i).padStart(3, "0")}.mp4`));
+  }
+  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
+  await page.reload(); // javweb_scan_minsize 只在页面加载时读入 state，setItem 后必须 reload
+  await waitForEngineOnline(page);
+  await waitForEngineKey(page, "mock");
+  await page.locator("#scan-path").fill(dir);
+  await page.click("#scan-go");
+  await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator("#scan-pager")).toBeVisible();
+  await expect(page.locator("#scan-pager .pg-info")).toHaveText("第 1 / 2 页 · 共 105 个文件");
+  await expect(page.locator("#scan-table .scan-name")).toHaveCount(100);
+  // 默认全选 105 → 取消第 1 行勾选 → 翻页 → 计数保持（勾选态与页无关）
+  await expect(page.locator("#scan-count")).toContainText("105 / 105");
+  await page.locator("#scan-table input[type=checkbox]").first().uncheck();
+  await expect(page.locator("#scan-count")).toContainText("104 / 105");
+  await page.click("#spg-next");
+  await expect(page.locator("#scan-pager .pg-info")).toHaveText("第 2 / 2 页 · 共 105 个文件");
+  await expect(page.locator("#scan-table .scan-name")).toHaveCount(5);
+  await expect(page.locator("#scan-count")).toContainText("104 / 105");
+  // 回第 1 页：未勾选项保持未勾选
+  await page.click("#spg-prev");
+  await expect(page.locator("#scan-table .scan-name")).toHaveCount(100);
+  await expect(page.locator("#scan-table input[type=checkbox]").first()).not.toBeChecked();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）", async ({ page }) => {
   await page.locator("#scan-path").fill("D:\\Videos");
   await page.click("#scan-go");
@@ -295,6 +346,7 @@ test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）
 
 test("筛选 × 分页：25 条已完成 → 2 页 → 翻页重渲染", async ({ page }) => {
   await mockSeed(req, { n: 25, status: "done" });
+  await goTab(page, "jobs");
   // /api/jobs 按 created 降序（最新在前），mock 按 60s 间隔赋 created：
   // 第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
   await page.locator('.job-row .fn', { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
@@ -315,6 +367,7 @@ test("筛选 × 分页：25 条已完成 → 2 页 → 翻页重渲染", async (
 
 test("retry 按钮：跳过行 → 重新提交 → 新任务入列", async ({ page }) => {
   await mockSeed(req, { n: 1, status: "skipped", skipped: 1 });
+  await goTab(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".retry") });
   await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.locator(".pill")).toHaveText("跳过");
@@ -342,6 +395,7 @@ test("autosave 开启 + 无目录句柄 → 完成自动下载 srt", async ({ pa
 });
 
 test("小飞机跳转：新标签打开服务地址（地址本身非超链接）", async ({ page, context }) => {
+  await goTab(page, "engines");
   const [np] = await Promise.all([
     context.waitForEvent("page", { timeout: 10_000 }),
     page.locator('.eng[data-name="mock"] .eng-go').click(),
@@ -352,6 +406,7 @@ test("小飞机跳转：新标签打开服务地址（地址本身非超链接�
 
 test("删除服务：confirm → 卡片移除", async ({ page }) => {
   await addEngine(req, { name: "del-me", url: "http://127.0.0.1:8301" });
+  await goTab(page, "engines");
   await page.locator('article.eng[data-name="del-me"] h3', { hasText: "del-me" }).waitFor({ timeout: 10_000 });
   page.on("dialog", (d) => d.accept());
   await page.click('article.eng[data-name="del-me"] .del');
