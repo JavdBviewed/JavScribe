@@ -76,9 +76,9 @@ const WEB_HEADER_BLOCK = `<header>
 
 // 视图 tab 条（web 形态）——桌面端用侧边栏导航，整体移除
 const VIEW_TABS_BLOCK = `<nav id="view-tabs" class="view-tabs" role="tablist" aria-label="视图切换">
-  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true">生成字幕</button>
-  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false">字幕任务<span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
-  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false">字幕服务</button>
+  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
+  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
+  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
 </nav>
 
 `;
@@ -110,8 +110,8 @@ const REWRITES = [
    '<option value="local">仅本机提取</option>'],
   ['<option value="server">整片上传本服务</option>',
    '<option value="server">整片直传字幕服务</option>'],
-  ["仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。扫描任务无需勾选——字幕本就落在服务机器上的影片旁。",
-   "仅对「选择文件 / 选择文件夹」选取或拖入的本机影片有效：任务完成后把 srt 自动写回影片原目录；写回失败时改为自动下载（保存对话框）。扫描任务无需勾选——字幕本就落在服务机器上的影片旁。"],
+  ["仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。「扫描目录」任务无需勾选——完成后字幕自动落回客户端部署机影片旁（Web 形态即本页面所在机器）。",
+   "仅对「选择文件 / 选择文件夹」选取或拖入的本机影片有效：任务完成后把 srt 自动写回影片原目录；写回失败时改为自动下载（保存对话框）。「扫描目录」任务无需勾选——完成后字幕自动落回本机影片旁。"],
   ["自动：小文件（≤1.6GB）在你自己的浏览器里提音轨、只传音频；大文件或本地提取失败时改传整片，由所选服务提取。浏览器本地首次约需下载 30MB 引擎，之后有缓存。",
    "自动：小文件（≤1.6GB）在本机提音轨、只传音频；大文件或本地提取失败时改传整片，由所选服务提取。本机提取用系统 ffmpeg（未安装或提取失败时可改用「整片直传字幕服务」）。"],
   ['用上方表单添加，或用环境变量 <span class="mono">JAV_ENGINES="名称=URL"</span> 预置',

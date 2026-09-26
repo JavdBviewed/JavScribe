@@ -151,10 +151,25 @@ header {
   border: 1px solid var(--line);
   background: var(--surface);
   border-radius: 12px;
-  padding: 10px 14px 12px;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
-.demo-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.demo-toggle {
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+.demo-toggle:hover { background: var(--hover-surface); }
+.demo-toggle:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-soft); }
 .demo-kicker {
   font-size: 10px;
   font-weight: 700;
@@ -163,8 +178,12 @@ header {
   color: var(--accent);
 }
 .demo-title { font-weight: 600; font-size: 13px; }
-.demo-play-btn { padding: 5px 12px; font-size: 12px; margin-left: 4px; }
-.demo-time { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.demo-chev { margin-left: auto; color: var(--muted); transition: transform 0.2s; }
+.demo-card.open .demo-chev { transform: rotate(180deg); }
+.demo-body { padding: 0 14px 12px; }
+.demo-ctrl { display: flex; align-items: center; gap: 12px; }
+.demo-play-btn { padding: 5px 12px; font-size: 12px; }
+.demo-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .demo-caption { margin-top: 10px; display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
 .demo-cue { flex: 1 1 300px; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
 .demo-jp { color: var(--muted); font-size: 13px; }
@@ -196,14 +215,19 @@ header {
 /* ---------- 视图 tab（web 形态；desktop 用侧边栏，见 body.desktop 规则） ---------- */
 .view-tabs {
   position: sticky;
-  top: 0;
+  top: 8px;
   z-index: 9;
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-width: 1160px;
-  margin: 0 auto;
-  padding: 10px 28px 0;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  margin: 10px auto 0;
+  padding: 4px;
+  gap: 2px;
+  background: color-mix(in srgb, var(--line) 42%, var(--bg));
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: inset 0 1px 2px rgba(32, 36, 42, 0.05);
 }
 .view-tab {
   font: inherit;
@@ -212,21 +236,23 @@ header {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 16px;
-  border: 1px solid var(--line);
+  padding: 8px 18px;
+  border: 0;
   border-radius: 999px;
-  background: var(--surface);
+  background: transparent;
   color: var(--muted);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
 }
-.view-tab:hover { color: var(--fg); border-color: var(--line-strong); }
+.view-tab .tab-ico { color: inherit; transition: color 0.15s; }
+.view-tab:hover { color: var(--fg); background: var(--hover-surface); }
 .view-tab.on {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  color: var(--fg);
+  background: var(--surface-2);
+  box-shadow: 0 1px 2px rgba(32, 36, 42, 0.08), 0 4px 12px -4px rgba(32, 36, 42, 0.22);
 }
+.view-tab.on .tab-ico { color: var(--accent); }
 .tab-badge {
   min-width: 18px;
   padding: 1px 6px;
@@ -239,7 +265,10 @@ header {
   text-align: center;
   line-height: 1.4;
 }
-.view-tab.on .tab-badge { background: var(--fg); color: var(--bg); }
+@media (max-width: 560px) {
+  .view-tab { padding: 8px 12px; font-size: 12px; }
+  .view-tabs { max-width: 100%; }
+}
 
 /* web 形态视图切换：非 view-on 区块隐藏（desktop 有 body.desktop 专属规则） */
 main > section { display: none; }

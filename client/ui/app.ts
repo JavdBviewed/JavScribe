@@ -176,12 +176,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const jobPager = $("job-pager");
   const jobList = $("job-list");
 
-  // ---------- 效果速览 demo：内置日语示例音频 → 中文字幕（试听 + 字幕点亮） ----------
+  // ---------- 效果速览 demo：内置日语示例音频 → 中文字幕（可折叠 + 试听 + 字幕点亮） ----------
   const demoCard = $("demo-card") as HTMLDivElement | null;
+  const demoBody = $("demo-body") as HTMLDivElement | null;
+  const demoToggle = $("demo-toggle") as HTMLButtonElement | null;
   const demoAudio = $("demo-audio") as HTMLAudioElement | null;
   const demoPlay = $("demo-play") as HTMLButtonElement | null;
   const demoTime = $("demo-time") as HTMLSpanElement | null;
-  if (demoCard && demoAudio && demoPlay && demoTime) {
+  if (demoCard && demoBody && demoToggle && demoAudio && demoPlay && demoTime) {
     const fmtDT = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
     const demoSync = () => {
       const total = Number.isFinite(demoAudio.duration) && demoAudio.duration > 0 ? demoAudio.duration : 3.1;
@@ -190,6 +192,23 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       demoPlay.innerHTML = demoAudio.paused
         ? (demoAudio.ended ? "&#8635; 重听" : "&#9654; 试听")
         : "&#9208; 暂停";
+    };
+    // 默认收起（不常驻首页），展开状态记忆；收起时停播并回卷
+    const setDemoOpen = (open: boolean) => {
+      demoBody.hidden = !open;
+      demoCard.classList.toggle("open", open);
+      demoToggle.setAttribute("aria-expanded", String(open));
+      try { localStorage.setItem("javweb_demo_open", open ? "1" : "0"); } catch { /* 忽略 */ }
+    };
+    let demoOpenInit = false;
+    try { demoOpenInit = localStorage.getItem("javweb_demo_open") === "1"; } catch { /* 忽略 */ }
+    setDemoOpen(demoOpenInit);
+    demoToggle.onclick = () => {
+      // 当前收起（hidden=true）→ 点击后目标展开（open=true）；hidden 布尔值本身就是目标开合态
+      const open = Boolean(demoBody.hidden);
+      if (!open) { demoAudio.pause(); demoAudio.currentTime = 0; }
+      setDemoOpen(open);
+      demoSync();
     };
     demoPlay.onclick = () => {
       if (demoAudio.paused) {
