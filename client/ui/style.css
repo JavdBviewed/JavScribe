@@ -303,7 +303,6 @@ section { padding: 26px 0 8px; }
 h2 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: 0.02em; }
 
 /* ---------- engines ---------- */
-#engine-form { display: flex; gap: 8px; flex-wrap: wrap; }
 input, select {
   font: inherit;
   color: var(--fg);
@@ -1042,6 +1041,25 @@ footer {
 .set-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .set-row .grow { flex: 1; min-width: 220px; }
 .set-row .btn { margin-bottom: 1px; }
+
+/* ---------- 添加服务弹窗（字幕服务 tab「＋ 添加服务」） ---------- */
+#engine-add-backdrop {
+  position: fixed; inset: 0; z-index: 53;
+  background: rgba(15, 17, 19, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+#engine-add-modal {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lift);
+  width: 100%; max-width: 480px;
+  max-height: 84vh;
+  display: flex; flex-direction: column;
+}
+#engine-form .modal-body input { width: 100%; }
+.eng-add-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 2px; }
 
 /* ---------- 目录浏览弹窗（web 形态「浏览」按钮；desktop 形态走原生对话框不渲染此 UI） ---------- */
 #dir-backdrop {

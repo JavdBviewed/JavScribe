@@ -1427,18 +1427,44 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   };
 
-  // ---------- 服务表单 ----------
+  // ---------- 服务表单（「＋ 添加服务」弹窗） ----------
+  const engineAddBackdrop = $("engine-add-backdrop") as HTMLDivElement | null;
+  const engineAddSubmit = $("engine-add-submit") as HTMLButtonElement | null;
+
+  function engineAddClose(): void {
+    if (engineAddBackdrop) engineAddBackdrop.hidden = true;
+  }
+
+  function engineAddOpen(): void {
+    if (!engineAddBackdrop) return;
+    engineAddBackdrop.hidden = false;
+    engineName.focus();
+    engineName.select();
+  }
+
+  ($("engine-add-btn") as HTMLButtonElement | null)?.addEventListener("click", engineAddOpen);
+  ($("engine-add-x") as HTMLButtonElement | null)?.addEventListener("click", engineAddClose);
+  ($("engine-add-cancel") as HTMLButtonElement | null)?.addEventListener("click", engineAddClose);
+  engineAddBackdrop?.addEventListener("click", (ev) => { if (ev.target === engineAddBackdrop) engineAddClose(); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && engineAddBackdrop && !engineAddBackdrop.hidden) engineAddClose();
+  });
+
   engineForm.onsubmit = async (ev) => {
     ev.preventDefault();
     const name = engineName.value.trim();
     const url = engineUrl.value.trim();
     const api_key = engineKey.value.trim();
+    if (engineAddSubmit) engineAddSubmit.disabled = true;
     try {
       await t.addEngine(name, url, api_key);
-      (ev.target as HTMLFormElement).reset();
+      engineForm.reset();
+      engineAddClose();
       refresh();
     } catch (e) {
       alert((e as Error).message);
+    } finally {
+      if (engineAddSubmit) engineAddSubmit.disabled = false;
     }
   };
 
