@@ -13,7 +13,7 @@
 //   - 错误文案等价 _map_config_error / api_retry
 // 平台能力（原生对话框 / 递归枚举 / ffmpeg 提取 / fs 写回 / 保存下载）走 IPC。
 
-import { app, BrowserWindow, Menu, dialog, ipcMain, net, session, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, net, session, shell, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -954,6 +954,13 @@ function registerIpc(): void {
           });
           return { ok: true, data: list };
         }
+        case "openedExternal": {
+          // e2e：读 setWindowOpenHandler 实际交给系统浏览器的 URL（需 env JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1）
+          if (process.env.JAVSCRIBE_OPEN_EXTERNAL_CAPTURE !== "1") {
+            return { ok: false, error: "capture 未启用（JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1）" };
+          }
+          return { ok: true, data: openedExternalUrls.slice() };
+        }
         case "listJobs": {
           const s = await refresh();
           return { ok: true, data: jobRows(s.engines) };
@@ -1621,7 +1628,62 @@ function buildMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// ---------------------------------------------------------------------------
+// 服务端（serve）最新版本检查：服务端无自有界面，新版本提示在客户端 UI 呈现
+//   - GitHub Releases API（serve-v* 首个命中 = 最新）；unauth 60/h 限流，TTL 兜底
+//   - e2e 覆盖：JAVSCRIBE_UPDATE_GITHUB_BASE / JAVSCRIBE_UPDATE_INTERVAL_S
+//   - 静默降级：拉不到返回 null（UI 不出角标）；失败 1h 重试背压，防网络恢复慢时重试风暴
+// ---------------------------------------------------------------------------
+interface ServeLatest { version: string; url: string; }
+let serveLatest: { data: ServeLatest | null; ts: number; fail: boolean } | null = null;
+let serveLatestInflight: Promise<ServeLatest | null> | null = null;
+
+function serveLatestIntervalS(): number {
+  const n = Number(process.env.JAVSCRIBE_UPDATE_INTERVAL_S || "86400");
+  return Number.isFinite(n) && n > 0 ? n : 86400;
+}
+
+function fetchServeLatest(): Promise<ServeLatest | null> {
+  if (serveLatestInflight) return serveLatestInflight;
+  serveLatestInflight = (async () => {
+    const base = (process.env.JAVSCRIBE_UPDATE_GITHUB_BASE || "https://api.github.com").replace(/\/+$/, "");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const r = await fetch(`${base}/repos/JavdBviewed/JavScribe/releases?per_page=30`, {
+        signal: ctrl.signal,
+        headers: { Accept: "application/vnd.github+json" },
+      });
+      if (!r.ok) throw new Error(`releases -> ${r.status}`);
+      const rels = (await r.json()) as Array<{ tag_name?: string; html_url?: string }>;
+      const hit = rels.find((x) => /^serve-v\d/.test(x.tag_name || ""));
+      if (!hit || !hit.tag_name) return null;
+      return { version: hit.tag_name.replace(/^serve-v/, ""), url: hit.html_url || "" };
+    } catch (_e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+      serveLatestInflight = null;
+    }
+  })();
+  return serveLatestInflight;
+}
+
+async function serveLatestNow(): Promise<ServeLatest | null> {
+  const now = Date.now();
+  // 失败记录短 TTL（最多 1h 重试）；成功记录按配置间隔（默认 24h）
+  const ttl = (serveLatest?.fail ? Math.min(serveLatestIntervalS(), 3600) : serveLatestIntervalS()) * 1000;
+  if (serveLatest && now - serveLatest.ts < ttl) return serveLatest.data;
+  // 缓存未命中/过期：等待在途 fetch 结果（single-flight + 8s 超时，有界）。
+  // 不能首轮返回空：渲染端有 6h 节流只问一次——首轮空 = 角标永不出现。
+  const d = await fetchServeLatest();
+  serveLatest = { data: d, ts: Date.now(), fail: d === null };
+  return d;
+}
+
 function registerUpdateIpc(): void {
+  // 服务端最新版本（渲染端每次 5s 刷新问一次；main 侧 TTL + single-flight 限流，永不抛错）
+  ipcMain.handle("serve-update", () => serveLatestNow());
   ipcMain.handle("update-state", () => upState);
   ipcMain.handle("update-check", () => {
     void doUpdateCheck();
@@ -2088,6 +2150,9 @@ async function ensureLocalServe(): Promise<void> {
 // 应用生命周期
 // ---------------------------------------------------------------------------
 
+// 测试钩子：已交给系统浏览器的 URL（JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1 时记录；e2e 经 t-call openedExternal 读）
+const openedExternalUrls: string[] = [];
+
 function createWindow(): void {
   win = new BrowserWindow({
     width: 1440,
@@ -2105,6 +2170,15 @@ function createWindow(): void {
     },
   });
   win.loadFile(path.join(__dirname, "index.html"));
+  // 外部链接（target=_blank / window.open）交系统浏览器：frameless 新窗口无窗控，体验差
+  // 测试钩子：JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1 记录实际交出的 URL（e2e 经 t-call openedExternal 读）
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) {
+      if (process.env.JAVSCRIBE_OPEN_EXTERNAL_CAPTURE === "1") openedExternalUrls.push(url);
+      void shell.openExternal(url).catch(() => { /* 无系统浏览器 / 无头环境：静默忽略 */ });
+    }
+    return { action: "deny" };
+  });
   // 最大化状态回推 renderer（标题栏按钮图标切换）
   const pushMaxState = (): void => {
     if (win && !win.isDestroyed()) win.webContents.send("win-max-state", win.isMaximized());

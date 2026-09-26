@@ -3,6 +3,7 @@
 // 仅类型（import type），不进任何运行时 bundle。
 
 /** t-call 统一返回：ok 时 data 有效；!ok 时 error 为可直接展示的文案 */
+import type { ServeRelease } from "./types";
 export interface TCallResult {
   ok: boolean;
   data?: unknown;
@@ -148,6 +149,8 @@ export interface JavDesktop {
   audioCache: {
     find(videoName: string): Promise<AudioCacheHit | null>;
   };
+  /** 最新服务端 Release（服务端无自有界面，新版本提示在客户端 UI）；拉不到返回 null */
+  serveUpdate(): Promise<ServeRelease | null>;
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
 

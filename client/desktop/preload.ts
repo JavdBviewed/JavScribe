@@ -8,7 +8,7 @@ import type {
 WinCtl,
 } from "../core/desktop-bridge";
 
-const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCache"> = {
+const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCache" | "serveUpdate"> = {
   call: (method: string, args?: string[]) =>
     ipcRenderer.invoke("t-call", { method, args }) as Promise<TCallResult>,
 
@@ -130,6 +130,10 @@ const audioCache: JavDesktop["audioCache"] = {
   find: (videoName: string) => ipcRenderer.invoke("audio-cache-find", videoName),
 };
 
+// 服务端最新版本（GitHub Releases serve-v*；main 侧 TTL + single-flight，永不抛错）
+const serveUpdate = (): Promise<import("../core/types").ServeRelease | null> =>
+  ipcRenderer.invoke("serve-update");
+
 // 窗口控制（frameless 自定义标题栏；send 即可，无需回包）
 const win: WinCtl = {
   minimize: () => { ipcRenderer.send("win-min"); },
@@ -144,4 +148,4 @@ const win: WinCtl = {
   },
 };
 
-contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch, localServe, audioCache, win });
+contextBridge.exposeInMainWorld("javDesktop", { ...api, update, upload, watch, localServe, audioCache, serveUpdate, win });
