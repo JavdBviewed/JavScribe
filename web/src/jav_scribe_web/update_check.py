@@ -9,7 +9,9 @@
   - JAV_UPDATE_MIRROR           Release 页面前缀（如 https://gh-proxy.example.com/，
                                 拼到 html_url 前，适配内网/国内网络）
   - JAV_UPDATE_INTERVAL_S       后台检查间隔秒数（默认 86400；GitHub unauth 限流 60/h）
-- tag 规范：`v*` 对应 serve/web 镜像（app），`client-v*` 对应 JavScribe Client 桌面端。
+- tag 规范：`serve-v*` 对应字幕服务（GPU 服务端）Release（exe + ghcr 镜像），
+  `client-v*` 对应 JavScribe Client 桌面端，`web-v*` 仅版本标记（部署即发布）。
+  服务端无自有界面，服务端的新版本提示由前端（本工作台 / 桌面端）展示。
 - 拉取失败保留上一次快照 + 记 last_error；/api/update 永不因网络抛错。
 """
 from __future__ import annotations
@@ -26,16 +28,17 @@ import httpx
 log = logging.getLogger("jav-scribe-web")
 
 REPO = "JavdBviewed/JavScribe"
-_APP_TAG = re.compile(r"^v\d")
+# serve Release tag（服务端 = GPU 机器上的字幕服务，无自有界面）
+_APP_TAG = re.compile(r"^serve-v\d")
 _CLIENT_TAG = re.compile(r"^client-v\d")
 
 
 def parse_version(tag: str) -> tuple[int, ...]:
-    """'v0.2.1' / 'client-v0.2.1' / '0.2.1' → (0, 2, 1)；解析不了返回空元组。
+    """'serve-v0.2.1' / 'client-v0.2.1' / '0.2.1' → (0, 2, 1)；解析不了返回空元组。
 
-    v 前缀可选：tag 规范带 v，但工作台 __version__ 与服务上报是纯数字。
+    前缀（serve-/client-）与 v 均可选：服务上报与 __version__ 是纯数字。
     """
-    m = re.match(r"^(?:client-)?v?(\d+(?:\.\d+)*)", tag or "")
+    m = re.match(r"^(?:(?:serve|client)-)?v?(\d+(?:\.\d+)*)", tag or "")
     if not m:
         return ()
     return tuple(int(x) for x in m.group(1).split("."))
@@ -109,12 +112,13 @@ class UpdateChecker:
     # -- 快照 ----------------------------------------------------------------
 
     def snapshot(self, engine_versions: list[str]) -> dict:
-        """/api/update 响应体。has_update：工作台自身落后，或任一已登记服务落后于最新镜像。"""
+        """/api/update 响应体。has_update：任一已登记服务上报版本落后于最新 serve Release。
+
+        工作台自身不在此列：web 无 Release 渠道（部署即发布），且与 serve 版本号线独立。
+        """
         latest_app = self._latest_app
         has_update = False
-        if latest_app is not None and version_gt(latest_app["version"], self._current):
-            has_update = True
-        elif latest_app is not None:
+        if latest_app is not None:
             for v in engine_versions:
                 if v and version_gt(latest_app["version"], v):
                     has_update = True

@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ScanItem, ScanResult, UpdateInfo, UploadStatus } from "../core/types";
+import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ScanItem, ScanResult, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -39,6 +39,7 @@ interface AppState {
   selected: Set<string>;                     // 勾选的任务行 key（批量操作）
   _filteredKeys: string[];                   // 当前筛选下的全部行 key（表头全选/半选态）
   _metrics: Record<string, MetricsResponse>; // 引擎名 -> 监控快照（卡片迷你趋势图）
+  latestServe: ServeRelease | null;   // 最新服务端 Release（服务端无界面，新版本提示落在卡片角标）
   extractMode: "auto" | "local" | "server";
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
@@ -83,6 +84,7 @@ const state: AppState = {
   selected: new Set(),
   _filteredKeys: [],
   _metrics: {},
+  latestServe: null,
   extractMode: savedExtract === "auto" || savedExtract === "local" || savedExtract === "server"
     ? savedExtract
     : "auto",
@@ -337,6 +339,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
     watchPump(); // watch 队列安全网：漏触发的消费在 5s 内自愈
     if (platform.kind === "web") void refreshUpdateWeb();
+    else void refreshServeLatest(); // 桌面端：服务端新版本提示（GitHub Release 对比，静默降级）
+  }
+
+  // ---------- 服务端最新版本（桌面端 main 进程拉 GitHub；web 形态由 /api/update 提供） ----------
+  // 服务端无自有界面，「服务端有新版本」提示落在字幕服务卡片角标（tag-up），点开即 Release 页。
+  // 渲染端不做节流：main 侧 TTL + single-flight 已是限流者（成功 24h / 失败 1h），
+  // 每次 5s 刷新问一次 = 缓存命中直接返回；渲染端节流会缓存「旧的最新版本」导致角标长时间不出现。
+  async function refreshServeLatest() {
+    const d = (window as unknown as { javDesktop?: { serveUpdate?: () => Promise<ServeRelease | null> } }).javDesktop;
+    if (typeof d?.serveUpdate !== "function") return;
+    try {
+      const r = await d.serveUpdate();
+      if (r && r.version) state.latestServe = r;
+    } catch (_e) { /* 网络失败静默降级：不提示 */ }
+    if (state.engines.length) renderEngines(state.engines); // 角标变化 → 卡片就地重渲染（diff 无变化则不重建）
+  }
+
+  // 版本号比较（serve-v0.2.6 / 0.2.6 均可）：缺位补 0，任一解析失败 → false
+  function versionGt(a: string, b: string): boolean {
+    const m = (x: string) => (x || "").replace(/^[^0-9]*/g, "").split(".").map((n) => parseInt(n, 10) || 0);
+    const ta = m(a), tb = m(b);
+    if (!ta.length || !tb.length || !ta.some((n) => n > 0) || !tb.some((n) => n > 0)) return false;
+    const n = Math.max(ta.length, tb.length);
+    for (let i = 0; i < n; i++) {
+      const x = ta[i] || 0, y = tb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
   }
 
   // ---------- 更新检查（footer chip 共享节点：web=工作台 /api/update 版本对比；desktop=main 进程 electron-updater） ----------
@@ -373,10 +403,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     try {
       const u = await t.getUpdate();
       updateWeb = u.enabled && u.has_update && u.latest_app ? u : null;
+      // 卡片角标不依赖 has_update：同版本无角标，落后才有（latest_app 为空 = 未拉到/已关闭）
+      state.latestServe = u.enabled && u.latest_app
+        ? { version: (u.latest_app.version || "").replace(/^[^0-9]*/g, ""), url: u.latest_app.url }
+        : null;
     } catch (_e) {
       updateWeb = null; // 更新检查失败静默降级，不打扰看板
     }
     renderUpChip();
+    if (state.engines.length) renderEngines(state.engines);
   }
 
   // ---- desktop 形态：main 进程状态机（IPC 推送，订阅在 initApp 尾部接线） ----
@@ -471,8 +506,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const body = $("modal-body");
     const savedCmd = localStorage.getItem("javweb_update_cmd") === "source" ? "source" : "docker";
     body.innerHTML = `
-    <div class="set-note">当前工作台 v${esc(u.current)} → 最新 ${esc(rel.version)}${
-      u.latest_client ? `<br>桌面端 JavScribe Client 已有 ${esc(u.latest_client.version)}（应用内自动检查更新，见 GitHub Releases）` : ""
+    <div class="set-note">服务端（字幕服务）最新版本为 <b>${esc(rel.version)}</b>（当前连接服务上报 ${esc(state.engines.map((e) => (e.version ? "v" + e.version : "")).filter(Boolean).join("、") || "—")}）。
+请在 GPU 服务器上更新字幕服务——选择你的部署形态后复制命令${
+      u.latest_client ? `。<br>桌面端 JavScribe Client 已有 ${esc(u.latest_client.version)}（应用内自动检查更新，见 GitHub Releases）` : ""
     }。</div>
     <div class="up-sec-label">更新说明</div>
     <pre class="up-changelog">${esc(rel.body || "（无发布说明）")}</pre>
@@ -534,11 +570,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     showModal("检查更新");
     const body = $("modal-body");
     const curVer = ($("foot-ver").textContent || "").replace(/^v/, "");
+    // 服务端新版本提示（与服务卡片角标同源）：桌面端弹窗顺带提醒，手动更新在 GPU 服务器
+    const _ls = state.latestServe;
+    const serveUpNote = _ls && state.engines.some((e) => e.version && versionGt(_ls.version, e.version))
+      ? `<div class="set-note">另外：服务端有 <b>v${esc(_ls.version)}</b> 新版本（见「字幕服务」页卡片角标，请在 GPU 服务器手动更新镜像/可执行文件）。</div>`
+      : "";
     if (s.status === "available") {
       body.innerHTML = `
       <div class="set-note">当前 v${esc(curVer || "?")} → 最新 v${esc(s.version || "?")}。下载完成后需重启应用完成安装。</div>
       <div class="up-sec-label">更新说明</div>
       <pre class="up-changelog">${esc(s.notes || "（无发布说明）")}</pre>
+      ${serveUpNote}
       <div class="up-row">
         <button type="button" class="btn btn-primary" id="up-dl">下载并安装</button>
         <button type="button" class="btn" id="up-later">稍后提醒</button>
@@ -617,6 +659,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // ---------- 服务卡片（按名称就地更新：轮询不重建 DOM，入场动画只在新卡片播放，避免闪烁） ----------
   interface EngCardEl extends HTMLElement { _html?: string; }
 
+  /** 服务端新版本角标（共享：服务卡片 / 服务设置弹窗）；服务上报版本 < 最新 serve Release 才出 */
+  function serveUpBadge(e: Engine): string {
+    const latest = state.latestServe;
+    if (!(latest && e.version && versionGt(latest.version, e.version))) return "";
+    return `<a class="tag tag-up" href="${esc(latest.url)}" target="_blank" rel="noopener" title="服务端有新版本：点击打开 Release 页，在 GPU 服务器上更新镜像或可执行文件">更新至 v${esc(latest.version)} ↗</a>`;
+  }
+
   function engineCardHtml(e: Engine): string {
     return `
     <div class="eng-top">
@@ -631,7 +680,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     </div>
     <div class="eng-specs">
       <span class="tag">${esc(e.device || "—")}</span>
-      <span class="tag">v${esc(e.version || "—")}</span>
+      <span class="tag" title="服务 /health 上报版本">v${esc(e.version || "—")}</span>
+      ${serveUpBadge(e)}
       <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
       ${e.paused ? `<span class="tag tag-paused" title="服务队列已挂起：运行中任务跑完后不再开新任务（看板「继续任务」或单任务「继续」恢复）">已暂停</span>` : ""}
       ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
@@ -2519,7 +2569,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         <a class="cfg-meta-url mono" href="${esc(e.url)}" target="_blank" rel="noopener" title="打开服务端页面">${esc(e.url)}</a>
         <span class="cfg-meta-tags">
           <span class="tag">${esc(e.device || "—")}</span>
-          <span class="tag">v${esc(e.version || "—")}</span>
+          <span class="tag" title="服务 /health 上报版本">v${esc(e.version || "—")}</span>
+          ${serveUpBadge(e)}
           <span class="tag${e.jobs_running ? " hot" : ""}">${e.jobs_running ? `运行 ${e.jobs_running}` : "队列空闲"}</span>
         </span>
       </div>`;

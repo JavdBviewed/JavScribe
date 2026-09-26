@@ -1,7 +1,7 @@
 // 功能类：版本检查与更新引导（web 形态 = 工作台 /api/update 版本对比 + 更新命令复制）
 //  - mock-github（127.0.0.1:8303）提供 GitHub Releases API（默认与当前版本一致 → 无角标）
 //  - 工作台 env：JAV_UPDATE_INTERVAL_S=3（后台循环 3s 拉一次，角标出现 ≤~5s）
-//  - 版本判定：latest tag v* > 工作台当前版本 → 角标「新版本 vX」
+//  - 版本判定：latest tag serve-v* > 已登记服务上报版本 → 角标「新版本 serve-vX」+ 服务卡片角标
 //  - 版本全部动态取（/api/health）：mock-github 默认 Release = 当前版本，
 //    「新版本」用例用 patch+1，web 版本 bump 后本文件无需再改
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
@@ -50,7 +50,7 @@ test("同版本：无更新角标，/api/update 结构正确", async ({ page }) 
   const u = (await (await req.get(`${WEB_URL}/api/update`)).json()) as any;
   expect(u.enabled).toBe(true);
   expect(u.current).toBe(v);
-  expect(u.latest_app?.version).toBe(`v${v}`);
+  expect(u.latest_app?.version).toBe(`serve-v${v}`);
   expect(u.latest_client?.version).toBe(`client-v${v}`);
   expect(u.has_update).toBe(false);
   expect(u.commands.docker).toBe("docker compose pull && docker compose up -d");
@@ -63,23 +63,25 @@ test("新版本：角标出现 → 弹窗 changelog/命令/复制/形态记忆",
   const v = await cur(req);
   const next = bumpPatch(v);
   await ghSetReleases(req, {
-    app: `v${next}`,
+    app: `serve-v${next}`,
     client: `client-v${next}`,
     body: `## v${next}\n- 修复显存并发问题\n- 新增批量下载`,
   });
   // 后台循环 ≤3s 拉取 + 页面 5s 刷新 → 角标出现
   const chip = page.locator("#up-chip");
   await expect(chip).toBeVisible({ timeout: 20_000 });
-  await expect(chip).toHaveText(`新版本 v${next}`);
+  await expect(chip).toHaveText(`新版本 serve-v${next}`);
 
   await chip.click();
-  await expect(page.locator("#modal-title")).toHaveText(`新版本 v${next}`);
+  await expect(page.locator("#modal-title")).toHaveText(`新版本 serve-v${next}`);
   await expect(page.locator(".up-changelog")).toContainText("修复显存并发问题");
   await expect(page.locator(".up-changelog")).toContainText("新增批量下载");
-  await expect(page.locator(".set-note")).toContainText(`当前工作台 v${v} → 最新 v${next}`);
+  await expect(page.locator(".set-note")).toContainText(`服务端（字幕服务）最新版本为`);
+  await expect(page.locator(".set-note")).toContainText(`serve-v${next}`);
+  await expect(page.locator(".set-note")).toContainText(`（当前连接服务上报 v${v}）`);
   await expect(page.locator(".set-note")).toContainText(`桌面端 JavScribe Client 已有 client-v${next}`);
   // Release 链接指向 GitHub Releases
-  await expect(page.locator(".up-link")).toHaveAttribute("href", `https://github.com/JavdBviewed/JavScribe/releases/tag/v${next}`);
+  await expect(page.locator(".up-link")).toHaveAttribute("href", `https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v${next}`);
 
   // 默认 docker 命令
   await expect(page.locator("#up-cmd-text")).toHaveText("docker compose pull && docker compose up -d");
@@ -114,25 +116,30 @@ test("服务落后（工作台同版本）：同样提示更新", async ({ page 
   );
   const chip = page.locator("#up-chip");
   await expect(chip).toBeVisible({ timeout: 20_000 });
-  await expect(chip).toHaveText(`新版本 v${v}`);
+  await expect(chip).toHaveText(`新版本 serve-v${v}`);
+  // 服务卡片角标：服务上报 0.0.1 < 最新 serve-v{v} → 「更新至 vX ↗」
+  const badge = page.locator("#engine-grid .eng .tag-up");
+  await expect(badge).toHaveCount(1, { timeout: 20_000 });
+  await expect(badge).toHaveText(`更新至 v${v} ↗`);
+  await expect(badge).toHaveAttribute("href", `https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v${v}`);
 });
 
 test("样式：更新角标与更新弹窗", async ({ page, context }) => {
   const v = await cur(req);
   const next = bumpPatch(v);
   await ghSetReleases(req, {
-    app: `v${next}`,
+    app: `serve-v${next}`,
     body: `## v${next}\n- 修复显存并发问题\n- 新增批量下载`,
   });
   const chip = page.locator("#up-chip");
   await expect(chip).toBeVisible({ timeout: 20_000 });
   // 必须等文本刷到 next：同文件前例把引擎降到 0.0.1，web poller 快照 + 页面 5s tick
   // 存在竞态窗口，chip 可能短暂显示上一个 latest——直接截图会拍到旧文案。
-  await expect(chip).toHaveText(`新版本 v${next}`, { timeout: 20_000 });
+  await expect(chip).toHaveText(`新版本 serve-v${next}`, { timeout: 20_000 });
   await freezeForShot(page, req);
   await shot(page, "update-01-chip", { element: "footer" });
   await chip.click();
-  await expect(page.locator("#modal-title")).toHaveText(`新版本 v${next}`);
+  await expect(page.locator("#modal-title")).toHaveText(`新版本 serve-v${next}`);
   await freezeForShot(page, req);
   await shot(page, "update-02-modal", { element: "#modal" });
 });

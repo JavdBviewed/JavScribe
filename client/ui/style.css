@@ -383,6 +383,15 @@ input:focus, select:focus {
 }
 .tag.hot { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .tag.tag-paused { color: var(--pause); border-color: var(--pause); background: var(--pause-soft); }
+a.tag.tag-up {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba(217, 111, 20, 0.25); }
 .wb-tag {
   font-size: 10.5px;
   font-weight: 500;

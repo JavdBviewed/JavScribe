@@ -251,11 +251,17 @@ export interface UpdateRelease {
 }
 
 /** GET /api/update：工作台版本对比快照 */
+/** 最新服务端 Release（tag serve-v*；version 为纯版本号，如 0.2.6） */
+export interface ServeRelease {
+  version: string;
+  url: string;
+}
+
 export interface UpdateInfo {
   enabled: boolean;
   /** 当前工作台版本 */
   current: string;
-  /** 最新 serve/web 镜像 Release（tag v*） */
+  /** 最新服务端 Release（tag serve-v*；服务端无自有界面，新版本提示由前端展示） */
   latest_app: UpdateRelease | null;
   /** 最新桌面端 Release（tag client-v*） */
   latest_client: UpdateRelease | null;
