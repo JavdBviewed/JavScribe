@@ -1,10 +1,10 @@
 // 桌面端 UI 结构类：关键 DOM 断言（id/class/aria、桌面措辞、列序、chip 文案）
-import { test, expect, goView } from "./helpers";
+import { test, expect, goView, CLIENT_VERSION } from "./helpers";
 import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   // 页面已随 fixture 冷启动完成（引擎 mock 在线、Key 预置）
-  await expect(page.locator("#health")).toHaveText(/v0\.2\.8 · 服务 1\/1 在线/);
+  await expect(page.locator("#health")).toHaveText(`v${CLIENT_VERSION} · 服务 1/1 在线`);
 });
 
 test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dispatch + 三 section 顺序）", async ({ page }) => {
@@ -81,30 +81,31 @@ test("派单栏结构（提取模式三选项桌面措辞 + autosave）", async 
   await expect(page.locator(".autosave-chk .help")).toHaveAttribute("data-tip", /写回失败时改为自动下载（保存对话框）/);
 });
 
-test("扫描面板结构（服务端目录语义文案不变）", async ({ page }) => {
-  await expect(page.locator(".scan-title")).toHaveText("扫描服务机器上的目录");
+test("扫描面板结构（客户端部署机目录语义 + 桌面本机文案）", async ({ page }) => {
+  await expect(page.locator(".scan-title")).toHaveText("扫描目录（客户端部署机）");
   await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".scan-head .muted")).toHaveText(/填「所选服务」所在机器上的目录/);
-  await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /不是当前访问本页面这台电脑的路径/);
+  await expect(page.locator(".scan-head .muted")).toHaveText(/填客户端部署机上的目录路径/);
+  // 桌面形态：app.ts 桌面分支把 help 覆盖为「本机」文案
+  await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /扫描本机（本电脑，即客户端部署机）上的目录/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
   await goView(page, "jobs");
   const head = page.locator(".job-head > span");
-  await expect(head).toHaveCount(7);
+  // 8 列：首列批量勾选框 + 末列行操作（010aff7 任务改派后新增勾选列）
+  await expect(head).toHaveCount(8);
   expect(await head.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["服务", "文件", "状态", "进度", "位置", "耗时", ""],
+    ["", "服务", "文件", "状态", "进度", "位置", "耗时", ""],
   );
-  const stats = page.locator("#job-stats .stat");
-  await expect(stats).toHaveCount(4);
-  expect(await stats.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["进行中 0", "完成 0", "跳过 0", "失败 0"],
-  );
+  // 旧 #job-stats 统计行已删：计数内嵌筛选按钮（web/desktop 同一契约）
+  expect(await page.locator("#job-stats").count()).toBe(0);
   const filters = page.locator("#job-filter button");
-  await expect(filters).toHaveCount(3);
-  expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["全部", "进行中", "已完成"]);
+  await expect(filters).toHaveCount(9);
+  expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual([
+    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0",
+  ]);
   await expect(filters.nth(0)).toHaveClass(/on/);
   await expect(page.locator("#job-pager")).toBeHidden();
   await expect(page.locator("#jobs-empty")).toBeVisible();
@@ -113,7 +114,7 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
 
 test("侧边栏脚注与 modal/toast 结构（JAVSCRIBE-CLIENT）", async ({ page }) => {
   await expect(page.locator("#nav .nav-id")).toHaveText("JAVSCRIBE-CLIENT");
-  await expect(page.locator("#foot-ver")).toHaveText("v0.2.12");
+  await expect(page.locator("#foot-ver")).toHaveText(`v${CLIENT_VERSION}`);
   await expect(page.locator(".nav-tick")).toHaveText("看板 5s · 生成 1s");
   await expect(page.locator("#up-chip")).toBeHidden();
   // 侧边栏更新块：dev 形态 bridge 状态恒 disabled → 整块隐藏（打包形态见 update.spec）

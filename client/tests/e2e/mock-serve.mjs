@@ -49,9 +49,9 @@ const SPEC = Object.fromEntries(CONFIG_ITEMS.map(([p, l, t, o, s]) => [p, { labe
 // ---- 扫描用的虚拟目录树（服务机器上的 /media/jav）----
 const SCAN_TREE = {
   "/media/jav": [
-    { name: "AKDL-001.mp4", size: 3_400_000_000, has_subtitle: false, subtitle: "" },
-    { name: "AKDL-002.mp4", size: 5_100_000_000, has_subtitle: true, subtitle: "AKDL-002.zh.srt" },
-    { name: "SUB-001.mkv", size: 2_200_000_000, has_subtitle: false, subtitle: "" },
+    { name: "AKDL-001.mp4", size: 3_400_000_000, has_subtitle: false, subtitle: "", subtitle_status: "none" },
+    { name: "AKDL-002.mp4", size: 5_100_000_000, has_subtitle: true, subtitle: "AKDL-002.zh.srt", subtitle_status: "external" },
+    { name: "SUB-001.mkv", size: 2_200_000_000, has_subtitle: false, subtitle: "", subtitle_status: "none" },
   ],
 };
 const SCAN_DIRS = Object.keys(SCAN_TREE);
@@ -70,6 +70,7 @@ const state = {
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
   seq: 0,
+  seedSeq: 0,        // seed 调用批次计数：固定 ID 会让连续两批 seed（running+done）互相覆盖
   // 监控快照（GET /metrics/json；/_mock/metrics 控制 GPU 有无与数值）
   metrics: { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 },
   metricsHist: [],      // 环形历史（/metrics/json 每请求追一点，reset 预填）
@@ -254,7 +255,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); return send(200, { ok: true }); }
       if (sub === "metrics") {
         return readBody().then((b) => {
           const d = b ? JSON.parse(b) : {};
@@ -290,6 +291,7 @@ const server = http.createServer((req, res) => {
         return readBody().then((b) => {
           // 前 skipped 个 skipped、再 errors 个 error、再 pending 个 pending、其余 status
           const { n = 25, status = "done", skipped = 0, errors = 0, pending = 0, progress = 0 } = b ? JSON.parse(b) : {};
+            const batch = ++state.seedSeq;
           for (let i = 0; i < n; i++) {
             const st = i < skipped ? "skipped"
               : i < skipped + errors ? "error"
@@ -304,7 +306,7 @@ const server = http.createServer((req, res) => {
               message: st === "skipped" ? "字幕已存在 /media/jav/seed-x.zh.srt"
                 : st === "error" ? "转写失败（mock）：模拟的推理错误" : "",
             });
-            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${String(i + 1).padStart(3, "0")}` });
+            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${batch}-${String(i + 1).padStart(3, "0")}` });
             // 确定性 created（间隔 60s，seed-n 最新）：created 降序的分页断言不依赖真实毫秒
             j.created = Date.now() / 1000 - (n - i) * 60;
           }

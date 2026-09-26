@@ -10,7 +10,7 @@ import {
   test as base, expect, _electron as electron,
   type Page, type APIRequestContext,
 } from "@playwright/test";
-import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -18,11 +18,13 @@ import { fileURLToPath } from "node:url";
 
 export const MOCK = "http://127.0.0.1:8302";
 export const MOCK_KEY = "mock-key-123";
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
+// 客户端版本（package.json 单一事实源；#health / #foot-ver 的版本来自 main 的 app.getVersion()）
+export const CLIENT_VERSION =
+  (readFileSync(join(ROOT, "package.json"), "utf-8").match(/"version":\s*"([^"]+)"/) || [])[1] || "0.0.0";
 // fixture 走 /tmp 安全副本（global-setup.ts 每次运行覆盖），与仓库原件解耦（见 global-setup.ts 注释）
 export const FIXTURES = join(tmpdir(), "javscribe-e2e-fixtures");
 const REPO_FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
-
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
 export const DIST = join(ROOT, "client", "dist-desktop");
 
 // ---------------------------------------------------------------------------
@@ -173,7 +175,7 @@ export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") 
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }
 
-/** 冷启动 + 等引擎在线（health 文案 v0.2.12 · 服务 1/1 在线） */
+/** 冷启动 + 等引擎在线（health 文案 v<客户端版本> · 服务 1/1 在线） */
 export async function waitForReady(page: Page) {
   await page.getByText(/服务 1\/1 在线/).first().waitFor({ timeout: 25_000 });
 }

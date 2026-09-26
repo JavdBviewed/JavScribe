@@ -131,7 +131,7 @@ test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engi
     await waitForReady(page);
     await goView(page, "engines");
     await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
-    await expect(page.locator(".set-note")).toHaveText(/还没有登记 API Key/, { timeout: 10_000 });
+    await expect(page.locator(".set-note")).toHaveText(/该服务尚未登记 API Key/, { timeout: 10_000 });
     await expect(page.locator("#key-input")).toBeVisible();
     await page.locator("#key-input").fill(MOCK_KEY);
     const [toast] = await Promise.all([
@@ -192,7 +192,7 @@ test("筛选 × 分页：25 条已完成 → 2 页 → 翻页边界", async ({ p
   await goView(page, "jobs");
   // created 降序（最新在前）：第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
   await page.locator(".job-row .fn", { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
-  await page.click('#job-filter [data-f="finished"]');
+  await page.click('#job-filter [data-f="done"]');
   await expect(page.locator(".pg-info")).toHaveText("第 1 / 2 页 · 共 25 条");
   await expect(page.locator("#job-list .job-row")).toHaveCount(20);
   await expect(page.locator(".job-row .fn", { hasText: "seed-006.mp4" })).toBeVisible();
@@ -201,29 +201,38 @@ test("筛选 × 分页：25 条已完成 → 2 页 → 翻页边界", async ({ p
   await expect(page.locator("#job-list .job-row")).toHaveCount(5);
   await expect(page.locator(".job-row .fn", { hasText: "seed-001.mp4" })).toBeVisible();
   await expect(page.locator("#pg-next")).toBeDisabled();
-  await page.click('#job-filter [data-f="running"]');
+  await page.click('#job-filter [data-f="active"]');
   await expect(page.locator("#jobs-empty")).toBeVisible();
   await expect(page.locator("#jobs-empty-text")).toHaveText("当前筛选下无任务");
 });
 
 test("扫描全流程：3 项（1 有字幕）→ 全选 → 入队 3 项 → 看板 3 行", async ({ page }) => {
+  // 所选含 1 个外部 srt 文件 → 提交前弹「已检测到字幕」confirm，接受继续
+  page.on("dialog", (d) => d.accept());
   await page.selectOption("#engine-select", "mock");
   await page.locator("#scan-path").fill("/media/jav");
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator(".scan-name")).toHaveCount(3);
-  await expect(page.locator(".has-sub .subtag")).toHaveText("AKDL-002.zh.srt");
-  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 已有字幕的默认不勾选");
+  // 外部 srt：文件名进 title 悬浮，标签统一显示「外部 srt」（0.2.x 扫描表重构后）
+  await expect(page.locator(".has-sub .subtag")).toHaveText("外部 srt");
+  await expect(page.locator(".has-sub .subtag")).toHaveAttribute("title", "AKDL-002.zh.srt");
+  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 1 个已有字幕默认不勾选");
   await expect(page.locator("#scan-submit")).toContainText("开始生成（2 项）");
   await page.locator("#scan-select-all").check();
-  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 已有字幕的默认不勾选");
+  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 1 个已有字幕默认不勾选");
   const [toast] = await Promise.all([
     page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
     page.click("#scan-submit"),
   ]);
   expect(await toast.textContent()).toContain("已入队 3 项");
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".job-row .sub", { hasText: "文件夹扫描 · 3 项" })).toHaveCount(3, { timeout: 15_000 });
+  // 本机管线：3 条独立任务，主名 = 原始视频名（与 web 契约一致，替代旧「文件夹扫描 · N 项」批量占位行）
+  // 桌面提交后不自动切看板（web 形态会），手动切过去断言
+  await goView(page, "jobs");
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-001.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-002.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
 });
 
 test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）", async ({ page }) => {
@@ -232,7 +241,7 @@ test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）
   await page.click("#scan-go");
   const t = page.locator("#toasts .toast.err");
   await expect(t).toBeVisible({ timeout: 5_000 });
-  expect(await t.textContent()).toContain("这是 Windows 本地路径");
+  expect(await t.textContent()).toContain("请改用上方「选择文件夹」");
   expect(await t.textContent()).toContain("选择文件夹");
   await expect(page.locator("#scan-results")).toBeHidden();
 });

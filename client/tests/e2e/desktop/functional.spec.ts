@@ -2,7 +2,7 @@
 // 不经过 8400 工作台——这是桌面端的核心数据链路，全部走 window.javDesktop
 import { test, expect, type APIRequestContext } from "./helpers";
 import {
-  MOCK, MOCK_KEY, FIXTURES,
+  MOCK, MOCK_KEY, FIXTURES, CLIENT_VERSION,
   mockPause, mockResume, mockConfigMode, mockJobs, waitForMockJobFinished, goView,
 } from "./helpers";
 import { join } from "node:path";
@@ -21,7 +21,7 @@ const icall = (page: any, method: string, ...args: string[]) =>
 test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   const r = await icall(page, "getHealth");
   expect(r.ok).toBe(true);
-  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: "0.2.12", engines: 1, online: 1 });
+  expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: CLIENT_VERSION, engines: 1, online: 1 });
 });
 
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {

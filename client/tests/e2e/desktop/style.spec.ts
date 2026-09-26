@@ -82,7 +82,7 @@ test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
 test("任务看板：已完成 + 分页器", async ({ page }) => {
   await mockSeed(req, { n: 25, status: "done" });
   await goView(page, "jobs");
-  await page.click('#job-filter [data-f="finished"]');
+  await page.click('#job-filter [data-f="done"]');
   await expect(page.locator("#job-pager")).toBeVisible();
   await page.locator("#pg-next").click();
   await page.locator(".pg-info", { hasText: "第 2 / 2 页" }).waitFor();

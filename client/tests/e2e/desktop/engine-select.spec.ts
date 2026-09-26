@@ -89,7 +89,7 @@ test("稳定性：手选第二引擎后 ≥2 个 5s 轮询周期不被打回第�
   }
 });
 
-test("持久化：手选第二引擎 → 重启（同 userData）→ 选中保留", async () => {
+test("重启（同 userData）：手选不跨重启保留 → 回落 pool 第一项（不回读 localStorage，09-25 起防整批绑死单台服务）", async () => {
   const dir = freshUserData();
   const first = await launch(dir);
   await first.page.selectOption("#engine-select", "second");
@@ -97,8 +97,10 @@ test("持久化：手选第二引擎 → 重启（同 userData）→ 选中保�
 
   const second = await launch(dir);
   try {
+    // v0.2.15（2aa89d9）起 renderSelect 不再回读 localStorage 记忆值：
+    // 现存选中（本次会话手选）> auto（工作台形态）> pool 第一项
     const v = await second.page.locator("#engine-select").evaluate((e) => (e as HTMLSelectElement).value);
-    expect(v).toBe("second");
+    expect(v).toBe("mock");
   } finally {
     await second.app.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });
