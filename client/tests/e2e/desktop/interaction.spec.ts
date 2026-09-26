@@ -1,5 +1,5 @@
 // 桌面端交互类：完整用户流（单文件本机提取三步动画、写回落盘 IPC、整片直传、文件夹批量、
-// Key 登记 UI、localStorage 持久化、retry、筛选×分页、扫描全流程、Windows 拦截、删除服务、小飞机二窗口）
+// Key 登记 UI、localStorage 持久化、retry、筛选×分页、扫描全流程、Windows 拦截、删除服务、小飞机外链）
 // 注意：autosave 的「自动下载」兜底走原生保存对话框，e2e 无法驱动，不覆盖；
 //       写回链路由 writeSrt IPC 用例在进程级覆盖（同一条 IPC 通路）。
 import { test, expect, goView, mockSpeed, mockSeed, mockReset, launchApp, relaunch, waitForReady, waitForEngineKey,
@@ -260,23 +260,19 @@ test("删除服务：confirm → 卡片移除", async ({ page }) => {
   expect(await page.locator("article.eng").count()).toBe(1);
 });
 
-test("小飞机跳转：第二窗口打开服务地址（地址本身非超链接）", async ({ app, page }) => {
-  const secondWindow = async () => {
-    const t0 = Date.now();
-    for (;;) {
-      const ws = app.windows();
-      for (const w of ws) {
-        if (w !== page && w.url().includes("127.0.0.1:8302")) return w;
-      }
-      if (Date.now() - t0 > 15_000) throw new Error("第二窗口未打开");
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  };
+test("小飞机跳转：外链交系统浏览器、应用内不新开窗口（地址本身非超链接）", async ({ app, page }) => {
   await goView(page, "engines");
-  const [np] = await Promise.all([
-    secondWindow(),
-    page.locator('.eng[data-name="mock"] .eng-go').click(),
-  ]);
-  expect(np.url()).toContain("127.0.0.1:8302");
-  await np.close();
+  await page.locator('.eng[data-name="mock"] .eng-go').click();
+  // ① windowOpenHandler deny + shell.openExternal：应用内永不出现第二窗口（frameless 新窗口无窗控）
+  await new Promise((r) => setTimeout(r, 2_000));
+  expect(app.windows()).toHaveLength(1);
+  // ② 实际交给系统浏览器的 URL = 服务地址（main 侧 JAVSCRIBE_OPEN_EXTERNAL_CAPTURE 记录）
+  const urls: string[] = await page.evaluate(async () => {
+    const r = (await (window as any).javDesktop.call("openedExternal")) as { ok: boolean; data?: string[] };
+    if (!r.ok || !r.data) throw new Error("openExternal 捕获读取失败");
+    return r.data;
+  });
+  expect(urls.some((u) => u.includes("127.0.0.1:8302"))).toBe(true);
+  // ③ 页面自身不受影响（仍停在服务视图）
+  await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
 });

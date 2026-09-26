@@ -120,6 +120,11 @@ export async function launchApp(userData: string, extraEnv: Record<string, strin
       JAVSCRIBE_CLIENT_FRAMELESS: "1",
       // watch e2e 提速：最小轮询间隔 300ms（生产默认 5000ms；不启用 watch 的 test 无感）
       JAVSCRIBE_WATCH_MIN_POLL_MS: "300",
+      // 服务端新版本检查指向本地 mock-github（8306），e2e 零外网；3s 间隔便于用例内切换 Release
+      JAVSCRIBE_UPDATE_GITHUB_BASE: "http://127.0.0.1:8306",
+      JAVSCRIBE_UPDATE_INTERVAL_S: "3",
+      // 外链（target=_blank）交系统浏览器：记录实际交出的 URL 供 t-call openedExternal 断言
+      JAVSCRIBE_OPEN_EXTERNAL_CAPTURE: "1",
       ...ffmpegEnv(),
       ...extraEnv,
     },
@@ -147,6 +152,11 @@ export async function launchPackedApp(userData: string, extraEnv: Record<string,
       JAVSCRIBE_CLIENT_FRAMELESS: "1",
       JAVSCRIBE_UPDATE_FEED: "http://127.0.0.1:8304/",
       JAVSCRIBE_NO_UPDATE_RELUNCH: "1",
+      // 服务端新版本检查指向本地 mock-github（8306），e2e 零外网
+      JAVSCRIBE_UPDATE_GITHUB_BASE: "http://127.0.0.1:8306",
+      JAVSCRIBE_UPDATE_INTERVAL_S: "3",
+      // 外链（target=_blank）交系统浏览器：记录实际交出的 URL 供 t-call openedExternal 断言
+      JAVSCRIBE_OPEN_EXTERNAL_CAPTURE: "1",
       // e2e 跑的是 linux-unpacked（非 AppImage 运行时）：electron-updater 的 Linux 实现
       // （AppImageUpdater）默认只在 APPIMAGE 环境变量存在时启用检查/下载链路。
       // 真实 AppImage 运行时由内核 magic 自动设置该变量，这里仿真之（值=当前二进制路径，
