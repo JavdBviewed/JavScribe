@@ -27,6 +27,9 @@ config/*-local.json
 .env.*
 
 # ---------- 运行时产物 ----------
+# 根 uv.lock = serve 本地 venv 产物（web/uv.lock 受版本管理，不受此影响）
+/uv.lock
+
 *.opus
 *.tmp
 *.bak
