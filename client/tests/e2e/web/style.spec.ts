@@ -92,7 +92,7 @@ test("任务看板：已完成 + 分页器", async ({ page }) => {
   await page.click('#job-filter [data-f="done"]');
   await expect(page.locator("#job-pager")).toBeVisible();
   await page.locator("#pg-next").click();
-  await page.locator(".pg-info", { hasText: "第 2 / 2 页" }).waitFor();
+  await page.locator(".pg-info", { hasText: "第 2 / 3 页" }).waitFor();
   await page.waitForTimeout(200);
   await freezeForShot(page, req);
   await shot(page, "style-08-jobs-pager", { element: "#sec-jobs" });

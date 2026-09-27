@@ -301,8 +301,8 @@ test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → �
   await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
 });
 
-test("扫描翻页：105 文件 → 2 页 → 翻页重渲染，勾选态跨页保留", async ({ page }) => {
-  // 105 个小视频（>100/页 → 2 页）；minsize 置 0 防「过小」干扰
+test("扫描翻页：105 文件 → 默认 10/页 11 页 → 切档 100 → 翻页重渲染，勾选态跨页保留", async ({ page }) => {
+  // 105 个小视频；minsize 置 0 防「过小」干扰
   const dir = path.join(os.tmpdir(), "javweb-scan-pager-e2e");
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
@@ -317,6 +317,12 @@ test("扫描翻页：105 文件 → 2 页 → 翻页重渲染，勾选态跨页�
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 120_000 });
   await expect(page.locator("#scan-pager")).toBeVisible();
+  // 默认 10 / 页 → 11 页
+  await expect(page.locator("#scan-pager .pg-info")).toHaveText("第 1 / 11 页 · 共 105 个文件");
+  await expect(page.locator("#scan-table .scan-name")).toHaveCount(10);
+  await expect(page.locator("#spg-size")).toHaveValue("10");
+  // 切档 100 / 页 → 2 页（切换后回第 1 页）
+  await page.selectOption("#spg-size", "100");
   await expect(page.locator("#scan-pager .pg-info")).toHaveText("第 1 / 2 页 · 共 105 个文件");
   await expect(page.locator("#scan-table .scan-name")).toHaveCount(100);
   // 默认全选 105 → 取消第 1 行勾选 → 翻页 → 计数保持（勾选态与页无关）
@@ -344,13 +350,18 @@ test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）
   await expect(page.locator("#scan-results")).toBeHidden();
 });
 
-test("筛选 × 分页：25 条已完成 → 2 页 → 翻页重渲染", async ({ page }) => {
+test("筛选 × 分页：25 条已完成 → 默认 10/页 3 页 → 切档 20 → 翻页重渲染", async ({ page }) => {
   await mockSeed(req, { n: 25, status: "done" });
   await goTab(page, "jobs");
   // /api/jobs 按 created 降序（最新在前），mock 按 60s 间隔赋 created：
-  // 第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
+  // 默认 10 / 页 → 3 页：页 1 = seed-016..025；切档 20 后：页 1 = seed-006..025，页 2 = seed-001..005
   await page.locator('.job-row .fn', { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
   await page.click('#job-filter [data-f="done"]');
+  await expect(page.locator(".pg-info")).toHaveText("第 1 / 3 页 · 共 25 条");
+  await expect(page.locator("#job-list .job-row")).toHaveCount(10);
+  await expect(page.locator("#pg-size")).toHaveValue("10");
+  // 切档 20 / 页 → 2 页（切换后回第 1 页）
+  await page.selectOption("#pg-size", "20");
   await expect(page.locator(".pg-info")).toHaveText("第 1 / 2 页 · 共 25 条");
   await expect(page.locator("#job-list .job-row")).toHaveCount(20);
   // 页 1 的末行边界：最老的一条（seed-006）仍在页 1

@@ -187,12 +187,15 @@ test("retry：跳过行 → 重新提交 → 新任务入列 running", async ({ 
   await expect(page.locator(".job-row.running").first()).toBeVisible({ timeout: 15_000 });
 });
 
-test("筛选 × 分页：25 条已完成 → 2 页 → 翻页边界", async ({ page, request }) => {
+test("筛选 × 分页：25 条已完成 → 默认 10/页 3 页 → 切档 20 → 翻页边界", async ({ page, request }) => {
   await mockSeed(request, { n: 25, status: "done" });
   await goView(page, "jobs");
-  // created 降序（最新在前）：第 1 页 = seed-006..025（20 行），第 2 页 = seed-001..005（5 行）
+  // created 降序（最新在前）：默认 10 / 页 → 3 页；切档 20 后：页 1 = seed-006..025，页 2 = seed-001..005
   await page.locator(".job-row .fn", { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
   await page.click('#job-filter [data-f="done"]');
+  await expect(page.locator(".pg-info")).toHaveText("第 1 / 3 页 · 共 25 条");
+  await expect(page.locator("#job-list .job-row")).toHaveCount(10);
+  await page.selectOption("#pg-size", "20");
   await expect(page.locator(".pg-info")).toHaveText("第 1 / 2 页 · 共 25 条");
   await expect(page.locator("#job-list .job-row")).toHaveCount(20);
   await expect(page.locator(".job-row .fn", { hasText: "seed-006.mp4" })).toBeVisible();

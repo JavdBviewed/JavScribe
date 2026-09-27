@@ -29,11 +29,12 @@ interface AppState {
   scanResolvedPath: string;
   scanChecked: Set<string>;
   scanPage: number;          // 扫描列表当前页（0 起；勾选态全局维护，与翻页互不影响）
+  scanPageSize: number;      // 扫描列表每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
   scanMinSizeMb: number;     // 「忽略小于」阈值（MB，localStorage 持久化）
   scanNamingC: string;       // 文件名独立 C 语义：has_sub / no_sub / off
   page: number;              // 任务分页：当前页（0 起）
-  pageSize: number;          // 任务分页：每页行数
+  pageSize: number;          // 任务分页：每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
   _summary: JobSummary | null; // 最近一次 /api/jobs/summary（serve 累计口径；null=回退行计数）
   _jobActive: Map<string, boolean>; // engine|job_id -> 该任务是否有文件运行中（单任务挂起可用性）
@@ -50,6 +51,14 @@ interface AppState {
 
 const savedExtract = localStorage.getItem("javweb_extract");
 
+// 分页档位（任务表与扫描表共用）：默认 10，用户可在分页器上切换并持久化
+const PAGE_SIZES: number[] = [10, 20, 50, 100, 500];
+const PAGE_SIZE_OPTS = PAGE_SIZES.map((n) => `<option value="${n}">${n} / 页</option>`).join("");
+function readPageSize(key: string): number {
+  const v = Number(localStorage.getItem(key));
+  return PAGE_SIZES.includes(v) ? v : 10;
+}
+
 const state: AppState = {
   file: null,
   folderFiles: null,
@@ -65,6 +74,7 @@ const state: AppState = {
   scanResolvedPath: "",
   scanChecked: new Set(),
   scanPage: 0,
+  scanPageSize: readPageSize("javweb_scan_pagesize"),
   lastScan: null,
   scanMinSizeMb: (() => {
     // 注意 Number(null) === 0：新浏览器（无持久化值）必须落到默认 200，
@@ -79,7 +89,7 @@ const state: AppState = {
     return v === "has_sub" || v === "no_sub" || v === "off" ? v : "no_sub";
   })(),
   page: 0,
-  pageSize: 20,
+  pageSize: readPageSize("javweb_jobs_pagesize"),
   _jobs: [],
   _summary: null,
   _jobActive: new Map(),
@@ -1142,7 +1152,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     el.innerHTML =
       `<button type="button" id="pg-prev" class="pg-btn" ${state.page === 0 ? "disabled" : ""} aria-label="上一页">&#8249;</button>` +
       `<span class="pg-info mono">第 ${state.page + 1} / ${pages} 页 · 共 ${total} 条</span>` +
-      `<button type="button" id="pg-next" class="pg-btn" ${state.page >= pages - 1 ? "disabled" : ""} aria-label="下一页">&#8250;</button>`;
+      `<button type="button" id="pg-next" class="pg-btn" ${state.page >= pages - 1 ? "disabled" : ""} aria-label="下一页">&#8250;</button>` +
+      `<select id="pg-size" class="pg-size" title="任务列表每页行数" aria-label="每页行数">${PAGE_SIZE_OPTS}</select>`;
+    const sizeSel = el.querySelector("#pg-size") as HTMLSelectElement;
+    sizeSel.value = String(state.pageSize);
+    sizeSel.onchange = () => {
+      state.pageSize = Number(sizeSel.value) || 10;
+      localStorage.setItem("javweb_jobs_pagesize", String(state.pageSize));
+      state.page = 0;
+      renderJobs(state._jobs);
+    };
   }
 
   // 耗时列 1s 刷新：轮询 5s 一次，运行中任务的耗时要逐秒走（ETA 随轮询更新）
@@ -2944,7 +2963,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
       renderScanPager(0);
     } else {
-      const PAGE = 100;
+      const PAGE = state.scanPageSize;
       const pages = Math.max(1, Math.ceil(items.length / PAGE));
       const pg = Math.min(Math.max(0, state.scanPage), pages - 1);
       const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
@@ -2993,8 +3012,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 扫描结果翻页（大量文件场景；勾选态全局维护，与当前页无关）
   function renderScanPager(total: number) {
     const el = $("scan-pager");
-    const PAGE = 100;
-    const pages = Math.max(1, Math.ceil(total / PAGE));
+    const pages = Math.max(1, Math.ceil(total / state.scanPageSize));
     if (pages <= 1) { el.hidden = true; el.innerHTML = ""; return; }
     const pg = Math.min(Math.max(0, state.scanPage), pages - 1);
     const go = (next: number) => {
@@ -3007,10 +3025,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     el.innerHTML = `
       <button type="button" class="pg-btn txt" id="spg-prev"${pg === 0 ? " disabled" : ""}>← 上一页</button>
       <span class="pg-info mono">第 ${pg + 1} / ${pages} 页 · 共 ${total} 个文件</span>
-      <button type="button" class="pg-btn txt" id="spg-next"${pg >= pages - 1 ? " disabled" : ""}>下一页 →</button>`;
+      <button type="button" class="pg-btn txt" id="spg-next"${pg >= pages - 1 ? " disabled" : ""}>下一页 →</button>` +
+      `<select id="spg-size" class="pg-size" title="扫描列表每页行数" aria-label="每页行数">${PAGE_SIZE_OPTS}</select>`;
     el.hidden = false;
     (el.querySelector("#spg-prev") as HTMLButtonElement).onclick = () => go(pg - 1);
     (el.querySelector("#spg-next") as HTMLButtonElement).onclick = () => go(pg + 1);
+    const sizeSel = el.querySelector("#spg-size") as HTMLSelectElement;
+    sizeSel.value = String(state.scanPageSize);
+    sizeSel.onchange = () => {
+      state.scanPageSize = Number(sizeSel.value) || 10;
+      localStorage.setItem("javweb_scan_pagesize", String(state.scanPageSize));
+      state.scanPage = 0;
+      if (state.lastScan) renderScanResults(state.lastScan);
+    };
   }
 
   function updateScanSummary(truncated?: boolean) {
