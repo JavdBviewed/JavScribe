@@ -26,7 +26,7 @@
 （客户端 · Docker 形态从本仓库 `web/` 构建，版本与安装形态同步，见 [web/README.md](web/README.md)）
 
 <!-- release-latest:serve -->
-⚙️ **JavScribe Serve**（服务端，headless）v0.2.4：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.4)
+⚙️ **JavScribe Serve**（headless 服务端）v0.2.5：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.5/JavScribe-Serve-0.2.5-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.5/JavScribe-Serve-0.2.5-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.5)
 
 [全部 Release →](https://github.com/JavdBviewed/JavScribe/releases)（发布后本区自动钉到最新 tag）
 
