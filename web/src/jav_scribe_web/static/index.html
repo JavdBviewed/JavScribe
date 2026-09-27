@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-BG7Or8vc.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-j84i5LWX.css">
+  <script type="module" crossorigin src="/assets/index-CEXIkw5i.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CR1ZSQSj.css">
 </head>
 <body>
 <header>
@@ -207,8 +207,9 @@
     <div class="sec-head">
       <div class="sec-title"><span class="kicker">Tasks</span><h2>字幕任务</h2></div>
       <div id="job-filter" class="seg" role="group" aria-label="筛选任务（按钮内为各状态任务数）"></div>
+      <div id="job-source-filter" class="seg" role="group" aria-label="筛选任务来源（本机派发 / 他端任务）" hidden></div>
       <button type="button" id="job-pause-all" class="btn job-pause-all" hidden
-        title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
+        title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（服务端级操作：所有连接这些服务的客户端都会看到队列挂起；运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">

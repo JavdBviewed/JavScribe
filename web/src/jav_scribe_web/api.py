@@ -571,9 +571,15 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 wb_index[t.job_id] = t.writeback
             if t.job_id and t.sub_status:
                 sub_index[t.job_id] = t.sub_status
+        # 任务归属：本工作台提交过的 job_id（uploads.json 持久化，重启不丢）。
+        # 多客户端连同一服务端时，不在集合内的服务行 = 他端提交 → 前端标「他端」、
+        # 隐藏本机专属动作（字幕不会落回本机，源视频不在本机磁盘）。
+        local_job_ids = {t.job_id for t in _uploads.values() if t.job_id}
         for name, details in poller.jobs.items():
             for job in details:
-                rows.extend(_job_rows(name, job, wb_index, sub_index))
+                for r in _job_rows(name, job, wb_index, sub_index):
+                    r["local"] = bool(job.get("id")) and job.get("id") in local_job_ids
+                    rows.append(r)
         # 本机上传管线在「服务端任务出现之前」的阶段（提取音轨 / 派发 / 失败）
         # 也渲染成任务行——否则提交后任务表空白，用户会以为没提交成功而重复提交。
         live_job_ids = {
@@ -618,6 +624,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     "eta_s": None,
                     "message": t.error or "",
                     "output_files": [],
+                    "local": True,  # 本机管线行：必为本客户端提交
                 }
             )
         rows.sort(

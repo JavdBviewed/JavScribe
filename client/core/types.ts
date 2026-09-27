@@ -79,6 +79,10 @@ export interface JobRow {
   output_files?: string[];
   /** 本地扫描任务的字幕回写状态（工作台本机回写）：ok / skipped_exists / skipped / failed:… */
   writeback?: string | null;
+  /** 任务归属（web 工作台口径）：true = 本客户端提交（本机管线行 / 本工作台提交的服务行）；
+   *  false = 他端客户端提交的服务任务（可看进度 + 服务端操作，字幕不落回本机）；
+   *  未定义 = 形态不区分归属（desktop / 旧版 API），前端按本机处理 */
+  local?: boolean | null;
 }
 
 /** GET /api/uploads/{id}：提取→派发 两阶段任务 */

@@ -18,6 +18,7 @@ interface AppState {
   file: File | null;
   folderFiles: FolderVideo[] | null;
   filter: string;
+  source: string;                  // 任务来源筛选：all / local（本机派发）/ serve（他端任务）
   busy: boolean;
   knownJobs: Map<string, string>;
   retried: Set<string>;
@@ -53,6 +54,7 @@ const state: AppState = {
   file: null,
   folderFiles: null,
   filter: "all",
+  source: "all",
   busy: false,
   knownJobs: new Map(),
   retried: new Set(),
@@ -874,6 +876,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
     const isServeRow = !!j.job_id;
+    // 他端标记：他端客户端提交的服务任务（字幕不落回本机；服务端操作仍可用）
+    const srcTag = j.local === false
+      ? `<span class="src-tag" title="该任务由其他客户端提交：可看进度并做服务端操作（暂停/继续/重试/取消/下载 srt）；源视频不在本机，字幕不会自动落回本机磁盘">他端</span>`
+      : "";
     const jobActive = isServeRow && state._jobActive.get(retryKey) === true;
     // 跳过（服务行）：删旧字幕重新生成
     const retry = isServeRow && j.status === "skipped" && !state.retried.has(retryKey)
@@ -919,12 +925,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel, srcTag].join("\u0001");
     const html = `
       <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${wb}${ss}</div>
+      <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
@@ -949,6 +955,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 统计与筛选合一（renderFilterBar）：终态计数走 serve 累计 summary（200 内存窗
     // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
     renderFilterBar();
+    renderSourceFilter();
     renderPauseAllBtn();
 
     // 单任务挂起可用性：同任务任一文件运行中 → 服务侧拒绝挂起（409），行级「暂停」隐藏
@@ -1038,6 +1045,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // ---------- 任务分页（基于缓存即时翻页，不请求网络；5s 轮询照常刷新数据） ----------
   function visibleRows(rows: JobRow[]) {
     return rows.filter((r) => {
+      // 来源维度（多客户端连同一服务端）：local 仅本机派发行；serve 仅他端提交的服务行。
+      // r.local 未定义（desktop/旧 API）按本机处理，行为不变。
+      if (state.source === "local" && r.local !== true) return false;
+      if (state.source === "serve" && r.local !== false) return false;
       if (state.filter === "all") return true;
       const b = rowBucket(r);
       if (state.filter === "active") return b === "queued" || b === "extracting" || b === "transcribing";
@@ -1076,6 +1087,47 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     for (const b of Array.from(box.querySelectorAll<HTMLButtonElement>("button"))) {
       b.onclick = () => {
         state.filter = b.dataset.f || "all";
+        state.page = 0;
+        renderJobs(state._jobs);
+      };
+    }
+  }
+
+  // ---------- 来源筛选（多客户端连同一服务端时出现；纯本机任务时隐藏，保持界面干净） ----------
+  function renderSourceFilter() {
+    const box = $("job-source-filter") as HTMLElement;
+    let nLocal = 0;
+    let nServe = 0;
+    for (const r of state._jobs) {
+      if (r.local === true) nLocal += 1;
+      else if (r.local === false) nServe += 1;
+    }
+    if (!nServe) {
+      // 无他端任务：收起来源条；若用户正停留在「他端任务」筛选上则复位，避免列表空转
+      if (state.source !== "all") {
+        state.source = "all";
+        state.page = 0;
+      }
+      box.hidden = true;
+      (box as HTMLElement & { _html?: string })._html = "";
+      return;
+    }
+    box.hidden = false;
+    const items: Array<[string, string, number]> = [
+      ["all", "全部", nLocal + nServe],
+      ["local", "本机派发", nLocal],
+      ["serve", "他端任务", nServe],
+    ];
+    const html = items.map(([k, zh, n]) =>
+      `<button type="button" data-s="${k}" class="${state.source === k ? "on" : ""}">${zh} <b>${n}</b></button>`,
+    ).join("");
+    if ((box as HTMLElement & { _html?: string })._html !== html) {
+      (box as HTMLElement & { _html?: string })._html = html;
+      box.innerHTML = html;
+    }
+    for (const b of Array.from(box.querySelectorAll<HTMLButtonElement>("button"))) {
+      b.onclick = () => {
+        state.source = b.dataset.s || "all";
         state.page = 0;
         renderJobs(state._jobs);
       };
@@ -1275,6 +1327,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         "暂停所有任务？\n\n" +
         "· 本机管线（音轨提取 / 派发）不再开新任务，排队中的立即挂起\n" +
         "· 各在线服务队列同步挂起；运行中的任务会跑完当前影片\n" +
+        "· 服务队列暂停是服务端级操作：所有连接这些服务的客户端都会看到队列挂起\n" +
         "· 已入队的批量任务不受影响，随时可「继续任务」恢复\n\n" +
         "适合在发布新版客户端前冻结队列，避免发版期间任务丢失。",
       );
@@ -2601,6 +2654,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         </span>
       </div>`;
     }
+    html += `
+    <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）；下方「客户端设置」卡片例外，只保存在本机。</div>`;
     if (clientCfg) {
       html += `
       <section class="cfg-sec cfg-sec-client" data-sec="client">

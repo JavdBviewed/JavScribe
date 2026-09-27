@@ -89,3 +89,7 @@ Desktop.ini
 client/packaging/ffmpeg/
 # electron-builder 产物目录
 release/
+
+# ---------- 部署机本地构建配置（永不进仓库） ----------
+web/docker/Dockerfile.134
+web/docker/docker-compose.override.yml

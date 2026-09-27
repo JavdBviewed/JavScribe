@@ -4,21 +4,46 @@
 
 > **本仓库只做「功能」，不内置任何模型权重。** 需要什么模型、去哪下、放哪、怎么配，见 [docs/models.md](docs/models.md)；部署方式（本地 / Docker）见 [docs/deployment.md](docs/deployment.md) 与 [docs/docker.md](docs/docker.md)。
 
+## 产品与形态
+
+两个角色、三种形态。**服务端负责模型与处理，客户端负责扫描与上传**，经 HTTP（API Key 鉴权）对接：
+
+| 角色 | 形态 | 部署在哪 | 职责 |
+|---|---|---|---|
+| **服务端** | JavScribe Serve（headless 常驻） | 有显卡、或已对接模型 API 的机器 | 持有/调用模型跑 ASR，接收客户端上传的音轨，产出字幕 |
+| **客户端** | 字幕工作台 · Docker 形态 | 用户自选的客户端部署机（NAS / PC / 服务器均可） | 浏览器访问：扫描本机影片、提取音轨上传、任务看板、字幕落回本机影片旁 |
+| **客户端** | JavScribe Client · 安装形态（exe） | 用户本地电脑 | 与 Docker 形态同一产品：原生文件系统恒可用，srt 写回影片原目录 |
+
+- **客户端是同一个产品、两种形态**：同一套前端代码（`client/` 单一来源）、同一版本号、同一时间发布，样式与交互完全一致。选 Docker 形态适合「在部署机上开浏览器管理」；选安装形态适合「本地双击即用、写回本地磁盘」。
+- **多客户端可连同一服务端**：任务状态以服务端为单一真源，各客户端轮询呈现；他端提交的任务在任务看板标「他端」，可看进度并做服务端操作（暂停/继续/重试/取消/下载），字幕不落回本机（源视频不在本机）。
+- **文件夹语义**：「扫描目录」扫描的是**客户端部署机**上的目录；「选择文件夹」上传走**浏览器/exe 所在机器**的本地文件；完成后字幕自动落回客户端部署机的影片旁。
+- **服务端无图形界面**：所有可视化（看板、设置、更新提示）都落在客户端前端；服务端的新版本提示也会显示在客户端的服务卡片上。
+
 ## 最新版下载
 
 <!-- release-latest:client -->
-🖥️ **JavScribe Client**（桌面客户端）v0.2.17：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client_0.2.17_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.17)
+🖥️ **JavScribe Client**（客户端 · 安装形态）v0.2.17：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client-0.2.17-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.17/jav-scribe-client_0.2.17_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.17)
+（客户端 · Docker 形态从本仓库 `web/` 构建，版本与安装形态同步，见 [web/README.md](web/README.md)）
 
 <!-- release-latest:serve -->
-⚙️ **JavScribe Serve**（headless 服务端）v0.2.4：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.4)
+⚙️ **JavScribe Serve**（服务端，headless）v0.2.4：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.4/JavScribe-Serve-0.2.4-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.4)
 
 [全部 Release →](https://github.com/JavdBviewed/JavScribe/releases)（发布后本区自动钉到最新 tag）
+
+## 版本与发布
+
+| 组件 | 版本号 | 发布方式 |
+|---|---|---|
+| 服务端 `serve` | 独立 `vX.Y.Z` | tag `serve-v*` → CI 打 headless exe（win/linux）+ GitHub Release + ghcr 镜像 |
+| 客户端（Docker 形态 + 安装形态） | **同号同发**：`web-vX.Y.Z` 与 `client-vX.Y.Z` 同一 commit 打双 tag | tag `client-v*` → CI 出 exe 安装包（win/linux）；web 镜像在部署机 `docker compose --build` 构建 |
+
+前端更新检查同时比对客户端与服务端的 GitHub Release：客户端新版本提示与卡片角标、服务端版本落后提示都显示在客户端前端。
 
 ```
  下载落盘目录 (mkv/ts/...)
       │  目录监听（文件大小稳定才接手，避免半截下载）
       ▼
- JavScribe 流水线
+ JavScribe 流水线（服务端）
    ├─ 预检: 已有 <影片名>.zh.srt → 跳过
    ├─ [可选] JASNA 马赛克修复
    ├─ 字幕引擎: ChickenRice Whisper (ja→zh 一步到位, CTranslate2, CUDA/CPU)
@@ -36,6 +61,7 @@
 - **媒体库友好**：输出固定 `<影片名>.zh.srt`（可配 ja/en/none），与影片同目录；Emby/Jellyfin/Plex 自动挂载，多分卷天然按各自基名匹配
 - **下载目录监听**：大小稳定检测（下载未完成不接手）、存量文件可一次追平、已生成字幕自动跳过
 - **进度可见**：进度精确到**影片时间轴**（"已翻到 47:12 / 共 150:20"），HTTP 接口随时查询；批量一次加载模型
+- **客户端看板**：多服务聚合、任务来源区分（本机派发 / 他端）、批量操作（暂停/继续/重试/取消/改派）、全局暂停、srt 在线预览、服务端设置热改、监控趋势图、自动均衡调度
 - **本地 / 服务器一套代码**：一个配置两份 `profiles`（`--profile local|server`）——本地 `run`/`watch`/`serve` 常驻（headless，可打 exe 双击即用，见 [docs/serve-local.md](docs/serve-local.md)）；服务器 `serve` 常驻 + 进度接口，Docker 一条命令起
 - **远端处理**：客户端 `jav-scribe upload 影片.mkv --remote http://<服务器>:8300` → ffmpeg 只抽 16kHz opus 音频上传 → 服务器跑完 → SRT 回传并落到影片同目录。**不传整片**
 - **可选增强**：LLM 润色第二遍（任何 OpenAI 兼容端点）、Emby Refresh 联动、JASNA 马赛克修复（流水线内外部命令）
@@ -124,36 +150,42 @@ src/jav_scribe/
 
 打包：`serve_launcher.py` + `jav-scribe-serve.spec`（headless serve exe，release-serve CI 打 win/linux 包，见 [docs/serve-local.md](docs/serve-local.md)）。
 
-另见 `web/`：字幕工作台（独立 Web 服务，见 [web/README.md](web/README.md)）。
+客户端前端单一来源在 `client/`（`client/ui` 为界面代码，web / desktop 两个构建目标共用），
+`web/` 为客户端 Docker 形态的 Web 服务（FastAPI 聚合 + 静态前端），详见下节与 [web/README.md](web/README.md)。
 
 ## 安全
 
-## 字幕工作台（web/）
+- 服务端进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。
+- `GET/PUT /config`（设置管理）与 `GET /scan` / `POST /scan/submit`（文件夹扫描入队）有 `X-Api-Key` 鉴权（env `JAVSCRIBE_API_KEY`）。注意 `/scan` 可列举**服务所在机器上的任意目录**并据路径入队，与 `/config` 同级敏感，切勿对外暴露。
+- 容器化部署默认把宿主机根只读挂载在容器 `/hostfs`（仅 `/scan` 可达）；设置 `JAVSCRIBE_HOST_ROOT=/hostfs` 后，扫描/入队对「容器内不存在的路径」会自动映射到宿主机同名路径，方便直接填服务器上的目录。
+- 请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
+
+## 客户端：字幕工作台（两种形态）
 
 多服务 Web 工作台：聚合 N 个 `serve` 字幕服务的 `/health` + `/jobs`，看板看进度、
-页面生成字幕（本机提取 16kHz opus 音轨、只把音轨发给服务）、下载 srt、
-在页面上管理服务端设置项（`/config`，API Key 鉴权）。
-纯静态前端、无构建链；接口与部署细节见 [web/README.md](web/README.md)。
+页面生成字幕（提取 16kHz opus 音轨、只把音轨发给服务）、下载 srt、
+在页面上管理服务端设置项（`/config`，API Key 鉴权）、扫描客户端部署机目录批量入队。
+**同一套前端代码（`client/`）构建两种形态，样式与交互完全一致、版本号同步**：
 
-![字幕工作台界面预览](docs/web-ui.png)
+### 形态一：Docker 部署（浏览器访问）
 
 ```bash
-cd web
+git clone https://github.com/JavdBviewed/JavScribe && cd JavScribe/web
 JAV_ENGINES="服务A=http://<IP_A>:8300,服务B=http://<IP_B>:8300" \
   docker compose -f docker/docker-compose.yml up -d --build
-# 浏览器打开 http://<本机>:8400
+# 浏览器打开 http://<客户端部署机>:8400
 ```
 
-工作台是**无状态聚合器**：任务态以服务内存为准，只持久化服务登记表（数据卷，
-含各服务的 API Key）。
+- 部署在**客户端部署机**上：「扫描目录」扫的就是这台机器的磁盘，字幕完成后自动落回影片旁。
+- 任务状态以服务端内存为准；客户端只持久化服务登记表（数据卷，含各服务 API Key）、
+  自己的派发记录（字幕回写跟踪）与客户端设置（提取/转译并发等）。
+- 接口与部署细节见 [web/README.md](web/README.md)。
 
-进度/上传接口（默认 8300 端口）**无鉴权**：`PUT /upload` 会接收音频并提交处理，`GET /jobs` 暴露任务与文件路径。`GET/PUT /config`（设置管理）与 `GET /scan` / `POST /scan/submit`（文件夹扫描入队）有 `X-Api-Key` 鉴权（env `JAVSCRIBE_API_KEY`）。注意 `/scan` 可列举**服务所在机器上的任意目录**并据路径入队，与 `/config` 同级敏感，切勿对外暴露。容器化部署默认把宿主机根只读挂载在容器 `/hostfs`（仅 `/scan` 可达）；设置 `JAVSCRIBE_HOST_ROOT=/hostfs` 后，扫描/入队对「容器内不存在的路径」会自动映射到宿主机同名路径，方便直接填服务器上的目录。请只暴露给内网/VPN；必须对外时在前面加一层带鉴权的反向代理。
+### 形态二：安装版（桌面 exe）
 
-## JavScribe Client（桌面端）
-
-同一套前端的 Electron 桌面形态（web 形态不变）：**在本机提音轨，只上传 ~35MB 音频，
-无大小限制**；多字幕服务登记 + API Key 本地存储、srt 写回影片原目录（原生文件系统
-恒可用）。随包静态 ffmpeg，无需系统安装（可用环境变量 `JAVSCRIBE_FFMPEG` 覆盖）。
+**在本机提音轨，只上传 ~35MB 音频，无大小限制**；多字幕服务登记 + API Key 本地存储、
+srt 写回影片原目录（原生文件系统恒可用）。随包静态 ffmpeg，无需系统安装（可用环境变量
+`JAVSCRIBE_FFMPEG` 覆盖）。
 
 - 获取：[GitHub Releases](https://github.com/JavdBviewed/JavScribe/releases)
   （tag `client-v*` 触发 CI 出包：Windows NSIS/portable/zip，Linux AppImage/deb/zip；
@@ -162,6 +194,16 @@ JAV_ENGINES="服务A=http://<IP_A>:8300,服务B=http://<IP_B>:8300" \
 - 本地出包：`node scripts/fetch-ffmpeg.mjs <win|linux> && pnpm build:release:<linux|win>`
 - 桌面端 e2e（mock serve，功能/交互/样式/UI 四类）：`pnpm test:e2e:desktop`
 - CI/CD 细节：`.github/workflows/release-client.yml`（tag 触发，含 e2e 冒烟子集）
+
+### 多客户端共用一个服务端
+
+- 任意多个客户端（Docker 形态实例 / 安装版 / 同一实例的多个浏览器）可连同一服务端。
+- 任务状态单一真源在服务端：一个客户端的暂停/继续/重试/取消对**所有客户端**即时生效（各端轮询秒级可见）。
+- 「暂停所有」与服务设置改动是**服务端级操作**（影响所有连接该服务的客户端），界面均有提示。
+- 他端提交的任务在本端任务看板标「他端」：可看进度、可下载 srt、可做服务端操作，
+  但字幕不会自动落回本机（源视频不在本机磁盘）。
+
+![字幕工作台界面预览](docs/web-ui.png)
 
 ## 致谢与许可
 
