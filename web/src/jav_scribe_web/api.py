@@ -1395,6 +1395,32 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         _metrics_cache[name] = (now, payload)
         return payload
 
+    @app.get("/api/engines/{name}/ready")
+    async def api_engine_ready(name: str) -> dict:
+        """组件就绪自检（代理 serve GET /ready；serve 0.2.6+）。
+
+        旧 serve 无 /ready → unsupported（前端降级为提示升级）；网络错误 →
+        unreachable。按需拉取（服务设置弹窗打开/手动刷新），不做轮询。
+        """
+        entry = store.get(name)
+        if entry is None:
+            raise HTTPException(404, "服务不存在")
+        eng = JavScribeEngine(name, entry["url"])
+        try:
+            try:
+                data = await eng.ready()
+                payload = {"ok": True, "ready": data}
+            except httpx.HTTPStatusError as ex:
+                if ex.response.status_code == 404:
+                    payload = {"ok": False, "error": "unsupported"}
+                else:
+                    payload = {"ok": False, "error": f"服务返回 HTTP {ex.response.status_code}"}
+            except httpx.HTTPError:
+                payload = {"ok": False, "error": "unreachable"}
+        finally:
+            await eng.close()
+        return payload
+
     @app.get("/api/engines/{name}/config")
     async def api_engine_config(name: str) -> dict:
         entry = store.get(name)

@@ -154,6 +154,25 @@ test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engi
   }
 });
 
+test("服务设置弹窗：组件就绪自检卡片（全就绪 + 单项异常重拉）", async ({ page, request }) => {
+  await goView(page, "engines");
+  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
+  await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible();
+  await expect(page.locator("#modal .ready-flag.ok")).toContainText("全部就绪", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row")).toHaveCount(11);
+
+  // 单项异常（gpu=fail，required）→ 重开弹窗重新拉取 → 「存在未就绪项」
+  await request.post(`${MOCK}/_mock/ready?gpu=fail`);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#modal")).toBeHidden({ timeout: 5_000 });
+  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
+  await expect(page.locator("#modal .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row.st-fail")).toHaveCount(1);
+  // 复原，避免拖死后续用例
+  await mockReset(request);
+});
+
 test("localStorage 持久化：autosave + 提取模式 + 所选服务重启保留", async ({ app, userData, page }) => {
   await page.locator("#autosave").check();
   await page.selectOption("#extract-select", "server");

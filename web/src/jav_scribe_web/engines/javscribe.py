@@ -9,6 +9,7 @@ Protocol (JavScribe repo, progress_api.py):
   POST /upload/submit?sha1=&ext=   -> 201 {ok, job_id, file, cached}（命中免传字节；未命中 409）
   POST /jobs/<id>/retry          -> 201 {ok, job_id}  (re-queue SKIPPED files, force regenerate)
   GET  /jobs/<id>/result           -> SRT bytes
+  GET  /ready                      -> {ok, ready, version, items[]}（0.2.6+；旧版 404）
   GET  /config                     -> {ok, profile, items[]}      (X-Api-Key)
   PUT  /config {"values": {...}}  -> {ok, updated[]}             (X-Api-Key)
   注意：按架构约定，工作台不代理 serve 的 /scan、/scan/submit——
@@ -75,6 +76,12 @@ class JavScribeEngine(EngineAdapter):
 
     async def job_detail(self, job_id: str) -> dict:
         r = await self._get_client().get(f"{self.url}/jobs/{job_id}")
+        r.raise_for_status()
+        return r.json()
+
+    async def ready(self) -> dict:
+        """组件就绪自检（serve 0.2.6+ GET /ready；旧 serve 404 → 由调用方降级）。"""
+        r = await self._get_client().get(f"{self.url}/ready")
         r.raise_for_status()
         return r.json()
 

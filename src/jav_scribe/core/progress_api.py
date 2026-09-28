@@ -4,6 +4,8 @@ Endpoints (all JSON unless noted):
   GET  /health                 -> {ok, version, profile, device, jobs}
   GET  /metrics                -> Prometheus text (0.0.4)
   GET  /metrics/json           -> JSON 监控快照（GPU/调度/1h 历史，前端趋势图；0.2.4+）
+  GET  /ready                -> 组件就绪自检（模型/VAD/ffmpeg/GPU/磁盘…；0.2.6+，
+                                客户端「服务设置」弹窗展示；与 /health 同敏感级）
   GET  /jobs                   -> list of job summaries
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
@@ -58,6 +60,7 @@ from ..constants import APP_NAME, APP_VERSION, VIDEO_EXTS
 from . import retention as retentionlib
 from . import scan as scanlib
 from . import metrics as metricslib
+from . import readiness as readinesslib
 from . import subprobe
 
 if TYPE_CHECKING:
@@ -442,6 +445,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "jobs": [j.to_dict() for j in e.jobs],
                 },
             )
+            return
+        if len(parts) == 1 and parts[0] == "ready":
+            # 组件就绪自检（客户端「服务设置」弹窗按需拉取；本地检查毫秒级，
+            # 与 /health 同敏感级：无鉴权、仅内网）
+            self._send(200, readinesslib.build_readiness_report(self.engine.cfg), "application/json")
             return
         if parts[:2] == ["metrics", "json"] or (
             len(parts) == 1 and parts[0] == "metrics"

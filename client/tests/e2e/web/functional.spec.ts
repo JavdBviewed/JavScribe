@@ -3,7 +3,7 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES, makeScanDir,
   mockReset, mockSeed, mockPause, mockResume, mockConfigMode, mockControl, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
-  resetPipelinePause, mockSpeed,
+  resetPipelinePause, mockSpeed, goTab, waitForEngineOnline,
 } from "../helpers";
 import path from "node:path";
 import http from "node:http";
@@ -11,6 +11,10 @@ import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync
 
 const fx = (n: string) => path.join(FIXTURES, n);
 const jh = { "Content-Type": "application/json" };
+
+// mock serve 版本 = web 版本（playwright.config.ts 同法读取），用于 /ready 透传断言
+const WEB_VERSION =
+  (readFileSync(path.join(process.cwd(), "web/pyproject.toml"), "utf-8").match(/^version = "([^"]+)"/m) || [])[1] || "0.1.0";
 
 // 本地扫描夹具（工作台本机临时目录，3 项：2 无字幕 + 1 外部 srt）
 const SCAN_DIR = makeScanDir();
@@ -666,4 +670,70 @@ test("metrics：/api/engines/{name}/metrics（GPU 快照 / 旧版服务 unsuppor
   } finally {
     await req.delete(`${WEB_URL}/api/engines/dead-x`);
   }
+});
+
+test("组件就绪自检 /ready：全就绪透传 + 单项异常 + 旧服务/不可达降级", async () => {
+  // 默认全 ok（required 项全 ok → ready=true）
+  let r = await req.get(`${WEB_URL}/api/engines/mock/ready`);
+  expect(r.status()).toBe(200);
+  let body = (await r.json()) as {
+    ok: boolean; ready?: { ready: boolean; version: string; device: string; items: Array<{ key: string; status: string; required: boolean }> };
+  };
+  expect(body.ok).toBe(true);
+  expect(body.ready!.ready).toBe(true);
+  expect(body.ready!.version).toBe(WEB_VERSION);
+  expect(body.ready!.device).toBe("cuda");
+  const model = body.ready!.items.find((i) => i.key === "model")!;
+  expect(model.status).toBe("ok");
+  expect(model.required).toBe(true);
+
+  // 单项异常（model=fail，required）→ ready=false
+  await req.post(`${MOCK_URL}/_mock/ready?model=fail`);
+  r = await req.get(`${WEB_URL}/api/engines/mock/ready`);
+  body = (await r.json()) as typeof body;
+  expect(body.ready!.ready).toBe(false);
+  expect(body.ready!.items.find((i) => i.key === "model")!.status).toBe("fail");
+
+  // 旧版服务（无 /ready → 404）→ unsupported
+  const srv = http.createServer((_q, res) => {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((rs) => srv.listen(8306, "127.0.0.1", () => rs()));
+  try {
+    await addEngine(req, { name: "legacy-r", url: "http://127.0.0.1:8306" });
+    await waitForEngineListed(req, "legacy-r");
+    expect(await (await req.get(`${WEB_URL}/api/engines/legacy-r/ready`)).json()).toEqual({ ok: false, error: "unsupported" });
+  } finally {
+    await req.delete(`${WEB_URL}/api/engines/legacy-r`).catch(() => {});
+    await new Promise<void>((rs) => srv.close(() => rs()));
+  }
+  // 不可达 → unreachable
+  await addEngine(req, { name: "dead-r", url: "http://127.0.0.1:9999" });
+  await waitForEngineListed(req, "dead-r");
+  try {
+    expect(await (await req.get(`${WEB_URL}/api/engines/dead-r/ready`)).json()).toEqual({ ok: false, error: "unreachable" });
+  } finally {
+    await req.delete(`${WEB_URL}/api/engines/dead-r`);
+  }
+});
+
+test("服务设置弹窗：组件就绪卡片（全就绪 + 单项异常）", async ({ page }) => {
+  await page.goto("/");
+  await waitForEngineOnline(page);
+  await goTab(page, "engines");
+  await page.locator('button.set[data-name="mock"]').click();
+  await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible();
+  await expect(page.locator("#modal .ready-flag.ok")).toContainText("全部就绪", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row")).toHaveCount(11);
+  await expect(page.locator("#modal .ready-row.st-ok")).toHaveCount(7);
+
+  // 单项异常（gpu=fail）→ 重新打开弹窗拉取后显示「存在未就绪项」
+  await req.post(`${MOCK_URL}/_mock/ready?gpu=fail`);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#modal")).toBeHidden();
+  await page.locator('button.set[data-name="mock"]').click();
+  await expect(page.locator("#modal .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row.st-fail")).toHaveCount(1);
+  await mockReset(req);
 });

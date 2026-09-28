@@ -73,6 +73,8 @@ const state = {
   seedSeq: 0,        // seed 调用批次计数：固定 ID 会让连续两批 seed（running+done）互相覆盖
   // 监控快照（GET /metrics/json；/_mock/metrics 控制 GPU 有无与数值）
   metrics: { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 },
+  // 组件就绪自检（GET /ready；/_mock/ready 可改单项状态）
+  ready: { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" },
   metricsHist: [],      // 环形历史（/metrics/json 每请求追一点，reset 预填）
 };
 
@@ -255,7 +257,15 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; return send(200, { ok: true }); }
+      if (sub === "ready") {
+        const q = url.searchParams;
+        for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
+          const v = q.get(k);
+          if (v) state.ready[k] = v;
+        }
+        return send(200, { ok: true, ready: state.ready });
+      }
       if (sub === "metrics") {
         return readBody().then((b) => {
           const d = b ? JSON.parse(b) : {};
@@ -352,6 +362,21 @@ const server = http.createServer((req, res) => {
         }
       }
       return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+    }
+    if (parts[0] === "ready") {
+      const LABELS = {
+        model: ["ASR 主模型", true], vad: ["VAD 语音检测", true], fe: ["特征提取器（whisper-base）", true],
+        ffmpeg: ["ffmpeg", true], gpu: ["GPU / 驱动", true], disk: ["磁盘空间（模型目录）", true],
+        watch: ["监听目录", false], polish: ["AI 润色（LLM）", false], emby: ["Emby 刷新", false],
+        jasna: ["音频修复（JASNA）", false], proxy: ["外网代理", false],
+      };
+      const items = Object.entries(LABELS).map(([key, [label, required]]) => ({
+        key, label, status: state.ready[key] || "off",
+        detail: state.ready[key] === "ok" ? "就绪" : state.ready[key] === "off" ? "—" : "（模拟异常）",
+        required,
+      }));
+      const ready = items.filter((i) => i.required).every((i) => i.status === "ok");
+      return send(200, { ok: true, ready, version: state.version, device: "cuda", proxy: null, items });
     }
     if (parts[0] === "cache" && parts[1] === "check") {
       const sha1 = url.searchParams.get("sha1") || "";

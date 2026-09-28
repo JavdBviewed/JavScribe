@@ -115,6 +115,8 @@ test("设置弹窗：配置表单（8 组白名单）", async ({ page }) => {
   await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
   // 展开弹窗内部滚动，整表单入帧
   await page.evaluate(() => { const b = document.getElementById("modal-body"); if (b) b.style.maxHeight = "none"; });
+  // 等组件就绪自检行渲染完成（异步 /ready 拉取），保证快照确定性
+  await expect(page.locator("#modal .ready-row").first()).toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(200);
   await freezeForShot(page, req);
   await shot(page, "style-10-settings-form", { fullPage: true });

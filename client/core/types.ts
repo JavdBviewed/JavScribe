@@ -276,3 +276,33 @@ export interface UpdateInfo {
   last_error: string | null;
   last_checked: number | null;
 }
+
+/** 服务端组件就绪状态（serve 0.2.6+ GET /ready） */
+export type ReadyStatus = "ok" | "warn" | "fail" | "off";
+
+export interface ReadyItem {
+  key: string;
+  label: string;
+  status: ReadyStatus;
+  detail?: string;
+  /** 是否计入整体就绪判定 */
+  required?: boolean;
+}
+
+export interface ReadinessReport {
+  ok: boolean;
+  /** 所有 required 项均 ok */
+  ready: boolean;
+  version: string;
+  device: string;
+  /** 生效的外网代理（凭据已掩码）；null = 直连 */
+  proxy: string | null;
+  items: ReadyItem[];
+}
+
+/** 工作台 GET /api/engines/{name}/ready 代理结果：ok=false 时 error=unsupported（旧 serve）/unreachable 等 */
+export interface ReadinessPayload {
+  ok: boolean;
+  error?: string;
+  ready?: ReadinessReport;
+}

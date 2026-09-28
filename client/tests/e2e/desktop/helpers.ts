@@ -266,7 +266,7 @@ export async function waitForEngineKey(page: Page, name = "mock") {
  */
 export async function freezeForShot(page: Page, req: APIRequestContext) {
   await mockPause(req).catch(() => {});
-  await page.evaluate(() => {
+  await page.evaluate((curVer: string) => {
     document.getAnimations().forEach((a) => a.pause());
     for (const id of ["clock", "last-updated"]) {
       const el = document.getElementById(id);
@@ -275,7 +275,21 @@ export async function freezeForShot(page: Page, req: APIRequestContext) {
     document.querySelectorAll<HTMLElement>(".cell-elapsed").forEach((el) => (el.style.visibility = "hidden"));
     document.querySelectorAll(".eta").forEach((el) => (el.textContent = ""));
     document.querySelectorAll<HTMLElement>("#watch-lastscan").forEach((el) => (el.style.visibility = "hidden"));
-  });
+    // 版本文本归一化：基线不烙当前客户端版本（v0.2.x 每次 bump 字形都变，标题栏 health chip /
+    // 侧边栏 foot-ver / 更新弹窗「当前 vX」都会漂）。只精确替换本版本的两种形态（v 前缀 + 裸值），
+    // 更新角标「新版本 9.9.9」、弹窗「最新 v9.9.9」（mock feed 常量）等基线语义不受影响。
+    const pairs: Array<[string, string]> = [["v" + curVer, "v0.0.0"], [curVer, "0.0.0"]];
+    const walk = (n: Node): void => {
+      if (n.nodeType === 3) {
+        let t = n.nodeValue ?? "";
+        for (const [from, to] of pairs) if (t.includes(from)) t = t.split(from).join(to);
+        if (t !== (n.nodeValue ?? "")) n.nodeValue = t;
+      } else if (n.childNodes.length) {
+        n.childNodes.forEach(walk);
+      }
+    };
+    document.body.childNodes.forEach(walk);
+  }, CLIENT_VERSION);
 }
 
 export function shot(page: Page, name: string, opts?: { fullPage?: boolean; element?: string }) {

@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ScanItem, ScanResult, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
+import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -2675,6 +2675,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     html += `
     <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）；下方「客户端设置」卡片例外，只保存在本机。</div>`;
+    // 组件就绪自检卡片（serve 0.2.6+ GET /ready）：打开弹窗即拉取一次
+    html += `
+    <section class="cfg-sec cfg-sec-ready" data-sec="ready">
+      <h4 class="cfg-sec-title">组件就绪${`<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>`}${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
+      <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
+    </section>`;
     if (clientCfg) {
       html += `
       <section class="cfg-sec cfg-sec-client" data-sec="client">
@@ -2712,6 +2718,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </span>
     </div>`;
     body.innerHTML = html;
+    loadReadiness(name);
     // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
     // （客户端卡片 .ccfg-row 独立跟踪、独立保存，不混入服务端「保存设置」）
     body.querySelectorAll<HTMLElement>(".cfg-row:not(.ccfg-row)").forEach((row) => {
@@ -2784,6 +2791,45 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
     };
     ($("cfg-save") as HTMLButtonElement).onclick = () => saveConfig(name);
+  }
+
+  // 组件就绪自检：拉取 /ready 渲染卡片；旧服务(unsupported)/离线(unreachable)降级为提示，不 throw
+  async function loadReadiness(name: string): Promise<void> {
+    const box = $("ready-body");
+    if (!box) return;
+    if (!t.getReadiness) {
+      box.innerHTML = '<div class="muted small">当前形态不支持组件就绪自检</div>';
+      return;
+    }
+    box.innerHTML = '<div class="muted small">检查中…</div>';
+    let payload: ReadinessPayload;
+    try {
+      payload = await t.getReadiness(name);
+    } catch (e) {
+      box.innerHTML = `<div class="muted small">获取失败：${esc((e as Error).message)}</div>`;
+      return;
+    }
+    if (!payload.ok || !payload.ready) {
+      const err = payload.error || "";
+      if (err === "unsupported") {
+        box.innerHTML = '<div class="muted small">该服务版本较旧（&lt; v0.2.6），暂不支持组件就绪自检；升级服务端后可在此查看模型 / 引擎 / GPU / 磁盘状态。</div>';
+      } else if (err === "unreachable") {
+        box.innerHTML = '<div class="muted small">服务不可达，暂无法检查组件就绪状态。</div>';
+      } else {
+        box.innerHTML = `<div class="muted small">无法检查：${esc(err)}</div>`;
+      }
+      return;
+    }
+    const rep = payload.ready;
+    const flag = rep.ready
+      ? '<span class="ready-flag ok">全部就绪</span>'
+      : '<span class="ready-flag no">存在未就绪项</span>';
+    let h = `<div class="ready-summary">${flag}<span class="muted small mono">服务 v${esc(rep.version || "—")} · ${esc(rep.device || "auto")}</span></div>`;
+    for (const it of rep.items) {
+      const det = it.detail ? `<span class="ready-det">${esc(it.detail)}</span>` : "";
+      h += `<div class="ready-row st-${esc(it.status)}"><span class="ready-ico"></span><span class="ready-lab">${esc(it.label)}</span>${det}</div>`;
+    }
+    box.innerHTML = h;
   }
 
   // 「启用」项未勾选 → 同分区其余项置灰（保留可编辑：勾启用 + 填值可一起保存）

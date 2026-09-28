@@ -1700,3 +1700,31 @@ body.desktop main > section.view-on { display: block; }
 .eng-bal:hover { color: var(--fg); }
 .eng-bal input { accent-color: var(--accent); margin: 0; cursor: pointer; }
 .eng.bal-off .eng-top, .eng.bal-off .eng-url, .eng.bal-off .eng-specs { opacity: 0.55; }
+
+/* ---------- 组件就绪自检卡片（服务设置弹窗，serve 0.2.6+ /ready） ---------- */
+.cfg-sec-ready { background: var(--panel, transparent); }
+.ready-body { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.ready-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.ready-flag {
+  font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid; letter-spacing: 0.02em;
+}
+.ready-flag.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.ready-flag.no { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+.ready-row {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 12px; padding: 3px 6px; border-radius: 6px;
+}
+.ready-row.st-fail { background: var(--err-soft); }
+.ready-row.st-warn { background: var(--accent-soft); }
+.ready-ico {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  transform: translateY(-1px); background: var(--muted);
+}
+.st-ok .ready-ico { background: var(--ok); }
+.st-warn .ready-ico { background: var(--accent); }
+.st-fail .ready-ico { background: var(--err); }
+.st-off .ready-ico { background: transparent; border: 1px solid var(--muted); }
+.st-off .ready-lab { color: var(--muted); }
+.ready-lab { font-weight: 600; white-space: nowrap; }
+.ready-det { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

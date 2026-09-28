@@ -14,6 +14,18 @@ if [[ ! -f "${DATA_DIR}/config.server.json" ]]; then
   cp /etc/jav-scribe/config.server.json "${DATA_DIR}/config.server.json"
 fi
 
+# ---- 外网代理（可选）：首启下载模型 + 容器内所有出站请求（如公共 LLM API）----
+# JAV_PROXY    完整代理地址，如 http://192.168.0.1:10808（支持账号密码）
+# JAV_NO_PROXY 追加的 NO_PROXY 条目（逗号分隔）；局域网/内网 CIDR 默认自动豁免，
+#              因此 Emby / 本地 Ollama 等内网地址不受代理影响。
+if [[ -n "${JAV_PROXY:-}" ]]; then
+  export HTTP_PROXY="$JAV_PROXY" HTTPS_PROXY="$JAV_PROXY"
+  export http_proxy="$JAV_PROXY" https_proxy="$JAV_PROXY"
+  export NO_PROXY="${JAV_NO_PROXY:-}:localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  export no_proxy="$NO_PROXY"
+  echo "[entrypoint] JAV_PROXY in effect: ${JAV_PROXY}（内网/局域网经 NO_PROXY 自动豁免）"
+fi
+
 cd /opt/chickenrice
 mkdir -p "${MODELS_DIR}"
 

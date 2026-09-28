@@ -6,7 +6,7 @@
 // （服务端 detail 优先，否则 "HTTP <status>" / "网络错误"）；e.network === true 表示网络层失败。
 
 import type {
-  ConfigItem, Engine, Health, JobRow, ScanResult, UpdateInfo, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, UpdateInfo, UploadStatus,
 } from "./types";
 
 export type UploadProgress = (loadedBytes: number, totalBytes: number, pct: number) => void;
@@ -100,6 +100,8 @@ export interface Transport {
   engineMetrics?(name: string): Promise<import("./types").MetricsResponse>;
   /** 服务端设置项；Key 错误/版本过旧等 throw(detail 或 "HTTP <status>") */
   getConfig(name: string): Promise<ConfigItem[]>;
+  /** 组件就绪自检（serve 0.2.6+）；payload.ok=false 表示 unsupported/unreachable（UI 降级展示，不 throw） */
+  getReadiness?(name: string): Promise<ReadinessPayload>;
   /** 保存设置；失败 throw(detail 或 "<status>") */
   putConfig(name: string, values: Record<string, unknown>): Promise<void>;
   /** 客户端（本机工作台）并发设置；仅 web 工作台有，desktop 形态无此方法 */

@@ -6,7 +6,7 @@ import {
 } from "../core/transport";
 import type {
   BulkResult, ConfigItem, Engine, Health, JobRow, FsBrowseResult, MetricsResponse,
-  ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
+  ReadinessPayload, ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
 async function jget<T>(url: string): Promise<T> {
@@ -185,6 +185,9 @@ export const webTransport: Transport = {
     jgetOrDetail<{ items: ConfigItem[] }>(
       "/api/engines/" + encodeURIComponent(name) + "/config",
     ).then((d) => d.items || []),
+
+  getReadiness: (name) =>
+    jget<ReadinessPayload>("/api/engines/" + encodeURIComponent(name) + "/ready"),
 
   putConfig: (name, values) =>
     jput(

@@ -461,3 +461,48 @@ def test_fs_read_srt() -> None:
         assert client.get("/api/fs/read-srt", params={"path": str(big)}).status_code == 413
 
 
+
+def test_engine_ready() -> None:
+    """GET /api/engines/{name}/ready：200 透传 / 404→unsupported / 网络错→unreachable。"""
+    client, store = make_client()
+    store.add("srv-r", "http://10.0.0.9:8300")
+    report = {
+        "ok": True, "ready": True, "version": "0.2.6", "device": "cuda", "proxy": None,
+        "items": [
+            {"key": "model", "label": "ASR 模型", "status": "ok", "detail": "model.bin", "required": True},
+            {"key": "gpu", "label": "GPU", "status": "warn", "detail": "nvidia-smi 未找到", "required": True},
+        ],
+    }
+    orig = _jsm.JavScribeEngine.ready
+
+    async def fake_ok(self):
+        return report
+
+    async def fake_404(self):
+        r = httpx.Response(404, request=httpx.Request("GET", f"{self.url}/ready"))
+        raise httpx.HTTPStatusError("404", request=r.request, response=r)
+
+    async def fake_neterr(self):
+        raise httpx.ConnectError("boom")
+
+    try:
+        _jsm.JavScribeEngine.ready = fake_ok
+        r = client.get("/api/engines/srv-r/ready")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and body["ready"]["ready"] is True
+        assert body["ready"]["items"][0]["key"] == "model"
+
+        _jsm.JavScribeEngine.ready = fake_404
+        r = client.get("/api/engines/srv-r/ready")
+        assert r.status_code == 200
+        assert r.json() == {"ok": False, "error": "unsupported"}
+
+        _jsm.JavScribeEngine.ready = fake_neterr
+        r = client.get("/api/engines/srv-r/ready")
+        assert r.status_code == 200
+        assert r.json() == {"ok": False, "error": "unreachable"}
+    finally:
+        _jsm.JavScribeEngine.ready = orig
+    # 未知服务
+    assert client.get("/api/engines/nope/ready").status_code == 404

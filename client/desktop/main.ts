@@ -1037,6 +1037,23 @@ function registerIpc(): void {
           if (r.status !== 200) throw configError(r.status, r.data);
           return { ok: true };
         }
+        case "getReadiness": {
+          // 组件就绪自检（serve 0.2.6+）：错误不外抛，包装成 payload 让 UI 降级展示
+          let entry;
+          try {
+            entry = engineByName(String(a0));
+          } catch {
+            return { ok: true, data: { ok: false, error: "unsupported" } };
+          }
+          try {
+            const r = await httpJson<any>(entry.url + "/ready", { timeoutMs: 15000 });
+            if (r.status === 200) return { ok: true, data: { ok: true, ready: r.data } };
+            if (r.status === 404) return { ok: true, data: { ok: false, error: "unsupported" } };
+            return { ok: true, data: { ok: false, error: `服务返回 HTTP ${r.status}` } };
+          } catch {
+            return { ok: true, data: { ok: false, error: "unreachable" } };
+          }
+        }
         case "scan": {
           const entry = engineByName(String(a0));
           const headers: Record<string, string> = {};

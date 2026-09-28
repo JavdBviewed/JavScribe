@@ -38,6 +38,10 @@ services:
       # Optional: enables /config (settings) management with X-Api-Key auth.
       # The web workbench stores the same key per service when you add it.
       JAVSCRIBE_API_KEY: "${JAVSCRIBE_API_KEY:-}"
+      # 外网代理（可选）：首启模型下载与容器内出站请求走此代理，
+      # 如 http://192.168.0.1:10808；局域网/内网 CIDR 自动豁免，JAV_NO_PROXY 可追加
+      JAV_PROXY: "${JAV_PROXY:-}"
+      JAV_NO_PROXY: "${JAV_NO_PROXY:-}"
       # When set (e.g. /hostfs), /scan + /scan/submit fall back to
       # <prefix>/<host path> for paths that don't exist in the container.
       JAVSCRIBE_HOST_ROOT: "${JAVSCRIBE_HOST_ROOT:-}"
