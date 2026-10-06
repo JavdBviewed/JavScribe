@@ -191,13 +191,15 @@ export interface ScanItem {
   size: number;
   has_subtitle: boolean;
   subtitle?: string | null;
-  /** 字幕四态：external（外部 srt）/ named（文件名 C 版）/ embedded（内嵌轨）/ none */
+  /** 字幕状态：external（外部 srt）/ named（文件名 C 版）/ embedded（主动检查结果）/ none */
   subtitle_status?: "external" | "named" | "embedded" | "none";
-  /** 内嵌字幕轨语言（归一后，如 ["zh"]） */
+  /** 内嵌字幕轨语言（仅主动检查后返回；普通扫描为空） */
   embedded_langs?: string[];
+  /** 是否已读取视频内容检查内嵌字幕；普通目录扫描固定为 false */
+  embedded_checked?: boolean;
   /** 低于 scan.min_size_mb：列表显示但不默认选中（显式勾选仍可提交） */
   too_small?: boolean;
-  /** 内嵌字幕探测失败（ffprobe 异常）：本次未检测到 ≠ 视频没有内嵌字幕，重新扫描会再探测 */
+  /** 兼容旧响应字段；普通目录扫描不会执行 ffprobe，因此固定为 false */
   probe_failed?: boolean;
   /** 文件名含独立 C、语义判为「已压字幕」（naming_c=has_sub） */
   name_sub?: boolean;
@@ -206,6 +208,22 @@ export interface ScanItem {
 }
 
 /** 扫描目录响应（web 形态 GET /api/scan/local?engine=&path=；desktop 为本地 serve /scan） */
+export interface ScanTaskSnapshot {
+  id: string;
+  engine: string;
+  path: string;
+  resolved_path?: string | null;
+  mapped?: boolean;
+  status: "queued" | "running" | "paused" | "done" | "error" | "canceled";
+  scanned: number;
+  found: number;
+  result?: ScanResult | null;
+  error?: string | null;
+  created?: number;
+  updated?: number;
+  finished?: number | null;
+}
+
 export interface ScanResult {
   items: ScanItem[];
   mapped?: boolean;
@@ -215,6 +233,9 @@ export interface ScanResult {
   min_size_mb?: number;
   /** 生效的独立 C 语义：has_sub / no_sub / off */
   naming_c?: string;
+  /** 普通扫描不会读取视频内容；内嵌字幕需要单独检查 */
+  embedded_checked?: boolean;
+  probe_errors?: string[];
 }
 
 /** GET /api/fs/read-srt：字幕预览内容（只放行字幕扩展名 ≤2MB） */

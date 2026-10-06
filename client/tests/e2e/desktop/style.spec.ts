@@ -1,152 +1,303 @@
-// 桌面端样式类：整页 + 关键区块截图基线（像素 diff）
-// 动态元素（时钟/更新时间/耗时/ETA/动画）由 freezeForShot 统一冻结
-// 帧 05「上传音频中」：本机 ffmpeg 提取仅 ~57ms 抓不到，用 mock 的 upload-delay（3s）稳定保持上传帧
-import { test, expect, goView, type APIRequestContext } from "./helpers";
-import {
-  mockPause, mockSeed, mockUploadDelay, freezeForShot, shot, triggerToast,
-  MOCK, FIXTURES,
-} from "./helpers";
+// 桌面端交互类：完整用户流（单文件本机提取三步动画、写回落盘 IPC、整片直传、文件夹批量、
+// Key 登记 UI、localStorage 持久化、retry、筛选×分页、扫描全流程、Windows 拦截、删除服务、小飞机外链）
+// 注意：autosave 的「自动下载」兜底走原生保存对话框，e2e 无法驱动，不覆盖；
+//       写回链路由 writeSrt IPC 用例在进程级覆盖（同一条 IPC 通路）。
+import { test, expect, goView, mockSpeed, mockSeed, mockReset, launchApp, relaunch, waitForReady, waitForEngineKey,
+  waitForMockJobFinished, MOCK, MOCK_KEY, FIXTURES, makeScanDir } from "./helpers";
+import type { APIRequestContext } from "./helpers";
 import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const fx = (n: string) => join(FIXTURES, n);
 
-let req: APIRequestContext;
-test.beforeEach(async ({ request }) => {
-  req = request;
-  // mock 状态已由 userData fixture 的 mockReset 清零
-});
+/** 8s/任务：test 体内调用（userData fixture 的 mockReset 之后），保证 5s 轮询观察到 running→done */
+const slowJobs = (request: APIRequestContext) => mockSpeed(request, { step: 0.0125, tickMs: 100 });
 
-test("整页空态（服务在线，无任务）", async ({ page }) => {
-  await freezeForShot(page, req);
-  await shot(page, "style-01-whole-empty", { fullPage: true });
-});
-
-test("服务卡片区块", async ({ page }) => {
-  await goView(page, "engines");
-  await freezeForShot(page, req);
-  await shot(page, "style-02-engine-card", { element: "#sec-engines" });
-});
-
-test("单文件 chip 选中态", async ({ page }) => {
+test("单文件全流程（auto→本机提取）：chip → 三步动画 → 看板 → 完成 toast", async ({ page, request }) => {
+  await slowJobs(request);
   await page.setInputFiles("#file", fx("video-a.mp4"));
-  await expect(page.locator("#file-chip")).toBeVisible();
-  await freezeForShot(page, req);
-  await shot(page, "style-03-file-chip", { element: "#sec-dispatch" });
+  await expect(page.locator("#chip-name")).toHaveText("video-a.mp4");
+  await page.locator("#file-chip").waitFor();
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+
+  // 桌面端 fits 恒 true → auto 恒走本机提取（桌面核心语义）
+  await expect(page.locator("#step-upload .step-name")).toHaveText("本地提音轨");
+  await expect(page.locator("#step-extract .step-name")).toHaveText("上传音频");
+  await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ MB/ })).toBeVisible();
+  await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
+  await expect(page.locator("#dispatch-status.ok")).toBeVisible();
+
+  await goView(page, "jobs");
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
+  await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
+  await expect(page).toHaveTitle(/\(1\) JavScribe Client/);
+  await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#toasts .toast.ok", { hasText: "完成" }).first()).toBeVisible();
+  // 行内下载按钮存在（桌面端拦截 → 原生保存对话框，e2e 不点击，只断言存在）
+  await expect(row.locator(".job-actions a.dl-btn")).toHaveCount(1);
 });
 
-test("文件夹 chip（N 视频 M 已有字幕）", async ({ page }) => {
-  await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录
-  await expect(page.locator("#folder-chip-text")).toHaveText("3 个视频（1 个已有字幕，将跳过）");
-  await freezeForShot(page, req);
-  await shot(page, "style-04-folder-chip", { element: "#sec-dispatch" });
-});
-
-test("流水线：上传音频中（mock upload-delay 保持 3s 窗口）", async ({ page }) => {
-  await mockUploadDelay(req, 3000);
-  try {
-    await page.setInputFiles("#file", fx("video-a.mp4"));
-    await page.selectOption("#engine-select", "mock");
-    await page.click("#dispatch-go");
-    // 本机提取 ~57ms 完成 → 上传帧由 mock 延迟应答稳定保持
-    await page.locator("#meta-extract", { hasText: "上传音频" }).waitFor({ timeout: 15_000 });
-    await page.waitForTimeout(200);
-    await freezeForShot(page, req);
-    await shot(page, "style-05-pipeline-uploading", { element: "#pipeline" });
-  } finally {
-    await mockUploadDelay(req, 0);
-  }
-});
-
-test("流水线：三步完成态", async ({ page }) => {
+test("任务行细节：阶段文案 / ETA 倒计时 / 耗时逐秒 / 下载命名", async ({ page, request }) => {
+  await slowJobs(request);
   await page.setInputFiles("#file", fx("video-a.mp4"));
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
-  // 完成信号：meta-dispatch 出现任务 id（与 step-dispatch.done 同时可见，不能 .or 双选）
+  await goView(page, "jobs");
+  const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) });
+  // 运行中：位置列 = 服务端阶段文案，ETA 带「剩 ~」
+  await expect(row.locator(".pill.p-running")).toBeVisible({ timeout: 15_000 });
+  await expect(row.locator(".cell-pos")).toContainText("转写中", { timeout: 15_000 });
+  await expect(row.locator(".eta")).toContainText("剩 ~", { timeout: 15_000 });
+  // 耗时列 1s 走秒：先等 ticker 至少走过 2s，再间隔 2s 采样两次必须不同
+  const secs = async () => {
+    const m = ((await row.locator(".cell-elapsed").textContent()) || "").trim().match(/^(\d+):?(\d{2})$/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : -1;
+  };
+  await expect.poll(secs, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+  const el1 = (await row.locator(".cell-elapsed").textContent()) || "";
+  await page.waitForTimeout(2000);
+  const el2 = (await row.locator(".cell-elapsed").textContent()) || "";
+  expect(el2).not.toBe(el1);
+  // 完成：下载链接名 = <源视频名>.zh.srt
+  await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 40_000 });
+  expect(await row.locator(".job-actions a.dl-btn").getAttribute("download")).toBe("video-a.zh.srt");
+});
+
+test("写回落盘：getResultData → writeSrt IPC → srt 内容断言", async ({ page, request }) => {
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
   await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible({ timeout: 30_000 });
+  const meta = (await page.locator("#meta-dispatch").textContent()) || "";
+  const jid = (meta.match(/任务 (\S+)/) || [])[1];
+  expect(jid).toBeTruthy();
+  // 等 mock 侧真正 finished（result 才可下载）
+  await waitForMockJobFinished(request, jid!, 30_000);
+
+  const outDir = test.info().outputDir;
+  const r = await page.evaluate(async (a) => {
+    const [engine, jobId, videoPath, srtName] = a as [string, string, string, string];
+    const r1 = await (window as any).javDesktop.call("getResultData", [engine, jobId]);
+    if (!r1.ok) return { ok: false, error: r1.error };
+    const r2 = await (window as any).javDesktop.writeSrt(videoPath, srtName, r1.data);
+    return { ok: r2.ok, path: r2.path, error: r2.error, bytes: r1.data && r1.data.length };
+  }, ["mock", jid!, join(outDir, "video-a.mp4"), "video-a.zh.srt"]);
+  expect(r.ok).toBe(true);
+  expect(r.path).toBe(join(outDir, "video-a.zh.srt"));
+  expect(r.bytes).toBeGreaterThan(0);
+  const text = readFileSync(join(outDir, "video-a.zh.srt"), "utf-8");
+  expect(text).toContain("テスト字幕 video-a.mp4");
+});
+
+test("整片直传（extract-select=server 逃生通道）：上传视频→提取音频→提交", async ({ page }) => {
+  await page.selectOption("#extract-select", "server");
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect(page.locator("#step-upload .step-name")).toHaveText("上传视频");
+  await expect(page.locator("#step-extract .step-name")).toHaveText("提取音频");
+  await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
-  await page.waitForTimeout(200);
-  await freezeForShot(page, req);
-  await shot(page, "style-06-pipeline-done", { element: "#sec-dispatch" });
+  await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
-test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
-  await mockPause(req); // 先停：running 行不会在页面刷新前进成 done
-  await mockSeed(req, { n: 1, status: "running", progress: 0.37 });
+test("文件夹批量：chip →（2 项）→ 批量完成 toast → 两行看板完成", async ({ page, request }) => {
+  await slowJobs(request);
+  await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录，相对路径自动带上
+  await expect(page.locator("#folder-chip-text")).toHaveText("3 个视频（1 个已有字幕，将跳过）");
+  await page.selectOption("#engine-select", "mock");
+  await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
+  await page.click("#dispatch-go");
+  await expect(page.locator("#dispatch-status.ok", { hasText: /批量完成：已提交 2\/2 项/ })).toBeVisible({ timeout: 30_000 });
   await goView(page, "jobs");
-  await page.locator(".job-row.running").waitFor({ timeout: 15_000 });
-  await page.waitForTimeout(400);
-  await freezeForShot(page, req);
-  await shot(page, "style-07-jobs-running", { element: "#sec-jobs" });
+  for (const name of ["video-a.mp4", "video-b.mkv"]) {
+    const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: name }) });
+    await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
+  }
 });
 
-test("任务看板：已完成 + 分页器", async ({ page }) => {
-  await mockSeed(req, { n: 25, status: "done" });
+test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engines.json 落盘 → 自动转配置表单", async ({ request }) => {
+  await mockReset(request);
+  const dir = mkdtempSync(join(tmpdir(), "javscribe-e2e-keyless-"));
+  const app = await launchApp(dir); // 无 engines.json：仅 env 预置的 mock 引擎（无 key）
+  try {
+    const page = await app.firstWindow();
+    await waitForReady(page);
+    await goView(page, "engines");
+    await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
+    await expect(page.locator(".set-note")).toHaveText(/该服务尚未登记 API Key/, { timeout: 10_000 });
+    await expect(page.locator("#key-input")).toBeVisible();
+    await page.locator("#key-input").fill(MOCK_KEY);
+    const [toast] = await Promise.all([
+      page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
+      page.click("#key-form button[type=submit]"),
+    ]);
+    expect(await toast.textContent()).toContain("API Key 已保存");
+    await waitForEngineKey(page);
+    // 保存后 modal 自动重开为配置表单
+    await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 15_000 });
+    // Key 落盘 engines.json
+    const cfg = JSON.parse(readFileSync(join(dir, "engines.json"), "utf-8")) as {
+      engines: Array<{ name: string; api_key: string }>;
+    };
+    const mockE = cfg.engines.find((e) => e.name === "mock");
+    expect(mockE && mockE.api_key).toBe(MOCK_KEY);
+  } finally {
+    await app.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("服务设置弹窗：组件就绪自检卡片（全就绪 + 单项异常重拉）", async ({ page, request }) => {
+  await goView(page, "engines");
+  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
+  await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible();
+  await expect(page.locator("#modal .ready-flag.ok")).toContainText("全部就绪", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row")).toHaveCount(11);
+
+  // 单项异常（gpu=fail，required）→ 重开弹窗重新拉取 → 「存在未就绪项」
+  await request.post(`${MOCK}/_mock/ready?gpu=fail`);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#modal")).toBeHidden({ timeout: 5_000 });
+  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
+  await expect(page.locator("#modal .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
+  await expect(page.locator("#modal .ready-row.st-fail")).toHaveCount(1);
+  // 复原，避免拖死后续用例
+  await mockReset(request);
+});
+
+test("localStorage 持久化：autosave + 提取模式 + 所选服务重启保留", async ({ app, userData, page }) => {
+  await page.locator("#autosave").check();
+  await page.selectOption("#extract-select", "server");
+  await page.selectOption("#engine-select", "mock");
+  await app.close();
+  const r = await relaunch(userData);
+  try {
+    await expect(r.page.locator("#autosave")).toBeChecked();
+    const extractVal = await r.page.locator("#extract-select").evaluate((e) => (e as HTMLSelectElement).value);
+    expect(extractVal).toBe("server");
+    const engineVal = await r.page.locator("#engine-select").evaluate((e) => (e as HTMLSelectElement).value);
+    expect(engineVal).toBe("mock");
+  } finally {
+    await r.app.close().catch(() => {});
+  }
+});
+
+test("retry：跳过行 → 重新提交 → 新任务入列 running", async ({ page, request }) => {
+  await slowJobs(request);
+  await mockSeed(request, { n: 1, status: "skipped", skipped: 1 });
   await goView(page, "jobs");
+  const row = page.locator(".job-row", { has: page.locator(".retry") });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await expect(row.locator(".pill")).toHaveText("跳过");
+  const [toast] = await Promise.all([
+    page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
+    row.locator(".retry").click(),
+  ]);
+  expect(await toast.textContent()).toContain("已删旧字幕并重新提交");
+  await expect(page.locator(".retried-note").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".job-row.running").first()).toBeVisible({ timeout: 15_000 });
+});
+
+test("筛选 × 分页：25 条已完成 → 默认 10/页 3 页 → 切档 20 → 翻页边界", async ({ page, request }) => {
+  await mockSeed(request, { n: 25, status: "done" });
+  await goView(page, "jobs");
+  // created 降序（最新在前）：默认 10 / 页 → 3 页；切档 20 后：页 1 = seed-006..025，页 2 = seed-001..005
+  await page.locator(".job-row .fn", { hasText: "seed-025.mp4" }).waitFor({ timeout: 15_000 });
   await page.click('#job-filter [data-f="done"]');
-  await expect(page.locator("#job-pager")).toBeVisible();
-  await page.locator("#pg-next").click();
-  await page.locator(".pg-info", { hasText: "第 2 / 3 页" }).waitFor();
-  await page.waitForTimeout(200);
-  await freezeForShot(page, req);
-  await shot(page, "style-08-jobs-pager", { element: "#sec-jobs" });
+  await expect(page.locator(".pg-info")).toHaveText("第 1 / 3 页 · 共 25 条");
+  await expect(page.locator("#job-list .job-row")).toHaveCount(10);
+  await page.selectOption("#pg-size", "20");
+  await expect(page.locator(".pg-info")).toHaveText("第 1 / 2 页 · 共 25 条");
+  await expect(page.locator("#job-list .job-row")).toHaveCount(20);
+  await expect(page.locator(".job-row .fn", { hasText: "seed-006.mp4" })).toBeVisible();
+  await page.click("#pg-next");
+  await expect(page.locator(".pg-info")).toHaveText("第 2 / 2 页 · 共 25 条");
+  await expect(page.locator("#job-list .job-row")).toHaveCount(5);
+  await expect(page.locator(".job-row .fn", { hasText: "seed-001.mp4" })).toBeVisible();
+  await expect(page.locator("#pg-next")).toBeDisabled();
+  await page.click('#job-filter [data-f="active"]');
+  await expect(page.locator("#jobs-empty")).toBeVisible();
+  await expect(page.locator("#jobs-empty-text")).toHaveText("当前筛选下无任务");
 });
 
-test("设置弹窗：未登记 Key 表单", async ({ page }) => {
+test("扫描全流程：3 项（1 有字幕）→ 全选 → 入队 3 项 → 看板 3 行", async ({ page }) => {
+  await goView(page, "dispatch");
+  await page.locator("#scan-minsize").fill("0");
+  // 所选含 1 个外部 srt 文件 → 提交前弹「已检测到字幕」confirm，接受继续
+  page.on("dialog", (d) => d.accept());
+  await page.selectOption("#engine-select", "mock");
+  await page.locator("#scan-path").fill(makeScanDir());
+  await page.click("#scan-go");
+  await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".scan-name")).toHaveCount(3);
+  // 外部 srt：文件名进 title 悬浮，标签统一显示「外部 srt」（0.2.x 扫描表重构后）
+  await expect(page.locator(".has-sub .subtag")).toHaveText("外部 srt");
+  await expect(page.locator(".has-sub .subtag")).toHaveAttribute("title", "AKDL-002.zh.srt");
+  await expect(page.locator("#scan-count")).toContainText("已选 2 / 3 · 1 个已有字幕默认不勾选");
+  await expect(page.locator("#scan-submit")).toContainText("生成字幕（已选择 2 项）");
+  await page.locator("#scan-select-all").check();
+  await expect(page.locator("#scan-count")).toContainText("已选 3 / 3 · 1 个已有字幕默认不勾选");
+  const toast = page.locator("#toasts .toast.ok", { hasText: "已入队" }).last();
+  await Promise.all([
+    toast.waitFor({ state: "visible" }),
+    page.click("#scan-submit"),
+  ]);
+  expect(await toast.textContent()).toContain("已入队 3 项");
+  await expect(page.locator("#scan-results")).toBeHidden();
+  // 本机管线：3 条独立任务，主名 = 原始视频名（与 web 契约一致，替代旧「文件夹扫描 · N 项」批量占位行）
+  // 桌面提交后不自动切看板（web 形态会），手动切过去断言
+  await goView(page, "jobs");
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-001.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-002.mp4" })).toBeVisible({ timeout: 40_000 });
+  await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
+});
+
+test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）", async ({ page }) => {
+  await page.selectOption("#engine-select", "mock");
+  await page.locator("#scan-path").fill("D:\\Videos");
+  await page.click("#scan-go");
+  const t = page.locator("#toasts .toast.err");
+  await expect(t).toBeVisible({ timeout: 5_000 });
+  expect(await t.textContent()).toContain("请改用上方「选择文件夹」");
+  expect(await t.textContent()).toContain("选择文件夹");
+  await expect(page.locator("#scan-results")).toBeHidden();
+});
+
+test("删除服务：confirm → 卡片移除", async ({ page }) => {
   const r = await page.evaluate(async (url) => {
-    const res = await (window as any).javDesktop.call("addEngine", ["nokey", url, ""]);
+    const res = await (window as any).javDesktop.call("addEngine", ["del-me", url, ""]);
     return res;
   }, MOCK);
   expect(r.ok).toBe(true);
   await goView(page, "engines");
-  await page.locator('article.eng[data-name="nokey"] .icon-btn.set').waitFor({ timeout: 15_000 });
-  await page.click('article.eng[data-name="nokey"] .icon-btn.set');
-  await expect(page.locator("#key-input")).toBeVisible({ timeout: 5_000 });
-  await freezeForShot(page, req);
-  await shot(page, "style-09-settings-keyless", { element: "#modal" });
+  await page.locator('article.eng[data-name="del-me"] h3', { hasText: "del-me" }).waitFor({ timeout: 10_000 });
+  page.on("dialog", (d) => d.accept());
+  await page.click('article.eng[data-name="del-me"] .del');
+  await expect(page.locator('article.eng[data-name="del-me"]')).toHaveCount(0, { timeout: 10_000 });
+  expect(await page.locator("article.eng").count()).toBe(1);
 });
 
-test("设置弹窗：配置表单（白名单全组）", async ({ page }) => {
+test("小飞机跳转：外链交系统浏览器、应用内不新开窗口（地址本身非超链接）", async ({ app, page }) => {
   await goView(page, "engines");
-  await page.click('article.eng[data-name="mock"] .icon-btn.set');
-  await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
-  // 展开弹窗内部滚动，整表单入帧
-  await page.evaluate(() => { const b = document.getElementById("modal-body"); if (b) b.style.maxHeight = "none"; });
-  // 等组件就绪自检行渲染完成（异步 /ready 拉取），保证快照确定性
-  await expect(page.locator("#modal .ready-row").first()).toBeVisible({ timeout: 10_000 });
-  await page.waitForTimeout(200);
-  await freezeForShot(page, req);
-  await shot(page, "style-10-settings-form", { fullPage: true });
-});
-
-test("扫描结果表（字幕标记行）", async ({ page }) => {
-  await page.selectOption("#engine-select", "mock");
-  await page.locator("#scan-path").fill("/media/jav");
-  await page.click("#scan-go");
-  await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator("#scan-submit")).toBeVisible();
-  await page.waitForTimeout(200);
-  await freezeForShot(page, req);
-  await shot(page, "style-11-scan-results", { element: "#scan-panel" });
-});
-
-test("toast 三种态", async ({ page }) => {
-  await triggerToast(page, "操作成功提示", "ok");
-  await triggerToast(page, "操作失败提示", "err");
-  await triggerToast(page, "普通状态提示");
-  await page.waitForTimeout(150);
-  await freezeForShot(page, req);
-  await shot(page, "style-12-toasts", { element: "#toasts" });
-});
-
-test("离线服务卡片（eng-err）", async ({ page }) => {
-  const r = await page.evaluate(async (url) => {
-    const res = await (window as any).javDesktop.call("addEngine", ["offline-svc", url, ""]);
-    return res;
-  }, "http://127.0.0.1:9999");
-  expect(r.ok).toBe(true);
-  await goView(page, "engines");
-  await page.locator('article.eng[data-name="offline-svc"] .eng-err').waitFor({ timeout: 15_000 });
-  await page.waitForTimeout(200);
-  await freezeForShot(page, req);
-  await shot(page, "style-13-offline-card", { element: "#sec-engines" });
+  await page.locator('.eng[data-name="mock"] .eng-go').click();
+  // ① windowOpenHandler deny + shell.openExternal：应用内永不出现第二窗口（frameless 新窗口无窗控）
+  await new Promise((r) => setTimeout(r, 2_000));
+  expect(app.windows()).toHaveLength(1);
+  // ② 实际交给系统浏览器的 URL = 服务地址（main 侧 JAVSCRIBE_OPEN_EXTERNAL_CAPTURE 记录）
+  const urls: string[] = await page.evaluate(async () => {
+    const r = (await (window as any).javDesktop.call("openedExternal")) as { ok: boolean; data?: string[] };
+    if (!r.ok || !r.data) throw new Error("openExternal 捕获读取失败");
+    return r.data;
+  });
+  expect(urls.some((u) => u.includes("127.0.0.1:8302"))).toBe(true);
+  // ③ 页面自身不受影响（仍停在服务视图）
+  await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
 });

@@ -87,9 +87,11 @@ docker compose -f docker/docker-compose.yml up -d --build
 ### Web 形态端点
 
 - `GET /api/scan/local?engine=<服务>&path=<绝对路径>` → 按扫描规则列出视频
-  （`{path, items[…], truncated, mapped, rules}`，上限 5000 项）；每项含字幕
-  三态 `subtitle_status: external / embedded / none`（外部 srt 与内嵌轨都探测，
-  内嵌轨走 ffprobe 并行探测，缺 ffprobe 时自动降级为仅外部判定）。
+  （`{path, items[…], truncated, mapped, rules}`，上限 5000 项）。普通扫描只读取
+  文件名、扩展名、大小、同目录字幕文件等文件系统元数据，**不会调用 ffprobe/ffmpeg，
+  也不会打开视频内容**；这对 115/CloudDrive2 等网盘挂载目录很重要，可避免扫描
+  触发视频下载。返回 `embedded_checked: false`，内嵌字幕需要用户后续主动检查。
+  每项的 `subtitle_status` 常规为 `external / named / none`。
   扫描规则优先取所选服务的 `/config`（与「服务设置」同源），服务不可达时退回
   内置默认（`rules: "engine" | "defaults"` 可辨）。
 - `POST /api/scan/local/submit {"engine": <服务>, "files": [绝对路径...]}` →

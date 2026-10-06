@@ -51,6 +51,7 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await waitForEngineOnline(page);
   await waitForEngineKey(page, "mock");
   page.on("dialog", (d) => d.accept());
+  const scanDir = makeScanDir(`pause-${process.pid}-${Date.now()}`);
   // 1. 暂停所有（confirm 放行）
   await goTab(page, "jobs");
   await page.click("#job-pause-all");
@@ -63,12 +64,12 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await expect(page.locator('article.eng[data-name="mock"] .tag-paused')).toHaveText("已暂停", { timeout: 20_000 });
   // 2. 本机扫描提交 → 3 条任务全部停在闸前（不提取、不派发）
   await goTab(page, "dispatch");
-  await page.locator("#scan-path").fill(SCAN_DIR);
+  await page.locator("#scan-path").fill(scanDir);
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
   await page.locator("#scan-select-all").check();
   await page.click("#scan-submit");
-  await expectToast(page, "已入队 3 项（本机扫描）");
+  await expectToast(page, "已入队 3 项");
   await expect(page.locator(".job-row .pill.p-paused")).toHaveCount(3, { timeout: 20_000 });
   await expect(
     page.locator(".job-row .cell-pos", { hasText: "已暂停（等待继续）" }).first(),
@@ -87,7 +88,7 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
     ).toBeVisible({ timeout: 60_000 });
   }
   // 等写回完成再还原夹具（防下一个「扫描全流程」用例的提交被防重跳过）
-  const want = [path.join(SCAN_DIR, "AKDL-001.zh.srt"), path.join(SCAN_DIR, "SUB-001.zh.srt")];
+  const want = [path.join(scanDir, "AKDL-001.zh.srt"), path.join(scanDir, "SUB-001.zh.srt")];
   const t0 = Date.now();
   while (!want.every((n) => existsSync(n)) && Date.now() - t0 < 90_000) await new Promise((rs) => setTimeout(rs, 500));
   for (const n of want) expect(existsSync(n)).toBe(true);
@@ -268,6 +269,7 @@ test("文件夹 chip 移除后派单禁用", async ({ page }) => {
 });
 
 test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → 提交入队（本机管线）", async ({ page }) => {
+  const scanDir = makeScanDir(`submit-${process.pid}-${Date.now()}`);
   // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0 复刻旧语义
   await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
   await page.reload();
@@ -275,7 +277,7 @@ test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → �
   await waitForEngineKey(page, "mock");
   // 全选含已有字幕项 → 提交前弹确认（window.confirm），e2e 一律放行
   page.on("dialog", (d) => d.accept());
-  await page.locator("#scan-path").fill(SCAN_DIR);
+  await page.locator("#scan-path").fill(scanDir);
   await expect(page.locator("#scan-go")).toBeEnabled();
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
@@ -285,15 +287,16 @@ test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → �
   await expect(subtag).toHaveCount(1);
   await expect(subtag).toHaveText("外部 srt");
   await expect(subtag).toHaveAttribute("title", "AKDL-002.zh.srt");
-  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 1 个已有字幕默认不勾选");
-  await expect(page.locator("#scan-submit")).toContainText("开始生成（2 项）");
+  await expect(page.locator("#scan-count")).toContainText("已选 2 / 3 · 1 个已有字幕默认不勾选");
+  await expect(page.locator("#scan-submit")).toContainText("生成字幕（已选择 2 项）");
   await page.locator("#scan-select-all").check();
-  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 1 个已有字幕默认不勾选");
-  const [toast] = await Promise.all([
-    page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
+  await expect(page.locator("#scan-count")).toContainText("已选 3 / 3 · 1 个已有字幕默认不勾选");
+  const toast = page.locator("#toasts .toast.ok", { hasText: "已入队" }).last();
+  await Promise.all([
+    toast.waitFor({ state: "visible" }),
     page.click("#scan-submit"),
   ]);
-  expect(await toast.textContent()).toContain("已入队 3 项（本机扫描）");
+  expect(await toast.textContent()).toContain("已入队 3 项");
   await expect(page.locator("#scan-results")).toBeHidden();
   // 本机管线：3 条独立任务，label = 原始视频名（mock 侧 job label = 源名）
   await expect(page.locator(".job-row .fn", { hasText: "AKDL-001.mp4" })).toBeVisible({ timeout: 40_000 });

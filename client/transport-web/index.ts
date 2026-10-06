@@ -6,7 +6,7 @@ import {
 } from "../core/transport";
 import type {
   BulkResult, ConfigItem, Engine, Health, JobRow, FsBrowseResult, MetricsResponse,
-  ReadinessPayload, ScanResult, SrtReadResult, UpdateInfo, UploadStatus,
+  ReadinessPayload, ScanResult, ScanTaskSnapshot, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
 async function jget<T>(url: string): Promise<T> {
@@ -72,6 +72,12 @@ function xhrUpload(url: string, fd: FormData, onProgress: UploadProgress): Promi
     xhr.onerror = () => resolve({ ok: false, error: "网络错误", network: true });
     xhr.send(fd);
   });
+}
+
+async function scanTaskAction(id: string, action: "pause" | "resume" | "cancel"): Promise<ScanTaskSnapshot> {
+  const r = await fetch(`/api/scan/local/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+  if (!r.ok) { let msg = String(r.status); try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch {} throw new TransportError(msg); }
+  return (await r.json()) as ScanTaskSnapshot;
 }
 
 export const webTransport: Transport = {
@@ -212,6 +218,20 @@ export const webTransport: Transport = {
   },
 
   getUpload: (id) => jget<UploadStatus>("/api/uploads/" + id),
+
+  startScanTask: async (name, path, opts) => {
+    const r = await fetch("/api/scan/local/tasks", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ engine: name, path, ...(opts || {}) }),
+    });
+    if (!r.ok) { let msg = String(r.status); try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch {} throw new TransportError(msg); }
+    return (await r.json()) as ScanTaskSnapshot;
+  },
+  listScanTasks: () => jgetOrDetail<ScanTaskSnapshot[]>("/api/scan/local/tasks"),
+  getScanTask: (id) => jgetOrDetail<ScanTaskSnapshot>(`/api/scan/local/tasks/${encodeURIComponent(id)}`),
+  async pauseScanTask(id) { return scanTaskAction(id, "pause"); },
+  async resumeScanTask(id) { return scanTaskAction(id, "resume"); },
+  async cancelScanTask(id) { return scanTaskAction(id, "cancel"); },
 
   // 扫描目录 = 工作台部署所在机器（客户端本机），非服务端机器
   scan: (name, path, opts) => {

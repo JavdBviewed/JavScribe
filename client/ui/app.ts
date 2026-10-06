@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
+import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -31,6 +31,7 @@ interface AppState {
   scanPage: number;          // 扫描列表当前页（0 起；勾选态全局维护，与翻页互不影响）
   scanPageSize: number;      // 扫描列表每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
+  scanTask: ScanTaskSnapshot | null; // 后台扫描任务（web 形态刷新后可恢复）
   scanMinSizeMb: number;     // 「忽略小于」阈值（MB，localStorage 持久化）
   scanNamingC: string;       // 文件名独立 C 语义：has_sub / no_sub / off
   page: number;              // 任务分页：当前页（0 起）
@@ -76,6 +77,7 @@ const state: AppState = {
   scanPage: 0,
   scanPageSize: readPageSize("javweb_scan_pagesize"),
   lastScan: null,
+  scanTask: null,
   scanMinSizeMb: (() => {
     // 注意 Number(null) === 0：新浏览器（无持久化值）必须落到默认 200，
     // 否则阈值静默变 0，过小/坏文件会被默认勾选并提交（QA 5.5b 暴露）
@@ -123,6 +125,24 @@ function fmtDuration(s: number | null | undefined): string {
   const h = Math.floor(v / 3600), m = Math.floor((v % 3600) / 60), ss = v % 60;
   const p = (n: number) => String(n).padStart(2, "0");
   return h ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`;
+}
+
+/** 兼容服务端 Unix 秒与桌面端 Date.now() 毫秒，统一转换为 Unix 秒。 */
+function timestampSeconds(value: number | string | null | undefined): number | null {
+  if (value == null || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n >= 10_000_000_000 ? n / 1000 : n;
+}
+
+function fmtJobDateTime(value: number | string | null | undefined): string {
+  const seconds = timestampSeconds(value);
+  if (seconds == null) return "";
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} `
+    + `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
 function mb(b: number): number { return Math.round(b / 1048576); }
@@ -185,6 +205,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const scanGo = $("scan-go") as HTMLButtonElement;
   const scanSubmit = $("scan-submit") as HTMLButtonElement;
   const scanSelectAll = $("scan-select-all") as HTMLInputElement;
+  const scanTaskStatus = $("scan-task-status") as HTMLElement | null;
+  const scanTaskText = $("scan-task-text") as HTMLElement | null;
+  const scanTaskPause = $("scan-task-pause") as HTMLButtonElement | null;
+  const scanTaskCancel = $("scan-task-cancel") as HTMLButtonElement | null;
   const line1 = $("line-1");
   const line2 = $("line-2");
   const jobPager = $("job-pager");
@@ -238,11 +262,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
-  // 扫描提示按形态区分：HTML 默认 web 文案；桌面形态下「本机」= 本机磁盘
+  // 桌面端的「客户端部署机」就是当前这台电脑，帮助文案去掉 Web 形态的部署区别。
   if (platform.kind === "desktop") {
     const sh = $("scan-help") as HTMLElement | null;
     if (sh) sh.dataset.tip =
-      "扫描本机（本电脑，即客户端部署机）上的目录：填本机上的绝对路径（如 /media/jav），或点「浏览」直接选。视频处理完成后，字幕自动落回本机影片旁。视频范围与字幕判定规则可在「服务设置」里调整。";
+      "扫描这台电脑上的目录。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理另一台电脑里的文件，请改用「选择文件 / 选择文件夹」。";
   }
   const modalX = $("modal-x");
   const modalBackdrop = $("modal-backdrop");
@@ -846,14 +870,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const pos = isRun || paused
       ? (j.phase_detail || (paused ? "已暂停（等待继续）" : "—"))
       : (j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—"));
-    const elapsed = j.created ? fmtDuration((j.finished || now) - j.created) : "—";
+    const createdSeconds = timestampSeconds(j.created);
+    const finishedSeconds = timestampSeconds(j.finished);
+    const elapsed = createdSeconds != null
+      ? fmtDuration(Math.max(0, (finishedSeconds ?? now) - createdSeconds))
+      : "—";
+    const createdAt = fmtJobDateTime(j.created);
+    const finishedAt = fmtJobDateTime(j.finished);
+    const finishedLabel = j.status === "done" ? "完成于" : "结束于";
+    const jobTime = createdAt
+      ? `<div class="job-time"><span class="job-time-created">添加于 ${esc(createdAt)}</span>`
+        + (finishedAt ? `<span class="job-time-finished">${finishedLabel} ${esc(finishedAt)}</span>` : "")
+        + `</div>`
+      : "";
     let eta = "";
     const prog = j.progress || 0;
     if (isRun) {
       if (j.eta_s != null && j.eta_s >= 0 && j.eta_s < 86400) {
         eta = `剩 ~${fmtDuration(j.eta_s)}`;
-      } else if (prog > 0.01 && j.created) {
-        const el = now - j.created;
+      } else if (prog > 0.01 && createdSeconds != null) {
+        const el = now - createdSeconds;
         eta = el > 5 ? `剩 ~${fmtDuration(el * (1 - prog) / prog)}` : "";
       }
     }
@@ -935,11 +971,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel, srcTag].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel, srcTag, createdAt, finishedAt].join("\u0001");
     const html = `
       <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
-      <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
+      <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}${jobTime}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
@@ -1612,8 +1648,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function updateScanGo() {
+    const scanActive = !!state.scanTask && ["queued", "running", "paused"].includes(state.scanTask.status);
     scanGo.disabled =
-      !scanPath.value.trim() || !engineSelect.value || state.busy;
+      !scanPath.value.trim() || !engineSelect.value || state.busy || scanActive;
   }
 
   engineSelect.onchange = () => {
@@ -2122,7 +2159,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         });
         showStatus(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
         toast(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
-        if (platform.kind === "web") webShowView("jobs"); // 提交即进任务看板
+        webShowView("jobs"); // 提交即进任务看板
         finishDispatch(true);
         refresh();
       } else {
@@ -2164,7 +2201,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     );
     finishBatch();
     refresh();
-    if (platform.kind === "web" && okN > 0) webShowView("jobs"); // 批量完成进任务看板
+    if (okN > 0) webShowView("jobs"); // 批量完成进任务看板
   }
 
   function finishBatch() {
@@ -2917,25 +2954,112 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // ---------- 服务端目录扫描 ----------
-  // 客户端侧扫描规则控件（仅 web 形态；desktop 的 scan 走本地 serve，无这两项）
+  // 扫描规则控件在 Web 与 Desktop 形态保持一致；两端都只把规则传给各自的本机扫描器。
   const scanMinSize = $("scan-minsize") as HTMLInputElement;
   const scanNamingC = $("scan-namingc") as HTMLSelectElement;
-  if (platform.kind === "web") {
-    $("scan-minsize-wrap").hidden = false;
-    $("scan-namingc-wrap").hidden = false;
+  $("scan-minsize-wrap").hidden = false;
+  $("scan-namingc-wrap").hidden = false;
+  scanMinSize.value = String(state.scanMinSizeMb);
+  scanNamingC.value = state.scanNamingC;
+  scanMinSize.onchange = () => {
+    const v = Number(scanMinSize.value);
+    state.scanMinSizeMb = Number.isFinite(v) && v >= 0 ? v : 0;
     scanMinSize.value = String(state.scanMinSizeMb);
-    scanNamingC.value = state.scanNamingC;
-    scanMinSize.onchange = () => {
-      const v = Number(scanMinSize.value);
-      state.scanMinSizeMb = Number.isFinite(v) && v >= 0 ? v : 0;
-      scanMinSize.value = String(state.scanMinSizeMb);
-      localStorage.setItem("javweb_scan_minsize", String(state.scanMinSizeMb));
-    };
-    scanNamingC.onchange = () => {
-      state.scanNamingC = scanNamingC.value;
-      localStorage.setItem("javweb_scan_namingc", state.scanNamingC);
-    };
+    localStorage.setItem("javweb_scan_minsize", String(state.scanMinSizeMb));
+  };
+  scanNamingC.onchange = () => {
+    state.scanNamingC = scanNamingC.value;
+    localStorage.setItem("javweb_scan_namingc", state.scanNamingC);
+  };
+  let scanPollTimer: number | null = null;
+  const stopScanPoll = () => { if (scanPollTimer != null) { window.clearInterval(scanPollTimer); scanPollTimer = null; } };
+  const scanStatusLabel: Record<string, string> = {
+    queued: "等待开始", running: "扫描中", paused: "已暂停", done: "已完成", error: "扫描失败", canceled: "已取消",
+  };
+  function renderScanTaskStatus(task: ScanTaskSnapshot | null) {
+    if (!scanTaskStatus || !scanTaskText) return;
+    if (!task) { scanTaskStatus.hidden = true; return; }
+    scanTaskStatus.hidden = false;
+    const stateText = scanStatusLabel[task.status] || task.status;
+    const detail = task.status === "done"
+      ? `找到 ${task.found} 个视频`
+      : task.status === "error" ? (task.error || "扫描失败")
+      : task.status === "canceled" ? `已检查 ${task.scanned} 项，扫描已取消`
+      : `已检查 ${task.scanned} 项，找到 ${task.found} 个视频`;
+    scanTaskText.textContent = `${stateText} · ${detail}`;
+    scanTaskStatus.dataset.state = task.status;
+    if (scanTaskPause) {
+      scanTaskPause.hidden = !["queued", "running", "paused"].includes(task.status);
+      scanTaskPause.disabled = task.status === "queued" || task.status === "running" ? false : task.status !== "paused";
+      scanTaskPause.textContent = task.status === "paused" ? "▶ 继续" : "⏸ 暂停";
+    }
+    if (scanTaskCancel) scanTaskCancel.hidden = !["queued", "running", "paused"].includes(task.status);
+    updateScanGo();
   }
+  function applyScanResult(d: ScanResult) {
+    state.scanItems = d.items || [];
+    state.lastScan = d;
+    state.scanPage = 0;
+    state.scanMapped = d.mapped === true;
+    state.scanResolvedPath = d.path || "";
+    state.scanChecked = new Set(state.scanItems.filter((i) => !i.has_subtitle && !i.too_small).map((i) => i.path));
+    renderScanResults(d);
+    updateScanGo();
+  }
+  async function pollScanTask(id: string) {
+    if (!t.getScanTask) return;
+    try {
+      const task = await t.getScanTask(id);
+      state.scanTask = task;
+      renderScanTaskStatus(task);
+      if (task.status === "done" && task.result) {
+        stopScanPoll();
+        applyScanResult(task.result);
+        toast(`扫描完成：找到 ${task.found} 个视频`, "ok");
+      } else if (task.status === "error") {
+        stopScanPoll();
+        toast(task.error || "扫描失败", "err");
+      } else if (task.status === "canceled") {
+        stopScanPoll();
+        toast("扫描已取消", "");
+      }
+    } catch (e) {
+      // 页面短暂断网时保留任务状态，下一轮继续；不要把用户误导成扫描丢失
+    }
+  }
+  function beginScanPolling(id: string) {
+    stopScanPoll();
+    void pollScanTask(id);
+    scanPollTimer = window.setInterval(() => void pollScanTask(id), 800);
+  }
+  if (t.startScanTask && t.getScanTask) {
+    if (scanTaskStatus) scanTaskStatus.hidden = true;
+    if (scanTaskPause) scanTaskPause.onclick = async () => {
+      const task = state.scanTask; if (!task) return;
+      try {
+        const next = task.status === "paused" && t.resumeScanTask ? await t.resumeScanTask(task.id) : t.pauseScanTask ? await t.pauseScanTask(task.id) : task;
+        state.scanTask = next; renderScanTaskStatus(next); beginScanPolling(next.id);
+      } catch (e) { toast((e as Error).message, "err"); }
+    };
+    if (scanTaskCancel) scanTaskCancel.onclick = async () => {
+      const task = state.scanTask; if (!task || !t.cancelScanTask) return;
+      try { const next = await t.cancelScanTask(task.id); state.scanTask = next; renderScanTaskStatus(next); stopScanPoll(); updateScanGo(); }
+      catch (e) { toast((e as Error).message, "err"); }
+    };
+    void t.listScanTasks?.().then((tasks) => {
+      // 只恢复本页面发起并记住的扫描，避免把同一客户端上其他窗口/历史任务
+      // 的路径和结果带进当前页面；任务 ID 已持久化，因此刷新仍可继续跟踪。
+      const remembered = localStorage.getItem("javweb_scan_task_id");
+      const task = remembered ? tasks.find((x) => x.id === remembered) : undefined;
+      if (!task) return;
+      state.scanTask = task;
+      if (!scanPath.value.trim() && task.path) scanPath.value = task.path;
+      renderScanTaskStatus(task);
+      if (task.status === "done" && task.result) applyScanResult(task.result);
+      else if (["queued", "running", "paused"].includes(task.status)) beginScanPolling(task.id);
+    }).catch(() => {});
+  }
+
   scanGo.onclick = async () => {
     const engine = engineSelect.value;
     const path = scanPath.value.trim();
@@ -2965,30 +3089,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     scanGo.disabled = true;
     $("scan-results").hidden = false;
-    $("scan-table").innerHTML = '<div class="muted small scan-loading">扫描中…</div>';
+    $("scan-table").innerHTML = '<div class="muted small scan-loading">正在建立后台扫描任务…页面可以刷新，扫描不会丢失。</div>';
     $("scan-submit").hidden = false;
     scanSubmit.disabled = true;
     try {
-      const d = await t.scan(engine, path, {
-        min_size_mb: state.scanMinSizeMb,
-        naming_c: state.scanNamingC,
-      });
-      state.scanItems = d.items || [];
-      state.lastScan = d;
-      state.scanPage = 0; // 每次新扫描回到第一页
-      state.scanMapped = d.mapped === true;
-      state.scanResolvedPath = d.path || "";
-      // 默认勾选：无字幕且不过小；已有字幕 / 过小的留待用户显式勾选
-      state.scanChecked = new Set(
-        state.scanItems.filter((i) => !i.has_subtitle && !i.too_small).map((i) => i.path)
-      );
-      renderScanResults(d);
+      if (t.startScanTask && t.getScanTask) {
+        const task = await t.startScanTask(engine, path, { min_size_mb: state.scanMinSizeMb, naming_c: state.scanNamingC });
+        state.scanTask = task;
+        localStorage.setItem("javweb_scan_task_id", task.id);
+        renderScanTaskStatus(task);
+        beginScanPolling(task.id);
+      } else {
+        const d = await t.scan(engine, path, { min_size_mb: state.scanMinSizeMb, naming_c: state.scanNamingC });
+        applyScanResult(d);
+      }
     } catch (err) {
       $("scan-table").innerHTML = "";
       $("scan-results").hidden = true;
       $("scan-submit").hidden = true;
+      state.scanTask = null; renderScanTaskStatus(null);
       toast((err as Error).message, "err");
-    } finally {
       updateScanGo();
     }
   };
@@ -2998,14 +3118,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (state.scanMapped) {
       $("scan-mapped").hidden = false;
       $("scan-mapped").textContent =
-        (platform.kind === "desktop" ? "已按宿主机实际路径扫描：" : "已按宿主机映射实际路径扫描：")
+        (platform.kind === "desktop" ? "已扫描实际路径：" : "已扫描映射后的实际路径：")
         + state.scanResolvedPath;
     } else {
       $("scan-mapped").hidden = true;
     }
     if (!items.length) {
       $("scan-table").innerHTML =
-        '<div class="muted small">该目录下没有符合规则的视频文件（可在「服务设置 · 扫描规则」调整扩展名'
+        '<div class="muted small">没有找到符合条件的视频文件。可到「服务设置 · 扫描规则」调整扩展名'
       + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
       renderScanPager(0);
     } else {
@@ -3024,12 +3144,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               : i.subtitle_status === "named"
               ? `<span class="tag subtag" title="文件名含独立 C，按规则视为已压字幕（可在「文件名独立 C」改判）">C 版（名）</span>`
               : i.subtitle_status === "embedded"
-              ? `<span class="tag subtag" title="视频内嵌字幕轨：${esc(langs)}">内嵌 ${esc(langs)}</span>`
-              : i.probe_failed
-              ? '<span class="tag subtag warn" title="内嵌字幕探测失败（ffprobe 异常）；本次未检测到不代表视频没有内嵌字幕，请重新扫描">⚠ 探测失败</span>'
+              ? `<span class="tag subtag warn" title="普通扫描不会读取视频内容；如需确认内嵌字幕，请单独发起检查">内嵌字幕（需单独检查）</span>`
               : i.name_no_sub
               ? `<span class="tag subtag ok" title="文件名含独立 C，按规则视为无字幕版">无字幕（名）</span>`
-              : '<span class="muted">—</span>';
+              : '<span class="muted" title="普通扫描不会读取视频内容">未检查</span>';
             return `
             <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
               <td class="col-check"><input type="checkbox" data-path="${esc(i.path)}"${state.scanChecked.has(i.path) ? " checked" : ""}></td>
@@ -3091,20 +3209,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const total = state.scanItems.length;
     const nSub = state.scanItems.filter((i) => i.has_subtitle).length;
     const nSmall = state.scanItems.filter((i) => i.too_small && !state.scanChecked.has(i.path)).length;
-    const nProbeFail = state.scanItems.filter((i) => i.probe_failed).length;
     let text = total ? `已选 ${n} / ${total}` : "";
     if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
     if (nSmall) text += ` · ${nSmall} 个过小未选`;
-    if (nProbeFail) text += ` · ⚠ ${nProbeFail} 个文件内嵌字幕探测失败`;
+    text += (text ? " · " : "") + "内嵌字幕未检查（不会触发网盘下载）";
     if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
     $("scan-count").textContent = text;
-    const b = scanSubmit;
-    b.disabled = n === 0 || !engineSelect.value || state.busy;
-    b.innerHTML = "&#9654; 开始生成（" + n + " 项）";
+    const button = scanSubmit;
+    button.disabled = n === 0 || !engineSelect.value || state.busy;
+    button.innerHTML = "&#9654; 生成字幕（已选择 " + n + " 项）";
     // 「全选」只覆盖非「忽略」文件：too_small 只能手动勾选
     const selectable = state.scanItems.filter((i) => !i.too_small).length;
-    const all = scanSelectAll;
-    all.checked = selectable > 0 && state.scanChecked.size === selectable;
+    scanSelectAll.checked = selectable > 0 && state.scanChecked.size === selectable;
   }
 
   scanSelectAll.onchange = (ev) => {
@@ -3166,7 +3282,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       $("scan-submit").hidden = true;
       $("scan-table").innerHTML = "";
       refresh();
-      if (platform.kind === "web") webShowView("jobs"); // 提交即进任务看板
+      webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
       toast((e as Error).message, "err");
     } finally {
@@ -3459,32 +3575,38 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     renderUpSidebar();
   }
 
-  // ---------- 桌面壳：侧边栏视图切换 + 任务数徽标 + 窗控按钮（frameless 自定义标题栏） ----------
-  // web 形态无 body.desktop / #nav / #titlebar 节点，整块不执行（web 100% 不变硬约束）
-  if (platform.kind === "desktop") {
-    const VIEWS = ["engines", "dispatch", "jobs"] as const;
-    type ViewName = (typeof VIEWS)[number];
-    const secs: Record<ViewName, HTMLElement> = {
-      engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"),
-    };
-    const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item[data-view]"));
-    const badge = $("nav-badge") as HTMLElement | null;
-    let saved = "dispatch";
-    try { saved = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
-    const initial: ViewName = VIEWS.includes(saved as ViewName) ? (saved as ViewName) : "dispatch";
-    const showView = (view: ViewName) => {
-      for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
-      for (const it of items) it.classList.toggle("on", it.dataset.view === view);
-      try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
-    };
-    showView(initial);
-    for (const it of items) it.addEventListener("click", () => showView(it.dataset.view as ViewName));
-    viewBadge = (n: number) => {
-      if (!badge) return;
-      badge.hidden = n <= 0;
-      if (n > 0) badge.textContent = String(n);
-    };
+  // ---------- 共享工作台导航 + 平台必要的桌面窗口控制 ----------
+  // Web 与 Desktop 使用同一套导航节点、视图状态和交互；桌面只额外保留窗口控制。
+  const VIEWS = ["engines", "dispatch", "jobs"] as const;
+  type ViewName = (typeof VIEWS)[number];
+  const secs: Record<ViewName, HTMLElement> = {
+    engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"),
+  };
+  const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>("#nav .view-tab[data-view]"));
+  const navBadge = $("nav-badge") as HTMLElement | null;
+  let savedView = "dispatch";
+  try { savedView = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
+  const initialView: ViewName = VIEWS.includes(savedView as ViewName) ? (savedView as ViewName) : "dispatch";
+  webShowView = (view: ViewName) => {
+    for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
+    for (const item of navItems) {
+      const active = item.dataset.view === view;
+      item.classList.toggle("on", active);
+      item.setAttribute("aria-selected", active ? "true" : "false");
+    }
+    try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
+  };
+  webShowView(initialView);
+  for (const item of navItems) {
+    item.addEventListener("click", () => webShowView(item.dataset.view as ViewName));
+  }
+  viewBadge = (n: number) => {
+    if (!navBadge) return;
+    navBadge.hidden = n <= 0;
+    if (n > 0) navBadge.textContent = String(n);
+  };
 
+  if (platform.kind === "desktop") {
     const d = (window as unknown as {
       javDesktop?: {
         win?: {
@@ -3507,43 +3629,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           max.setAttribute("aria-label", m ? "还原" : "最大化");
         });
       }
-      // 双击标题栏 = 最大化/还原（窗控按钮与更新角标区域除外）
       const tb = $("titlebar");
       if (tb) tb.addEventListener("dblclick", (e) => {
         if ((e.target as HTMLElement).closest(".tb-btn, #up-chip")) return;
         d.toggleMax();
       });
     }
-  }
-
-  // ---------- web 壳：顶部视图 tab（生成字幕 / 字幕任务 / 字幕服务；desktop 用侧边栏，整块不执行） ----------
-  if (platform.kind === "web") {
-    const VIEWS_W = ["dispatch", "jobs", "engines"] as const;
-    type ViewW = (typeof VIEWS_W)[number];
-    const secsW: Record<ViewW, HTMLElement> = {
-      dispatch: $("sec-dispatch"), jobs: $("sec-jobs"), engines: $("sec-engines"),
-    };
-    const tabItems = Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab[data-view]"));
-    const tabBadge = $("tab-jobs-badge") as HTMLElement | null;
-    let savedW = "dispatch";
-    try { savedW = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
-    const initialW: ViewW = VIEWS_W.includes(savedW as ViewW) ? (savedW as ViewW) : "dispatch";
-    webShowView = (view: ViewW) => {
-      for (const v of VIEWS_W) secsW[v].classList.toggle("view-on", v === view);
-      for (const it of tabItems) {
-        const on = it.dataset.view === view;
-        it.classList.toggle("on", on);
-        it.setAttribute("aria-selected", on ? "true" : "false");
-      }
-      try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
-    };
-    webShowView(initialW);
-    for (const it of tabItems) it.addEventListener("click", () => webShowView(it.dataset.view as ViewW));
-    viewBadge = (n: number) => {
-      if (!tabBadge) return;
-      tabBadge.hidden = n <= 0;
-      if (n > 0) tabBadge.textContent = String(n);
-    };
   }
 
   refresh();

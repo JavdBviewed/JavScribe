@@ -1,5 +1,5 @@
 // 桌面端 UI 结构类：关键 DOM 断言（id/class/aria、桌面措辞、列序、chip 文案）
-import { test, expect, goView, CLIENT_VERSION } from "./helpers";
+import { test, expect, goView, CLIENT_VERSION, mockSeed, waitForReady } from "./helpers";
 import { MOCK } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -15,11 +15,11 @@ test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dis
   for (const id of ["win-min", "win-max", "win-close"]) await expect(page.locator(`#${id}`)).toBeVisible();
   // 侧边栏三视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务）
   await expect(page.locator("#nav")).toBeVisible();
-  const navLabels = page.locator("#nav .nav-item > span:not(.nav-badge)");
+  const navLabels = page.locator("#nav .view-tab > span:not(.nav-badge)");
   expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务"]);
-  expect(await page.locator("#nav .nav-item").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs"]);
+  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs"]);
   // 默认视图 = dispatch（新 userData，localStorage 空）
-  await expect(page.locator(".nav-item[data-view=dispatch]")).toHaveClass(/on/);
+  await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveClass(/on/);
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
   await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
@@ -37,7 +37,7 @@ test("视图切换：nav 点击切视图 + localStorage 持久化", async ({ pag
   await goView(page, "jobs");
   await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-dispatch")).not.toHaveClass(/view-on/);
-  await expect(page.locator(".nav-item[data-view=jobs]")).toHaveClass(/on/);
+  await expect(page.locator(".view-tab[data-view=jobs]")).toHaveClass(/on/);
   expect(await page.evaluate(() => localStorage.getItem("javview_view"))).toBe("jobs");
   await goView(page, "dispatch");
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
@@ -82,13 +82,23 @@ test("派单栏结构（提取模式三选项桌面措辞 + autosave）", async 
 });
 
 test("扫描面板结构（客户端部署机目录语义 + 桌面本机文案）", async ({ page }) => {
-  await expect(page.locator(".scan-title")).toHaveText("扫描目录（客户端部署机）");
-  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
+  await expect(page.locator(".scan-title")).toHaveText("扫描客户端目录");
+  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "例如 /mnt/115/JPMV/115DZL");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".scan-head .muted")).toHaveText(/填客户端部署机上的目录路径/);
+  await expect(page.locator(".scan-head .muted")).toHaveText(/扫描运行 JavScribe 的这台机器/);
   // 桌面形态：app.ts 桌面分支把 help 覆盖为「本机」文案
-  await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /扫描本机（本电脑，即客户端部署机）上的目录/);
+  await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /扫描这台电脑上的目录/);
+});
+
+test("任务行显示添加时间与完成时间", async ({ page, request }) => {
+  await mockSeed(request, { n: 1, status: "done" });
+  await page.reload();
+  await waitForReady(page);
+  await goView(page, "jobs");
+  const row = page.locator(".job-row").first();
+  await expect(row.locator(".job-time-created")).toHaveText(/^添加于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".job-time-finished")).toHaveText(/^完成于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {

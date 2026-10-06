@@ -232,55 +232,37 @@ def test_scan_min_size_and_naming_c() -> None:
         assert got == [d / "tiny.mp4"]
 
 
-def test_scan_probe_failure_explicit() -> None:
-    """ffprobe 探测失败 -> 该项 probe_failed=True / probe_errors 含文件名；
-    失败不缓存（恢复后重扫重新探测），探测整体关闭时不探测不报错。"""
+def test_scan_is_metadata_only_and_skips_embedded_probe() -> None:
+    """普通扫描不读取视频内容，也不会调用 ffprobe。"""
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
-        (d / "A.mp4").write_bytes(b"x" * 100)
-        (d / "B.mp4").write_bytes(b"x" * 100)
+        (d / "movie.mp4").write_bytes(b"not a real video")
+        (d / "movie.zh.srt").write_text(SRT_OK.decode())
+        (d / "ABF-330-C.mkv").write_bytes(b"metadata only")
         cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
-        localscan.clear_probe_cache()
-        real = localscan._run_ffprobe
+        calls: list[Path] = []
+        real = localscan.probe_embedded_subs
 
-        def boom(p: Path) -> list:
-            if p.name == "A.mp4":
-                raise localscan.ProbeError("ffprobe 超时（>15s）")
-            return []  # B：探测成功但无内嵌轨
-
-        def ok(p: Path) -> list:
-            return []
+        def forbidden(path: Path) -> list:
+            calls.append(Path(path))
+            raise AssertionError("普通扫描不应调用 probe_embedded_subs")
 
         try:
-            localscan._run_ffprobe = boom  # type: ignore[assignment]
-            res = localscan.scan_dir(d, cfg)
-            # 恢复探测后重扫：A 的失败未写缓存 ⇒ 重新探测成功
-            localscan._run_ffprobe = ok  # type: ignore[assignment]
-            res2 = localscan.scan_dir(d, cfg)
+            localscan.probe_embedded_subs = forbidden  # type: ignore[assignment]
+            result = localscan.scan_dir(d, cfg)
         finally:
-            localscan._run_ffprobe = real  # type: ignore[assignment]
+            localscan.probe_embedded_subs = real  # type: ignore[assignment]
 
-        by = {i["name"]: i for i in res["items"]}
-        by2 = {i["name"]: i for i in res2["items"]}
-        assert res["probe_errors"] == ["A.mp4"], res["probe_errors"]
-        a = by["A.mp4"]
-        assert a["probe_failed"] is True
-        assert a["subtitle_status"] == "none" and a["has_subtitle"] is False
-        assert by["B.mp4"]["probe_failed"] is False
-        assert by["B.mp4"]["subtitle_status"] == "none"
-        assert res2["probe_errors"] == [], res2["probe_errors"]
-        assert by2["A.mp4"]["probe_failed"] is False
-        assert by2["A.mp4"]["subtitle_status"] == "none"
-
-        # 探测整体关闭（skip_embedded=off）：不探测、无错误、无失败标记
-        cfg_off = copy.deepcopy(cfg)
-        cfg_off["subtitle"]["skip_embedded"] = "off"
-        res3 = localscan.scan_dir(d, cfg_off)
-        assert res3["probe_errors"] == []
-        assert all(i["probe_failed"] is False for i in res3["items"])
-
-    # 文件消失（stat 失败）同样 -> None，不抛异常
-    assert localscan.probe_embedded_subs("/no/such/vid.mp4") is None
+        assert calls == []
+        assert result["embedded_checked"] is False
+        assert result["probe_errors"] == []
+        by = {item["name"]: item for item in result["items"]}
+        assert by["movie.mp4"]["subtitle_status"] == "external"
+        assert by["movie.mp4"]["has_subtitle"] is True
+        assert by["movie.mp4"]["embedded_langs"] == []
+        assert by["movie.mp4"]["probe_failed"] is False
+        assert by["ABF-330-C.mkv"]["name_no_sub"] is True
+        assert by["ABF-330-C.mkv"]["embedded_checked"] is False
 
 
 def test_validate_submit_files() -> None:

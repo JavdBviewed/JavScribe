@@ -3,7 +3,7 @@
 // 注意：autosave 的「自动下载」兜底走原生保存对话框，e2e 无法驱动，不覆盖；
 //       写回链路由 writeSrt IPC 用例在进程级覆盖（同一条 IPC 通路）。
 import { test, expect, goView, mockSpeed, mockSeed, mockReset, launchApp, relaunch, waitForReady, waitForEngineKey,
-  waitForMockJobFinished, MOCK, MOCK_KEY, FIXTURES } from "./helpers";
+  waitForMockJobFinished, MOCK, MOCK_KEY, FIXTURES, makeScanDir } from "./helpers";
 import type { APIRequestContext } from "./helpers";
 import { join } from "node:path";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -229,22 +229,25 @@ test("筛选 × 分页：25 条已完成 → 默认 10/页 3 页 → 切档 20 �
 });
 
 test("扫描全流程：3 项（1 有字幕）→ 全选 → 入队 3 项 → 看板 3 行", async ({ page }) => {
+  await goView(page, "dispatch");
+  await page.locator("#scan-minsize").fill("0");
   // 所选含 1 个外部 srt 文件 → 提交前弹「已检测到字幕」confirm，接受继续
   page.on("dialog", (d) => d.accept());
   await page.selectOption("#engine-select", "mock");
-  await page.locator("#scan-path").fill("/media/jav");
+  await page.locator("#scan-path").fill(makeScanDir());
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator(".scan-name")).toHaveCount(3);
   // 外部 srt：文件名进 title 悬浮，标签统一显示「外部 srt」（0.2.x 扫描表重构后）
   await expect(page.locator(".has-sub .subtag")).toHaveText("外部 srt");
   await expect(page.locator(".has-sub .subtag")).toHaveAttribute("title", "AKDL-002.zh.srt");
-  await expect(page.locator("#scan-count")).toHaveText("已选 2 / 3 · 1 个已有字幕默认不勾选");
-  await expect(page.locator("#scan-submit")).toContainText("开始生成（2 项）");
+  await expect(page.locator("#scan-count")).toContainText("已选 2 / 3 · 1 个已有字幕默认不勾选");
+  await expect(page.locator("#scan-submit")).toContainText("生成字幕（已选择 2 项）");
   await page.locator("#scan-select-all").check();
-  await expect(page.locator("#scan-count")).toHaveText("已选 3 / 3 · 1 个已有字幕默认不勾选");
-  const [toast] = await Promise.all([
-    page.waitForSelector("#toasts .toast.ok", { state: "visible" }),
+  await expect(page.locator("#scan-count")).toContainText("已选 3 / 3 · 1 个已有字幕默认不勾选");
+  const toast = page.locator("#toasts .toast.ok", { hasText: "已入队" }).last();
+  await Promise.all([
+    toast.waitFor({ state: "visible" }),
     page.click("#scan-submit"),
   ]);
   expect(await toast.textContent()).toContain("已入队 3 项");

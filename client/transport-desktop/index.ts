@@ -7,9 +7,9 @@
 //      整片直传的服务端提取进度在任务看板呈现）
 //   - 无 _localPath 的合成 File（e2e setInputFiles 场景）走 data 通道读全量字节
 
-import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
+import { TransportError, type ScanOpts, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, UpdateInfo, UploadStatus,
+  ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -166,8 +166,16 @@ export const desktopTransport: Transport = {
     return { ...st };
   },
 
-  // desktop 形态的 scan 走本地 serve /scan（serve 侧规则，本周期无 min_size/naming 项）
+  // Desktop 的扫描必须在客户端主进程执行：服务端只负责模型处理，不能替客户端扫描路径。
+  // 旧 scan 保留兼容；新 UI 优先使用可持久化的后台扫描任务。
   scan: (name, p, _opts) => call<ScanResult>("scan", name, p),
+  startScanTask: async (name: string, p: string, opts?: ScanOpts) =>
+    call<ScanTaskSnapshot>("startScanTask", name, p, JSON.stringify(opts || {})),
+  listScanTasks: () => call<ScanTaskSnapshot[]>("listScanTasks"),
+  getScanTask: (id: string) => call<ScanTaskSnapshot>("getScanTask", id),
+  pauseScanTask: (id: string) => call<ScanTaskSnapshot>("pauseScanTask", id),
+  resumeScanTask: (id: string) => call<ScanTaskSnapshot>("resumeScanTask", id),
+  cancelScanTask: (id: string) => call<ScanTaskSnapshot>("cancelScanTask", id),
   // 字幕预览：desktop 形态字幕文件在本机，走 IPC 直读（main 侧校验扩展名/大小）
   readSrt: (p) => desktop.readSrt(p),
   submitScan: (name, files, _sub) =>

@@ -28,8 +28,10 @@ test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
 });
 
-test("视图 tab 条：三 tab（服务→生成→任务，对齐桌面侧边栏）默认「生成字幕」+ 切换 + 持久化", async ({ page }) => {
-  const tabs = page.locator("#view-tabs .view-tab");
+test("统一侧边导航：Web 与桌面共用同一组视图按钮", async ({ page }) => {
+  const tabs = page.locator("#nav .view-tab");
+  await expect(page.locator("#nav")).toBeVisible();
+  await expect(page.locator("#view-tabs")).toHaveCount(0);
   await expect(tabs).toHaveCount(3);
   // 顺序与桌面端侧边栏一致：字幕服务 → 生成字幕 → 字幕任务
   await expect(tabs.nth(0)).toHaveText("字幕服务");
@@ -102,14 +104,14 @@ test("派单栏结构（含提取模式三选项与 autosave）", async ({ page 
 });
 
 test("扫描面板结构（客户端部署机语义文案）", async ({ page }) => {
-  await expect(page.locator(".scan-title")).toHaveText("扫描目录（客户端部署机）");
-  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "/media/jav");
+  await expect(page.locator(".scan-title")).toHaveText("扫描客户端目录");
+  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "例如 /mnt/115/JPMV/115DZL");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
   // 关键语义：路径填客户端（本页面服务）部署机上的目录，不是浏览器电脑（长解释收进 ? 帮助 tooltip）
-  await expect(page.locator(".scan-head .muted")).toHaveText(/填客户端部署机上的目录路径/);
+  await expect(page.locator(".scan-head .muted")).toHaveText(/扫描运行 JavScribe 的这台机器/);
   const tip = await page.locator(".scan-head .help").getAttribute("data-tip");
-  expect(tip).toMatch(/不是浏览器所在电脑/);
+  expect(tip).toMatch(/浏览器电脑里的文件/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
@@ -139,7 +141,7 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
 
 test("页脚与 modal/toast 结构", async ({ page }) => {
   await expect(page.locator("footer").locator(".mono").first()).toHaveText("JAVSCRIBE-WEB");
-  await expect(page.getByText("看板 5s · 生成 1s")).toBeVisible();
+  await expect(page.locator("footer > .muted")).toContainText("看板 5s · 生成 1s");
   await expect(page.locator("#modal-backdrop")).toBeHidden();
   await expect(page.locator("#modal")).toHaveAttribute("role", "dialog");
   await expect(page.locator("#modal")).toHaveAttribute("aria-modal", "true");

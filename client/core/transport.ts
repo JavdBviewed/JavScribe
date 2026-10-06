@@ -117,6 +117,13 @@ export interface Transport {
   getUpdate(): Promise<UpdateInfo>;
   /** 扫描客户端本机目录（web 形态：工作台部署所在机器）；失败 throw(detail) */
   scan(name: string, path: string, opts?: ScanOpts): Promise<ScanResult>;
+  /** Web 形态后台扫描：立即返回 task id，刷新页面后仍可恢复查看。 */
+  startScanTask?(name: string, path: string, opts?: ScanOpts): Promise<import("./types").ScanTaskSnapshot>;
+  listScanTasks?(): Promise<import("./types").ScanTaskSnapshot[]>;
+  getScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
+  pauseScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
+  resumeScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
+  cancelScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
   /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw
    *  subStatus：{path: subtitle_status} 提交前检测到的字幕状态（制作图提示展示用） */
   submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;

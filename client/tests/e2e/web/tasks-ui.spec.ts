@@ -31,6 +31,18 @@ async function seedSix(page: Page) {
   await expect(jobRows(page)).toHaveCount(6, { timeout: 15_000 });
 }
 
+
+
+test("任务行显示添加时间与完成时间", async ({ page }) => {
+  await mockSeed(req, { n: 1, status: "done" });
+  await page.goto("/");
+  await waitForEngineOnline(page);
+  await goTab(page, "jobs");
+  const row = page.locator(".job-row").first();
+  await expect(row.locator(".job-time-created")).toHaveText(/^添加于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".job-time-finished")).toHaveText(/^完成于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+});
+
 test("筛选条：9 个状态按钮（内嵌计数）取代旧统计行，点击筛选生效", async ({ page }) => {
   await seedSix(page);
 

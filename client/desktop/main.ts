@@ -24,6 +24,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
+import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
+import type { ScanOpts } from "../core/transport";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 import {
   type EmbeddedSub,
@@ -541,6 +543,249 @@ function configError(status: number, data: unknown): Error {
   if (status === 401) return new Error("API Key 不正确：请核对服务端的 JAVSCRIBE_API_KEY 与登记的 Key");
   if (status === 404) return new Error("该服务版本过旧，不支持配置管理（请升级 JavScribe 服务）");
   return serveError(status, data);
+}
+
+// ---------------------------------------------------------------------------
+// Desktop 本地后台扫描
+// ---------------------------------------------------------------------------
+// 扫描目录属于客户端能力：这里只读目录项、视频 stat 大小和同目录字幕文件名。
+// 绝不调用 serve /scan、ffprobe、ffmpeg，也不打开视频文件，因此不会因为扫描
+// 115/CloudDrive2 挂载目录而主动下载视频内容。
+
+const DESKTOP_SCAN_MAX_ITEMS = 5000;
+const DESKTOP_SCAN_DEFAULTS = {
+  video_exts: [...VIDEO_EXTS],
+  subtitle_patterns: [...LOCAL_SUB_PATTERNS],
+  recurse: true,
+};
+const STANDALONE_C_RE = /(?<![A-Za-z0-9])c(?![A-Za-z0-9])/i;
+
+type DesktopScanOptions = {
+  min_size_mb: number;
+  naming_c: "has_sub" | "no_sub" | "off";
+  video_exts: string[];
+  subtitle_patterns: string[];
+  recurse: boolean;
+};
+
+type DesktopScanRecord = ScanTaskSnapshot & {
+  options: DesktopScanOptions;
+  pauseRequested: boolean;
+  cancelRequested: boolean;
+};
+
+const desktopScanTasks = new Map<string, DesktopScanRecord>();
+const desktopScanWorkers = new Set<string>();
+let desktopScanSaveTimer: NodeJS.Timeout | null = null;
+
+function desktopScanPath(): string {
+  return path.join(app.getPath("userData"), "scan-tasks.json");
+}
+
+function safeScanOptions(raw: unknown, cfg?: Partial<DesktopScanOptions>): DesktopScanOptions {
+  const o = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const number = Number(o.min_size_mb ?? cfg?.min_size_mb ?? 200);
+  const naming = String(o.naming_c ?? cfg?.naming_c ?? "no_sub");
+  const exts = Array.isArray(o.video_exts) ? o.video_exts : cfg?.video_exts;
+  const pats = Array.isArray(o.subtitle_patterns) ? o.subtitle_patterns : cfg?.subtitle_patterns;
+  return {
+    min_size_mb: Number.isFinite(number) && number >= 0 ? number : 200,
+    naming_c: naming === "has_sub" || naming === "off" ? naming : "no_sub",
+    video_exts: [...new Set((exts || DESKTOP_SCAN_DEFAULTS.video_exts).map(String).map((x) => x.toLowerCase().replace(/^\./, "")).filter(Boolean))],
+    subtitle_patterns: [...new Set((pats || DESKTOP_SCAN_DEFAULTS.subtitle_patterns).map(String).map((x) => x.toLowerCase().startsWith(".") ? x.toLowerCase() : "." + x.toLowerCase()).filter(Boolean))],
+    recurse: o.recurse == null ? (cfg?.recurse ?? true) : Boolean(o.recurse),
+  };
+}
+
+function desktopScanPublic(r: DesktopScanRecord): ScanTaskSnapshot {
+  const { options: _options, pauseRequested: _pause, cancelRequested: _cancel, ...publicTask } = r;
+  return structuredClone(publicTask);
+}
+
+function persistDesktopScanTasks(): void {
+  if (desktopScanSaveTimer) return;
+  desktopScanSaveTimer = setTimeout(() => {
+    desktopScanSaveTimer = null;
+    try {
+      const file = desktopScanPath();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = file + ".tmp";
+      const data = [...desktopScanTasks.values()].map((r) => {
+        const { pauseRequested: _pause, cancelRequested: _cancel, ...safe } = r;
+        return safe;
+      });
+      fs.writeFileSync(tmp, JSON.stringify({ tasks: data }, null, 1), "utf8");
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      console.warn("[scan] 保存任务状态失败:", (e as Error).message);
+    }
+  }, 150);
+}
+
+function persistDesktopScanTasksNow(): void {
+  if (desktopScanSaveTimer) {
+    clearTimeout(desktopScanSaveTimer);
+    desktopScanSaveTimer = null;
+  }
+  try {
+    const file = desktopScanPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = file + ".tmp";
+    const data = [...desktopScanTasks.values()].map((r) => {
+      const { pauseRequested: _pause, cancelRequested: _cancel, ...safe } = r;
+      return safe;
+    });
+    fs.writeFileSync(tmp, JSON.stringify({ tasks: data }, null, 1), "utf8");
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    console.warn("[scan] 保存任务状态失败:", (e as Error).message);
+  }
+}
+
+function loadDesktopScanTasks(): void {
+  let parsed: unknown;
+  try { parsed = JSON.parse(fs.readFileSync(desktopScanPath(), "utf8")); } catch { return; }
+  const rows = parsed && typeof parsed === "object" && Array.isArray((parsed as { tasks?: unknown[] }).tasks)
+    ? (parsed as { tasks: unknown[] }).tasks : [];
+  for (const raw of rows) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Partial<DesktopScanRecord>;
+    if (typeof r.id !== "string" || typeof r.path !== "string" || typeof r.engine !== "string") continue;
+    const status = r.status === "queued" || r.status === "running" ? "paused" : r.status;
+    if (!["paused", "done", "error", "canceled"].includes(String(status))) continue;
+    desktopScanTasks.set(r.id, {
+      id: r.id, engine: r.engine, path: r.path, resolved_path: r.resolved_path || null,
+      mapped: false, status: status as ScanTaskSnapshot["status"],
+      scanned: Number(r.scanned) || 0, found: Number(r.found) || 0,
+      result: r.result || null, error: r.error || null,
+      created: Number(r.created) || Date.now(), updated: Date.now(), finished: r.finished || null,
+      options: safeScanOptions((r as { options?: unknown }).options),
+      pauseRequested: status === "paused", cancelRequested: false,
+    });
+  }
+}
+
+async function loadDesktopScanConfig(entry: EngineEntry, requested: ScanOpts): Promise<DesktopScanOptions> {
+  const headers: Record<string, string> = {};
+  if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
+  const r = await httpJson<any>(entry.url + "/config", { headers, timeoutMs: 15000 });
+  if (r.status !== 200) throw configError(r.status, r.data);
+  const items = Array.isArray(r.data?.items) ? r.data.items : [];
+  const cfg: Partial<DesktopScanOptions> = {};
+  for (const item of items) {
+    if (!item || typeof item.path !== "string") continue;
+    if (item.path === "scan.video_exts" && Array.isArray(item.value)) cfg.video_exts = item.value.map(String);
+    if (item.path === "scan.subtitle_patterns" && Array.isArray(item.value)) cfg.subtitle_patterns = item.value.map(String);
+    if (item.path === "scan.recurse") cfg.recurse = Boolean(item.value);
+  }
+  return safeScanOptions(requested, cfg);
+}
+
+function desktopScanItem(filePath: string, name: string, size: number, options: DesktopScanOptions, subtitleNames: Set<string>): ScanItem {
+  const stem = path.basename(name, path.extname(name));
+  const subtitle = options.subtitle_patterns
+    .map((suffix) => stem + suffix)
+    .find((candidate) => subtitleNames.has(candidate)) || null;
+  const hasC = options.naming_c !== "off" && STANDALONE_C_RE.test(name);
+  const named = options.naming_c === "has_sub" && hasC;
+  const noSub = options.naming_c === "no_sub" && hasC;
+  return {
+    path: filePath, name, size,
+    has_subtitle: Boolean(subtitle) || named,
+    subtitle,
+    subtitle_status: subtitle ? "external" : named ? "named" : "none",
+    embedded_checked: false, embedded_langs: [], probe_failed: false,
+    too_small: options.min_size_mb > 0 && size < options.min_size_mb * 1048576,
+    name_sub: named, name_no_sub: noSub,
+  };
+}
+
+async function waitDesktopScanControl(task: DesktopScanRecord): Promise<void> {
+  while (task.pauseRequested && !task.cancelRequested) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (task.cancelRequested) throw new Error("__SCAN_CANCELED__");
+}
+
+async function runDesktopScan(task: DesktopScanRecord): Promise<void> {
+  if (desktopScanWorkers.has(task.id)) return;
+  desktopScanWorkers.add(task.id);
+  let lastPersist = 0;
+  const progress = (force = false) => {
+    task.updated = Date.now();
+    if (force || Date.now() - lastPersist > 250) { lastPersist = Date.now(); persistDesktopScanTasks(); }
+  };
+  try {
+    await waitDesktopScanControl(task);
+    const entry = engineByName(task.engine);
+    const options = await loadDesktopScanConfig(entry, task.options);
+    task.options = options;
+    task.status = task.pauseRequested ? "paused" : "running";
+    task.updated = Date.now();
+    persistDesktopScanTasks();
+    const root = path.resolve(task.path);
+    const stack = [root];
+    const items: ScanItem[] = [];
+    let truncated = false;
+    while (stack.length) {
+      await waitDesktopScanControl(task);
+      const current = stack.pop()!;
+      let dir: fs.Dir;
+      try { dir = await fs.promises.opendir(current); } catch { continue; }
+      const entries: fs.Dirent[] = [];
+      try {
+        for await (const entryItem of dir) entries.push(entryItem);
+      } finally { await dir.close().catch(() => {}); }
+      entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+      const subtitleNames = new Set(entries.filter((e) => e.isFile()).map((e) => e.name));
+      for (const entryItem of entries) {
+        await waitDesktopScanControl(task);
+        task.scanned += 1;
+        const full = path.join(current, entryItem.name);
+        try {
+          if (entryItem.isDirectory()) { if (options.recurse) stack.push(full); continue; }
+          if (!entryItem.isFile()) continue;
+          const ext = path.extname(entryItem.name).slice(1).toLowerCase();
+          if (!options.video_exts.includes(ext)) continue;
+          const st = await fs.promises.stat(full);
+          if (!st.isFile() || st.size <= 0) continue;
+          if (items.length >= DESKTOP_SCAN_MAX_ITEMS) { truncated = true; break; }
+          items.push(desktopScanItem(full, entryItem.name, st.size, options, subtitleNames));
+          task.found = items.length;
+        } catch { /* 文件在网盘目录变化时消失：跳过，不中断整次扫描 */ }
+        progress();
+      }
+      if (truncated) break;
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    const result: ScanResult = {
+      path: root, items, truncated, mapped: false,
+      min_size_mb: options.min_size_mb, naming_c: options.naming_c,
+      embedded_checked: false, probe_errors: [],
+    };
+    task.result = result;
+    task.status = "done";
+    task.found = items.length;
+    task.finished = Date.now();
+    progress(true);
+  } catch (e) {
+    if ((e as Error).message === "__SCAN_CANCELED__" || task.cancelRequested) {
+      task.status = "canceled";
+      task.error = null;
+    } else {
+      task.status = "error";
+      task.error = (e as Error).message || String(e);
+    }
+    task.finished = Date.now();
+    progress(true);
+  } finally {
+    desktopScanWorkers.delete(task.id);
+    persistDesktopScanTasksNow();
+  }
+}
+
+function startDesktopScan(task: DesktopScanRecord): void {
+  void runDesktopScan(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1309,65 @@ function registerIpc(): void {
           });
           if (r.status !== 200) throw configError(r.status, r.data);
           return { ok: true, data: r.data };
+        }
+        case "startScanTask": {
+          const requested: ScanOpts = (() => { try { return JSON.parse(String(a2 || "{}")); } catch { return {}; } })();
+          const id = crypto.randomUUID();
+          const rawPath = String(a1 || "").trim();
+          const task: DesktopScanRecord = {
+            id, engine: String(a0 || ""), path: rawPath ? path.resolve(rawPath) : rawPath,
+            resolved_path: null, mapped: false, status: "queued", scanned: 0, found: 0,
+            result: null, error: null, created: Date.now(), updated: Date.now(), finished: null,
+            options: safeScanOptions(requested), pauseRequested: false, cancelRequested: false,
+          };
+          try {
+            if (!task.path || !fs.statSync(task.path).isDirectory()) {
+              task.status = "error"; task.error = "路径不存在或不是目录"; task.finished = Date.now();
+            }
+          } catch {
+            task.status = "error"; task.error = "路径不存在或不是目录"; task.finished = Date.now();
+          }
+          desktopScanTasks.set(id, task);
+          persistDesktopScanTasksNow();
+          if (task.status === "queued") startDesktopScan(task);
+          return { ok: true, data: desktopScanPublic(task) };
+        }
+        case "listScanTasks": {
+          return { ok: true, data: [...desktopScanTasks.values()]
+            .sort((a, b) => (b.created || 0) - (a.created || 0)).map(desktopScanPublic) };
+        }
+        case "getScanTask": {
+          const task = desktopScanTasks.get(String(a0 || ""));
+          if (!task) return { ok: false, error: "扫描任务不存在" };
+          return { ok: true, data: desktopScanPublic(task) };
+        }
+        case "pauseScanTask": {
+          const task = desktopScanTasks.get(String(a0 || ""));
+          if (!task) return { ok: false, error: "扫描任务不存在" };
+          if (["queued", "running"].includes(task.status)) {
+            task.pauseRequested = true; task.status = "paused"; task.updated = Date.now();
+            persistDesktopScanTasksNow();
+          }
+          return { ok: true, data: desktopScanPublic(task) };
+        }
+        case "resumeScanTask": {
+          const task = desktopScanTasks.get(String(a0 || ""));
+          if (!task) return { ok: false, error: "扫描任务不存在" };
+          if (task.status === "paused") {
+            task.pauseRequested = false; task.cancelRequested = false; task.status = "running"; task.updated = Date.now();
+            persistDesktopScanTasksNow();
+            if (!desktopScanWorkers.has(task.id)) startDesktopScan(task);
+          }
+          return { ok: true, data: desktopScanPublic(task) };
+        }
+        case "cancelScanTask": {
+          const task = desktopScanTasks.get(String(a0 || ""));
+          if (!task) return { ok: false, error: "扫描任务不存在" };
+          if (["queued", "running", "paused"].includes(task.status)) {
+            task.cancelRequested = true; task.pauseRequested = false; task.status = "canceled";
+            task.finished = Date.now(); task.updated = Date.now(); persistDesktopScanTasksNow();
+          }
+          return { ok: true, data: desktopScanPublic(task) };
         }
         case "submitScan": {
           const entry = engineByName(String(a0));
@@ -2212,6 +2516,7 @@ app.whenReady().then(() => {
     app.setPath("userData", process.env.JAVSCRIBE_CLIENT_USERDATA);
   }
   store = new EngineStore(app.getPath("userData"));
+  loadDesktopScanTasks();
   void cachePrune(); // 音轨缓存启动清理（7 天 / 20GB LRU，fire-and-forget）
   buildMenu();
   registerIpc();

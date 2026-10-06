@@ -10,7 +10,7 @@ import {
   test as base, expect, _electron as electron,
   type Page, type APIRequestContext,
 } from "@playwright/test";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -26,6 +26,18 @@ export const CLIENT_VERSION =
 export const FIXTURES = join(tmpdir(), "javscribe-e2e-fixtures");
 const REPO_FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 export const DIST = join(ROOT, "client", "dist-desktop");
+
+/** Desktop 后台扫描的安全夹具：只在 /tmp 建目录，不触碰真实媒体/网盘路径。 */
+export function makeScanDir(): string {
+  const dir = join(tmpdir(), "javscribe-desktop-scan-e2e");
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(FIXTURES, "video-a.mp4"), join(dir, "AKDL-001.mp4"));
+  copyFileSync(join(FIXTURES, "video-a.mp4"), join(dir, "AKDL-002.mp4"));
+  writeFileSync(join(dir, "AKDL-002.zh.srt"), "1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n", "utf8");
+  copyFileSync(join(FIXTURES, "video-b.mkv"), join(dir, "SUB-001.mkv"));
+  return dir;
+}
 
 // ---------------------------------------------------------------------------
 // fixtures 自愈：副本缺失 → 从仓库原件补拷（原件缺失则 git restore）。
@@ -181,7 +193,7 @@ export async function relaunchPacked(userData: string, extraEnv: Record<string, 
  * 点击 nav 按钮并等对应 section 挂上 .view-on。
  */
 export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") {
-  await page.locator(`.nav-item[data-view="${view}"]`).click();
+  await page.locator(`.view-tab[data-view="${view}"]`).click();
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }
 

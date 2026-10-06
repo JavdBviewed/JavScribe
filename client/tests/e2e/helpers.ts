@@ -12,9 +12,9 @@ export const FIXTURES = new URL("./fixtures", import.meta.url).pathname;
  * 本地扫描测试目录：临时目录放 3 个真视频（AKDL-001 / AKDL-002+外部 srt / SUB-001），
  * 复刻旧 mock 的 /media/jav 语义——扫描现在读工作台机器本地盘，不再是 mock 虚拟目录。
  */
-export function makeScanDir(): string {
-  // 固定目录名：路径会显示在 #scan-path 输入框里，随机名会让像素基线每次跑都漂移
-  const dir = path.join(os.tmpdir(), "javweb-scan-e2e");
+export function makeScanDir(suffix = ""): string {
+  // 默认固定目录名供视觉快照使用；交互用例可传唯一后缀，避免持久化防重状态污染后续用例。
+  const dir = path.join(os.tmpdir(), suffix ? `javweb-scan-e2e-${suffix}` : "javweb-scan-e2e");
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   fs.copyFileSync(path.join(FIXTURES, "video-a.mp4"), path.join(dir, "AKDL-001.mp4"));
@@ -93,7 +93,7 @@ export async function waitForEngineOnline(page: Page) {
  * 再操作「生成字幕 / 字幕服务」区块前必须先切回对应 tab。
  */
 export async function goTab(page: Page, view: "dispatch" | "jobs" | "engines") {
-  await page.locator(`.view-tab[data-view="${view}"]`).click();
+  await page.locator(`#nav .view-tab[data-view="${view}"]`).click();
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }
 

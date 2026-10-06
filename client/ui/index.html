@@ -26,11 +26,23 @@
   </div>
 </header>
 
-<nav id="view-tabs" class="view-tabs" role="tablist" aria-label="视图切换">
-  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
-  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
-  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
-</nav>
+<aside id="nav" aria-label="主导航">
+  <div class="nav-label">工作台</div>
+  <nav class="nav-items" role="tablist" aria-label="工作台视图">
+    <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
+    <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
+    <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="nav-badge" class="nav-badge" hidden>0</span></button>
+  </nav>
+  <div class="nav-up" id="nav-up" hidden>
+    <label class="nav-up-auto" title="启用后启动时自动检查新版本（只检查，不自动下载）"><input type="checkbox" id="up-auto"><span>自动更新</span></label>
+    <button type="button" id="up-check" class="nav-up-check">检查更新</button>
+  </div>
+  <div class="nav-foot">
+    <span class="nav-id">JAVSCRIBE-CLIENT</span>
+    <span id="foot-ver" class="muted mono"></span>
+    <span class="muted small nav-tick">看板 5s · 生成 1s</span>
+  </div>
+</aside>
 
 <main>
   <section id="sec-engines">
@@ -128,31 +140,39 @@
 
     <div id="scan-panel">
       <div class="scan-head">
-        <span class="scan-title">扫描目录（客户端部署机）</span>
-        <span class="muted small">填客户端部署机上的目录路径，或点「浏览」直接选<span class="help" tabindex="0" id="scan-help" data-tip="扫描的是客户端（本页面服务）部署所在机器上的目录，不是浏览器所在电脑。可手填该机器上的绝对路径，或点「浏览」直接选目录；视频处理完成后，字幕自动落回客户端部署机的影片旁。要批量处理浏览器电脑上的文件夹（如 Windows 本地磁盘），请用上方「选择文件 / 选择文件夹」。视频范围与字幕判定规则可在「服务设置」里调整。">?</span></span>
+        <span class="scan-title">扫描客户端目录</span>
+        <span class="muted small">扫描运行 JavScribe 的这台机器，不是当前浏览器电脑。<span class="help" tabindex="0" id="scan-help" data-tip="这里扫描的是运行 JavScribe 客户端的机器。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理浏览器电脑里的文件，请使用上方「选择文件 / 选择文件夹」。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">
-          <span class="field-label">目录路径</span>
-          <input id="scan-path" class="mono" placeholder="/media/jav" spellcheck="false" autocomplete="off">
+          <span class="field-label">扫描路径</span>
+          <input id="scan-path" class="mono" placeholder="例如 /mnt/115/JPMV/115DZL" spellcheck="false" autocomplete="off">
         </label>
         <label class="field scan-opts" id="scan-minsize-wrap" hidden>
-          <span class="field-label">忽略小于（MB）<span class="help" tabindex="0" data-tip="低于该大小的文件不默认勾选（仍会列出，可手动勾选提交）。默认 200MB，用来挡掉预告片、片段与损坏文件。">?</span></span>
+          <span class="field-label">小于此大小的文件<span class="help" tabindex="0" data-tip="低于这个大小的文件仍会列出，但默认不选中。默认 200 MB，可手动勾选提交。设置为 0 表示不按大小过滤。">?</span></span>
           <input id="scan-minsize" type="number" min="0" step="10" value="200">
         </label>
         <label class="field scan-opts" id="scan-namingc-wrap" hidden>
-          <span class="field-label">文件名独立 C<span class="help" tabindex="0" data-tip="识别文件名里与编号用 - _ 空格 . [ ] 等分隔的独立 C（如 ABF-330-C、C-ABF-330，大小写均可）；粘在编号后的 330C、CD1/1CD 集数、Uncut 等不算独立 C。这里选择命中后把文件判成什么。">?</span></span>
+          <span class="field-label">文件名中的 C<span class="help" tabindex="0" data-tip="识别 ABF-330-C、C-ABF-330 这类独立的 C。330C、CD1/1CD、Uncut 等不会误判为独立 C。">?</span></span>
           <select id="scan-namingc">
-            <option value="no_sub">视为无字幕版（默认）</option>
-            <option value="has_sub">视为 C 版（已压字幕）</option>
-            <option value="off">不识别</option>
+            <option value="no_sub">按无字幕版处理（默认）</option>
+            <option value="has_sub">按已压字幕版处理</option>
+            <option value="off">不使用这条规则</option>
           </select>
         </label>
-        <button id="scan-browse" class="btn" type="button" title="浏览客户端部署机上的目录">浏览</button>
-        <button id="scan-go" class="btn btn-primary" disabled>扫描</button>
+        <button id="scan-browse" class="btn" type="button" title="选择运行 JavScribe 的机器上的目录">浏览目录</button>
+        <button id="scan-go" class="btn btn-primary" disabled>开始扫描</button>
+      </div>
+      <div id="scan-task-status" class="scan-task-status" hidden role="status" aria-live="polite">
+        <div class="scan-task-main"><span class="scan-task-dot" aria-hidden="true"></span><span id="scan-task-text"></span></div>
+        <div class="scan-task-actions">
+          <button id="scan-task-pause" class="btn btn-small" type="button"></button>
+          <button id="scan-task-cancel" class="btn btn-small" type="button">取消扫描</button>
+        </div>
       </div>
       <div id="scan-results" hidden>
         <div id="scan-mapped" class="muted small scan-mapped-note" hidden></div>
+        <div class="scan-safety-note" role="status">本次只检查文件名、大小和同目录字幕；内嵌字幕暂不检查，不会因扫描触发网盘下载。</div>
         <div class="scan-summary">
           <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
           <span id="scan-count" class="muted small mono"></span>
@@ -161,7 +181,7 @@
         <div id="scan-pager" class="pager" hidden></div>
       </div>
       <div class="scan-actions">
-        <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 开始生成（0 项）</button>
+        <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 生成字幕（已选择 0 项）</button>
       </div>
     </div>
 
@@ -242,7 +262,6 @@
 
 <footer>
   <span class="mono">JAVSCRIBE-WEB</span>
-  <span id="foot-ver" class="muted mono"></span>
   <span id="up-chip" class="up-chip" role="button" tabindex="0" hidden></span>
   <span class="muted">看板 5s · 生成 1s<span class="help" tabindex="0" data-tip="页面自动刷新节奏：任务看板与服务状态每 5 秒轮询一次；生成进行中每秒轮询一次进度。">?</span></span>
 </footer>

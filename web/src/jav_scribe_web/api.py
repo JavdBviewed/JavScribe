@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -273,6 +274,39 @@ def _job_rows(
 # -- 字幕生成流水线（上传 → 本地提取音频 → 转发服务）----------------------------------
 
 @dataclass
+class ScanTask:
+    """后台目录扫描任务；只保存元数据结果，不保存视频内容。"""
+
+    id: str
+    engine: str
+    requested_path: str
+    resolved_path: str | None = None
+    mapped: bool = False
+    status: str = "queued"  # queued/running/paused/done/error/canceled
+    scanned: int = 0
+    found: int = 0
+    result: dict | None = None
+    error: str | None = None
+    created: float = field(default_factory=time.time)
+    updated: float = field(default_factory=time.time)
+    finished: float | None = None
+    cfg: dict = field(default_factory=dict, repr=False, compare=False)
+    from_engine: bool = False
+    _pause: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _cancel: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _running: bool = field(default=False, repr=False, compare=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "engine": self.engine, "path": self.requested_path,
+            "resolved_path": self.resolved_path, "mapped": self.mapped,
+            "status": self.status, "scanned": self.scanned, "found": self.found,
+            "result": self.result, "error": self.error, "created": self.created,
+            "updated": self.updated, "finished": self.finished,
+        }
+
+
+@dataclass
 class UploadTask:
     """One subtitle-generation pipeline run; phases: extracting -> dispatching -> done/error."""
 
@@ -343,6 +377,126 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     #   - 提取/派发中途中断（无 job_id）→ 标记失败并显示行，用户可重新提交；
     #   - 服务已删除 → 丢弃。
     _state_path = Path(data_dir) / "uploads.json"
+
+    _scan_tasks: dict[str, ScanTask] = {}
+    _scan_state_path = Path(data_dir) / "scan_tasks.json"
+    _scan_tasks_lock = threading.RLock()
+
+    def _save_scan_tasks_state() -> None:
+        try:
+            with _scan_tasks_lock:
+                payload = {"tasks": [{**t.to_dict(), "scan_options": {
+                    "min_size_mb": localscan._scan_cfg(t.cfg)["min_size_mb"],
+                    "naming_c": localscan._scan_cfg(t.cfg)["naming_c"],
+                }} for t in _scan_tasks.values()]}
+            tmp = _scan_state_path.with_name(_scan_state_path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_scan_state_path)
+        except OSError:
+            pass
+
+    def _load_scan_tasks_state() -> None:
+        try:
+            raw = json.loads(_scan_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        entries = raw.get("tasks") if isinstance(raw, dict) else None
+        if not isinstance(entries, list):
+            return
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("id"):
+                continue
+            try:
+                task = ScanTask(
+                    id=str(e["id"]), engine=str(e.get("engine") or ""),
+                    requested_path=str(e.get("path") or ""),
+                    resolved_path=e.get("resolved_path"), mapped=bool(e.get("mapped")),
+                    status=str(e.get("status") or "paused"), scanned=int(e.get("scanned") or 0),
+                    found=int(e.get("found") or 0), result=e.get("result"),
+                    error=e.get("error"), created=float(e.get("created") or time.time()),
+                    updated=float(e.get("updated") or time.time()),
+                    cfg=localscan.cfg_from_items([
+                        {"path": "scan.min_size_mb", "value": (e.get("scan_options") or {}).get("min_size_mb", 200)},
+                        {"path": "scan.naming_c", "value": (e.get("scan_options") or {}).get("naming_c", "no_sub")},
+                    ]),
+                    from_engine=False,
+                    finished=float(e["finished"]) if e.get("finished") is not None else None,
+                )
+            except (TypeError, ValueError):
+                continue
+            if task.status in {"queued", "running"}:
+                task.status = "paused"
+                task.error = "应用重启时扫描被暂停，点击「继续」可重新扫描"
+                task.finished = None
+                task.updated = time.time()
+            task._pause.set() if task.status == "paused" else task._pause.clear()
+            _scan_tasks[task.id] = task
+
+    def _scan_snapshot(task: ScanTask) -> dict:
+        with _scan_tasks_lock:
+            return task.to_dict()
+
+    async def _run_scan_task(task: ScanTask) -> None:
+        cfg = task.cfg
+        from_engine = task.from_engine
+        task._running = True
+        task.status = "running"
+        task.error = None
+        task.updated = time.time()
+        _save_scan_tasks_state()
+        last_save = 0.0
+
+        def progress(scanned: int, found: int) -> None:
+            nonlocal last_save
+            task.scanned, task.found, task.updated = scanned, found, time.time()
+            if task.updated - last_save >= 1.0:
+                last_save = task.updated
+                _save_scan_tasks_state()
+
+        try:
+            result = await asyncio.to_thread(
+                localscan.scan_dir_controlled,
+                Path(task.resolved_path or task.requested_path), cfg,
+                should_pause=task._pause.is_set, should_cancel=task._cancel.is_set,
+                on_progress=progress,
+            )
+            if task._cancel.is_set():
+                task.status = "canceled"
+                task.result = None
+            else:
+                task.result = {**result, "mapped": task.mapped,
+                               "rules": "engine" if from_engine else "defaults",
+                               "min_size_mb": localscan._scan_cfg(cfg)["min_size_mb"],
+                               "naming_c": localscan._scan_cfg(cfg)["naming_c"]}
+                task.found = len(result.get("items") or [])
+                task.status = "done"
+        except localscan.ScanCanceled:
+            task.status = "canceled" if task._cancel.is_set() else "paused"
+        except Exception as ex:  # noqa: BLE001
+            task.status = "error"
+            task.error = f"扫描失败: {ex}"
+            _log.exception("background scan failed: %s", task.id)
+        finally:
+            task._running = False
+            task.updated = time.time()
+            if task.status in {"done", "error", "canceled"}:
+                task.finished = task.updated
+            _save_scan_tasks_state()
+
+    def _start_scan_task(task: ScanTask, cfg: dict | None = None, from_engine: bool | None = None) -> None:
+        if task._running:
+            return
+        if cfg is not None:
+            task.cfg = copy.deepcopy(cfg)
+        if from_engine is not None:
+            task.from_engine = from_engine
+        task._cancel.clear()
+        task._pause.clear()
+        task.status = "queued"
+        task.finished = None
+        task.error = None
+        asyncio.create_task(_run_scan_task(task))
+
 
     def _save_uploads_state() -> None:
         try:
@@ -1503,6 +1657,97 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             "text": text,
         }
 
+    @app.post("/api/scan/local/tasks")
+    async def api_scan_task_create(body: dict) -> dict:
+        body = body if isinstance(body, dict) else {}
+        engine = str(body.get("engine") or "")
+        path = str(body.get("path") or "").strip()
+        resolve_engine(engine)
+        cfg, from_engine = await _engine_scan_cfg(pick_engine() if engine == AUTO else engine)
+        min_size_mb = body.get("min_size_mb")
+        naming_c = body.get("naming_c")
+        if min_size_mb is not None:
+            try:
+                min_size_mb = float(min_size_mb)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
+            if min_size_mb < 0 or min_size_mb == float("inf"):
+                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
+            cfg.setdefault("scan", {})["min_size_mb"] = min_size_mb
+        if naming_c is not None:
+            if naming_c not in localscan.NAMING_C_MODES:
+                raise HTTPException(400, f"naming_c 需要 {' / '.join(localscan.NAMING_C_MODES)} 之一")
+            cfg.setdefault("scan", {})["naming_c"] = naming_c
+        try:
+            root, mapped = localscan.resolve_scan_root(path)
+        except localscan.ScanError as ex:
+            raise HTTPException(400, str(ex))
+        task = ScanTask(id=uuid.uuid4().hex[:12], engine=engine, requested_path=path,
+                        resolved_path=str(root), mapped=mapped, cfg=copy.deepcopy(cfg),
+                        from_engine=from_engine)
+        with _scan_tasks_lock:
+            _scan_tasks[task.id] = task
+        _save_scan_tasks_state()
+        _start_scan_task(task, cfg, from_engine)
+        return _scan_snapshot(task)
+
+    @app.get("/api/scan/local/tasks")
+    async def api_scan_task_list() -> list[dict]:
+        with _scan_tasks_lock:
+            return [t.to_dict() for t in sorted(_scan_tasks.values(), key=lambda x: x.created, reverse=True)]
+
+    @app.get("/api/scan/local/tasks/{task_id}")
+    async def api_scan_task_status(task_id: str) -> dict:
+        task = _scan_tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "扫描任务不存在")
+        return _scan_snapshot(task)
+
+    @app.post("/api/scan/local/tasks/{task_id}/pause")
+    async def api_scan_task_pause(task_id: str) -> dict:
+        task = _scan_tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "扫描任务不存在")
+        if task.status in {"done", "error", "canceled"}:
+            raise HTTPException(409, "任务已结束")
+        task._pause.set()
+        task.status = "paused"
+        task.updated = time.time()
+        _save_scan_tasks_state()
+        return _scan_snapshot(task)
+
+    @app.post("/api/scan/local/tasks/{task_id}/resume")
+    async def api_scan_task_resume(task_id: str) -> dict:
+        task = _scan_tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "扫描任务不存在")
+        if task.status in {"done", "error", "canceled"}:
+            raise HTTPException(409, "任务已结束")
+        task._pause.clear()
+        if task._running:
+            task.status = "running"
+        else:
+            _start_scan_task(task)
+        task.updated = time.time()
+        _save_scan_tasks_state()
+        return _scan_snapshot(task)
+
+    @app.post("/api/scan/local/tasks/{task_id}/cancel")
+    async def api_scan_task_cancel(task_id: str) -> dict:
+        task = _scan_tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "扫描任务不存在")
+        if task.status in {"done", "error", "canceled"}:
+            return _scan_snapshot(task)
+        task._cancel.set()
+        task._pause.clear()
+        if not task._running:
+            task.status = "canceled"
+            task.finished = time.time()
+        task.updated = time.time()
+        _save_scan_tasks_state()
+        return _scan_snapshot(task)
+
     @app.get("/api/scan/local")
     async def api_local_scan(
         engine: str,
@@ -1739,6 +1984,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         pass
 
     # 从磁盘恢复本地管线状态（重启恢复：回写跟踪 / 失败行可见）
+    _load_scan_tasks_state()
+    _save_scan_tasks_state()
     _load_uploads_state()
     _save_uploads_state()
 

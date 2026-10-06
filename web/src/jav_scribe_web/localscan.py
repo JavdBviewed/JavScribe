@@ -14,12 +14,9 @@
   scan.video_exts         视频扩展名（无点、小写）
   scan.subtitle_patterns  已有字幕判定后缀（带点，".zh.srt"）
   scan.recurse            是否进入子目录
-  subtitle.skip_embedded  本模块仅用作内嵌探测开关（off=不探测、不提示；
-                          target/any=探测）。注意与 serve 侧语义分叉：
-                          serve 用它决定 watch 管线是否跳过，本模块的
-                          扫描提示（has_subtitle）与跳过策略解耦——
-                          只要探测到内嵌字幕轨（任何语言）就提示用户确认。
-  subtitle.embedded_langs 内嵌轨语言展示（norm_language 归一）
+  subtitle.skip_embedded  不参与普通目录扫描；普通扫描不读取视频内容，
+                          内嵌字幕检查必须由用户后续主动发起。
+  subtitle.embedded_langs 仅供主动内嵌字幕检查展示（norm_language 归一）
 """
 from __future__ import annotations
 
@@ -31,7 +28,6 @@ import re
 import shutil
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -413,94 +409,107 @@ def _subtitle_for(p: Path, patterns: list[str]) -> Optional[str]:
     return None
 
 
-def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
-    """按扫描规则列出 root 下视频。返回 {path, items, truncated}。
+class ScanCanceled(Exception):
+    """后台扫描被用户取消。"""
 
-    每项含字幕四态：subtitle_status = external（外部 srt）/ named（文件名独立 C
-    按 naming_c=has_sub 视为已压字幕）/ embedded（内嵌轨）/ none；
-    has_subtitle = 外部存在 或 内嵌轨存在（探测开启时，任何语言）或 named。
-    too_small = 低于 scan.min_size_mb（仅提示用，不拦提交）；
-    name_sub / name_no_sub = 独立 C 命中的语义标记。
-    内嵌探测仅 skip_embedded != off 时跑（ffprobe 只读容器头，并行）；
-    探测失败的文件该项 probe_failed=True，且返回 probe_errors（文件名列表，
-    已排序）——「没探测到内嵌字幕」不再与「探测失败」混同。
+
+def _scan_item(f: Path, size: int, sc: dict[str, Any]) -> dict[str, Any]:
+    """根据一个视频的元数据组装扫描行；绝不读取视频内容。"""
+    sub = _subtitle_for(f, sc["pats"])
+    naming_c = sc["naming_c"]
+    name_c = naming_c != "off" and standalone_c_in(f.name)
+    named = naming_c == "has_sub" and name_c
+    no_sub_named = naming_c == "no_sub" and name_c
+    return {
+        "path": str(f),
+        "name": f.name,
+        "size": size,
+        "has_subtitle": sub is not None or named,
+        "subtitle": sub,
+        "subtitle_status": "external" if sub else "named" if named else "none",
+        "embedded_checked": False,
+        "embedded_langs": [],
+        "too_small": sc["min_size_mb"] > 0 and size < sc["min_size_mb"] * 1048576,
+        "name_sub": named,
+        "name_no_sub": no_sub_named,
+        "probe_failed": False,
+    }
+
+
+def scan_dir_controlled(
+    root: Path,
+    cfg: dict,
+    *,
+    should_pause: Callable[[], bool] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """可暂停/取消的 metadata-only 扫描。
+
+    使用 ``os.scandir`` 分层枚举，而不是 ``Path.rglob`` 一次性展开，
+    这样每个目录项之间都有控制点；网盘挂载只会产生列目录、stat 和同名字幕
+    的元数据请求，不会调用 ffprobe/ffmpeg，也不会打开视频内容。
     """
     sc = _scan_cfg(cfg)
-    exts, pats, recurse = sc["exts"], sc["pats"], sc["recurse"]
-    min_bytes = sc["min_size_mb"] * 1048576
-    naming_c = sc["naming_c"]
-    sub_cfg = cfg.get("subtitle", {}) or {}
-    probe_on = str(sub_cfg.get("skip_embedded", "target")).lower() != "off"
-    it = root.rglob("*") if recurse else root.glob("*")
-    candidates: list[tuple[Path, int]] = []
+    stack = [root]
+    items: list[dict[str, Any]] = []
+    scanned = 0
     truncated = False
-    try:
-        for f in it:
+    recurse = sc["recurse"]
+
+    def checkpoint() -> None:
+        if should_cancel and should_cancel():
+            raise ScanCanceled
+        while should_pause and should_pause():
+            if should_cancel and should_cancel():
+                raise ScanCanceled
+            import time
+            time.sleep(0.1)
+
+    while stack:
+        checkpoint()
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        entries.sort(key=lambda e: e.name.casefold())
+        for entry in entries:
+            checkpoint()
+            scanned += 1
+            if on_progress:
+                on_progress(scanned, len(items))
             try:
-                if not f.is_file():
+                if entry.is_dir(follow_symlinks=False):
+                    if recurse:
+                        stack.append(Path(entry.path))
                     continue
-                ext = f.suffix.lower().lstrip(".")
-                if ext not in exts:
+                if not entry.is_file(follow_symlinks=False):
                     continue
-                st = f.stat()
+                ext = Path(entry.name).suffix.lower().lstrip(".")
+                if ext not in sc["exts"]:
+                    continue
+                st = entry.stat(follow_symlinks=False)
                 if st.st_size <= 0:
                     continue
-                candidates.append((f, st.st_size))
+                if len(items) >= MAX_SCAN_ITEMS:
+                    truncated = True
+                    return {
+                        "path": str(root), "items": sorted(items, key=lambda x: x["name"].lower()),
+                        "truncated": True, "embedded_checked": False, "probe_errors": [],
+                    }
+                items.append(_scan_item(Path(entry.path), st.st_size, sc))
+                if on_progress:
+                    on_progress(scanned, len(items))
             except OSError:
-                continue  # 扫描中途消失 / 权限怪异
-            if len(candidates) >= MAX_SCAN_ITEMS:
-                truncated = True
-                break
-    except OSError:
-        pass
-
-    embedded: dict[Path, list[dict[str, Any]]] = {}
-    probe_errors: list[Path] = []
-    if probe_on and candidates:
-        workers = min(8, max(2, len(candidates) // 32))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(probe_embedded_subs, f): f for f, _ in candidates}
-            for fut in as_completed(futs):
-                f = futs[fut]
-                try:
-                    r = fut.result()
-                except Exception:  # 理论上 probe_embedded_subs 内部已吞异常
-                    r = None
-                if r is None:
-                    probe_errors.append(f)
-                else:
-                    embedded[f] = r
-    err_names = {f.name for f in probe_errors}
-
-    items: list[dict[str, Any]] = []
-    for f, size in candidates:
-        sub = _subtitle_for(f, pats)
-        subs = embedded.get(f, [])
-        # 提示语义与 skip 策略解耦：只要探测到内嵌字幕轨（任何语言，含 und/ja）
-        # 就在扫描/提交环节给用户确认；serve 侧 watch 管线仍按 skip_embedded 自行决定。
-        # 文件名独立 C（has_sub ⇒ 按已有字幕处理；no_sub ⇒ 仅信息标）
-        name_c = naming_c != "off" and standalone_c_in(f.name)
-        named = naming_c == "has_sub" and name_c
-        no_sub_named = naming_c == "no_sub" and name_c
-        items.append(
-            {
-                "path": str(f),
-                "name": f.name,
-                "size": size,
-                "has_subtitle": sub is not None or bool(subs) or named,
-                "subtitle": sub,
-                # 优先级：external（确有 srt 文件）> named（命名规则）> embedded（探测轨）
-                "subtitle_status": ("external" if sub
-                                    else "named" if named
-                                    else "embedded" if subs
-                                    else "none"),
-                "embedded_langs": [norm_language(x["language"]) for x in subs],
-                "too_small": min_bytes > 0 and size < min_bytes,
-                "name_sub": named,
-                "name_no_sub": no_sub_named,
-                "probe_failed": f.name in err_names,
-            }
-        )
+                continue
     items.sort(key=lambda x: x["name"].lower())
-    return {"path": str(root), "items": items, "truncated": truncated,
-            "probe_errors": sorted(f.name for f in probe_errors)}
+    return {
+        "path": str(root), "items": items, "truncated": truncated,
+        "embedded_checked": False, "probe_errors": [],
+    }
+
+
+def scan_dir(root: Path, cfg: dict) -> dict[str, Any]:
+    """只按文件系统元数据列出视频，不读取视频内容。"""
+    return scan_dir_controlled(root, cfg)

@@ -34,23 +34,6 @@ const TITLEBAR_NAV = `
     </div>
   </div>
 </div>
-<aside id="nav" aria-label="主导航">
-  <div class="nav-label">工作台</div>
-  <nav class="nav-items">
-    <button type="button" class="nav-item" data-view="engines"><svg class="nav-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
-    <button type="button" class="nav-item" data-view="dispatch"><svg class="nav-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
-    <button type="button" class="nav-item" data-view="jobs"><svg class="nav-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="nav-badge" class="nav-badge" hidden>0</span></button>
-  </nav>
-  <div class="nav-up" id="nav-up">
-    <label class="nav-up-auto" title="启用后启动时自动检查新版本（只检查，不自动下载）"><input type="checkbox" id="up-auto"><span>自动更新</span></label>
-    <button type="button" id="up-check" class="nav-up-check">检查更新</button>
-  </div>
-  <div class="nav-foot">
-    <span class="nav-id">JAVSCRIBE-CLIENT</span>
-    <span id="foot-ver" class="muted mono"></span>
-    <span class="muted small nav-tick">看板 5s · 生成 1s</span>
-  </div>
-</aside>
 `;
 
 // 原 web header 块（brand + hud）——桌面构建整体替换为 titlebar + nav（#health/#clock 迁入 titlebar）
@@ -74,19 +57,10 @@ const WEB_HEADER_BLOCK = `<header>
 </header>
 `;
 
-// 视图 tab 条（web 形态）——桌面端用侧边栏导航，整体移除
-const VIEW_TABS_BLOCK = `<nav id="view-tabs" class="view-tabs" role="tablist" aria-label="视图切换">
-  <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
-  <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
-  <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="tab-jobs-badge" class="tab-badge" hidden>0</span></button>
-</nav>
-
-`;
 
 // 原 web footer 块（版本 + 更新 chip + 节奏提示）——桌面构建整体移除（#foot-ver/#up-chip 迁入新壳）
 const WEB_FOOTER_BLOCK = `<footer>
   <span class="mono">JAVSCRIBE-WEB</span>
-  <span id="foot-ver" class="muted mono"></span>
   <span id="up-chip" class="up-chip" role="button" tabindex="0" hidden></span>
   <span class="muted">看板 5s · 生成 1s<span class="help" tabindex="0" data-tip="页面自动刷新节奏：任务看板与服务状态每 5 秒轮询一次；生成进行中每秒轮询一次进度。">?</span></span>
 </footer>
@@ -98,7 +72,6 @@ const REWRITES = [
   ["<html lang=\"zh-CN\">", "<html lang=\"zh-CN\" class=\"desktop\">"],
   ["<body>", "<body class=\"desktop\">"],
   [WEB_HEADER_BLOCK, TITLEBAR_NAV],
-  [VIEW_TABS_BLOCK, ""],
   [WEB_FOOTER_BLOCK, ""],
   ["mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class=\"help\" tabindex=\"0\" data-tip=\"默认在你自己的浏览器里提取音轨，只上传 ~35MB 音频（≤1.6GB）；更大的文件自动改传整片，原片只到所选服务，不出该服务所在机器。\">?</span>",
    "mp4 / mkv / ts / mov … 小文件只传音轨，大文件传整片<span class=\"help\" tabindex=\"0\" data-tip=\"在本机提取音轨，只上传 ~35MB 音频（无大小限制）；选「整片直传字幕服务」时完整视频直接传给所选服务。\">?</span>"],
