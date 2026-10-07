@@ -192,7 +192,7 @@ export async function relaunchPacked(userData: string, extraEnv: Record<string, 
  * 隐藏视图的元素 toBeVisible/click/元素截图都会失败，断言前先切过去。
  * 点击 nav 按钮并等对应 section 挂上 .view-on。
  */
-export async function goView(page: Page, view: "engines" | "dispatch" | "jobs") {
+export async function goView(page: Page, view: "engines" | "dispatch" | "jobs" | "ccfg") {
   await page.locator(`.view-tab[data-view="${view}"]`).click();
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }

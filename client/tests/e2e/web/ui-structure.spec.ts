@@ -18,25 +18,28 @@ test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("header h1")).toHaveText("字幕工作台");
   await expect(page.locator(".brand-sub")).toHaveText("JAVSCRIBE · SUBTITLE CONSOLE");
   const sections = await page.locator("main > section").evaluateAll((els) => els.map((e) => e.id));
-  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs"]);
-  // 板块先后顺序（09-06 用户指定）：字幕服务 → 生成字幕 → 字幕任务
+  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg"]);
+  // 板块先后顺序（09-06 用户指定）：字幕服务 → 生成字幕 → 字幕任务 → 客户端设置（S3 新增独立 tab）
   await expect(page.locator("#sec-engines h2")).toHaveText("字幕服务");
   await expect(page.locator("#sec-dispatch h2")).toHaveText("生成字幕");
   await expect(page.locator("#sec-jobs h2")).toHaveText("字幕任务");
+  await expect(page.locator("#sec-ccfg h2")).toHaveText("客户端设置");
   await expect(page.locator("#sec-engines .kicker")).toHaveText("Services");
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
+  await expect(page.locator("#sec-ccfg .kicker")).toHaveText("Client");
 });
 
 test("统一侧边导航：Web 与桌面共用同一组视图按钮", async ({ page }) => {
   const tabs = page.locator("#nav .view-tab");
   await expect(page.locator("#nav")).toBeVisible();
   await expect(page.locator("#view-tabs")).toHaveCount(0);
-  await expect(tabs).toHaveCount(3);
-  // 顺序与桌面端侧边栏一致：字幕服务 → 生成字幕 → 字幕任务
+  await expect(tabs).toHaveCount(4);
+  // 顺序与桌面端侧边栏一致：字幕服务 → 生成字幕 → 字幕任务 → 客户端设置
   await expect(tabs.nth(0)).toHaveText("字幕服务");
   await expect(tabs.nth(1)).toHaveText("生成字幕");
   await expect(tabs.nth(2)).toContainText("字幕任务");
+  await expect(tabs.nth(3)).toHaveText("客户端设置");
   // 默认视图 = 生成字幕（首页）：view-on + aria-selected 跟随，其余板块隐藏
   await expect(tabs.nth(1)).toHaveClass(/on/);
   await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
@@ -181,4 +184,30 @@ test("服务表单校验（重名异址 400）", async ({ page, request }) => {
     headers: { "Content-Type": "application/json" },
   });
   expect(r2.status()).toBe(201);
+});
+
+test("客户端设置 tab（web 形态）：并发卡可改可存，无仅桌面项", async ({ page }) => {
+  const tabs = page.locator("#nav .view-tab");
+  await tabs.nth(3).click();
+  await expect(page.locator("#sec-ccfg")).toHaveClass(/view-on/);
+  // 并发卡：范围校验与原弹窗卡片同语义（1~8 / 1~16）
+  await expect(page.locator("#ccfg-extract_workers")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#ccfg-extract_workers")).toHaveAttribute("min", "1");
+  await expect(page.locator("#ccfg-extract_workers")).toHaveAttribute("max", "8");
+  await expect(page.locator("#ccfg-queue_cap")).toHaveAttribute("min", "1");
+  await expect(page.locator("#ccfg-queue_cap")).toHaveAttribute("max", "16");
+  // web 形态不渲染桌面专属区（无「仅桌面」徽标）
+  await expect(page.locator("#sec-ccfg .cc-only-badge")).toHaveCount(0);
+  // 保存 → toast → reload 后仍在（/api/client-config 持久化）
+  await page.locator("#ccfg-extract_workers").fill("5");
+  await page.locator("#ccfg-queue_cap").fill("7");
+  await expect(page.locator("#ccfg-save")).toBeVisible();
+  await page.click("#ccfg-save");
+  await expect(page.locator("#toasts .toast.ok", { hasText: "客户端设置已保存" })).toBeVisible({ timeout: 10_000 });
+  await page.reload();
+  await waitForEngineOnline(page);
+  // localStorage 记住视图 = ccfg，reload 后直接在该 tab
+  await expect(page.locator("#sec-ccfg")).toHaveClass(/view-on/);
+  await expect(page.locator("#ccfg-extract_workers")).toHaveValue("5");
+  await expect(page.locator("#ccfg-queue_cap")).toHaveValue("7");
 });

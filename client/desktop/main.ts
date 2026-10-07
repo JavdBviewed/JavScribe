@@ -1282,6 +1282,33 @@ function registerIpc(): void {
           if (r.status !== 200) throw configError(r.status, r.data);
           return { ok: true };
         }
+        case "getClientConfig": {
+          return { ok: true, data: clientCfgLoad() };
+        }
+        case "putClientConfig": {
+          // renderer 侧 call("putClientConfig", JSON.stringify(cfg))：payload 在第一个位置参数 a0
+          let cfg: unknown;
+          try {
+            cfg = JSON.parse(String(a0 || "{}"));
+          } catch {
+            return { ok: false, error: "客户端配置格式错误" };
+          }
+          const c = (cfg && typeof cfg === "object" ? cfg : {}) as Record<string, unknown>;
+          const checkInt = (v: unknown, k: string, [lo, hi]: [number, number]):
+            { ok: true; v: number } | { ok: false; error: string } => {
+            if (typeof v === "boolean" || typeof v !== "number" || !Number.isInteger(v)) {
+              return { ok: false, error: `${k} 需要整数` };
+            }
+            if (v < lo || v > hi) return { ok: false, error: `${k} 需在 ${lo} ~ ${hi} 之间` };
+            return { ok: true, v };
+          };
+          const rEw = checkInt(c.extract_workers, "extract_workers", CLIENT_CFG_LIMITS.extract_workers);
+          if (!rEw.ok) return { ok: false, error: rEw.error };
+          const rQc = checkInt(c.queue_cap, "queue_cap", CLIENT_CFG_LIMITS.queue_cap);
+          if (!rQc.ok) return { ok: false, error: rQc.error };
+          clientCfgSave({ extract_workers: rEw.v, queue_cap: rQc.v });
+          return { ok: true };
+        }
         case "getReadiness": {
           // 组件就绪自检（serve 0.2.6+）：错误不外抛，包装成 payload 让 UI 降级展示
           let entry;
@@ -2053,6 +2080,45 @@ function registerUpdateIpc(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 客户端设置（仅 desktop 形态）：userData/client-config.json —— 本机工作台并发设置
+//   - 与 update 的 settings.json / 文件夹监听的 watch.json 分文件（同一惯例，互不覆盖）
+//   - 默认镜像 web 工作台（extract_workers=2 / queue_cap=4）；文件损坏回落默认 + clamp
+//   - 桌面管线消费并发值/热重载在 S4 线，本线只做 IPC + 持久化
+// ---------------------------------------------------------------------------
+
+interface ClientCfgFile { extract_workers: number; queue_cap: number; }
+const CLIENT_CFG_FILE = "client-config.json";
+const CLIENT_CFG_DEFAULTS: ClientCfgFile = { extract_workers: 2, queue_cap: 4 };
+const CLIENT_CFG_LIMITS: Record<keyof ClientCfgFile, [number, number]> = {
+  extract_workers: [1, 8],
+  queue_cap: [1, 16],
+};
+let clientCfgPath = "";
+
+function clientCfgClamp(v: unknown, lo: number, hi: number, dflt: number): number {
+  return typeof v === "number" && Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+}
+
+function clientCfgLoad(): ClientCfgFile {
+  try {
+    const raw = JSON.parse(fs.readFileSync(clientCfgPath, "utf-8")) as Partial<ClientCfgFile>;
+    return {
+      extract_workers: clientCfgClamp(raw.extract_workers, CLIENT_CFG_LIMITS.extract_workers[0], CLIENT_CFG_LIMITS.extract_workers[1], CLIENT_CFG_DEFAULTS.extract_workers),
+      queue_cap: clientCfgClamp(raw.queue_cap, CLIENT_CFG_LIMITS.queue_cap[0], CLIENT_CFG_LIMITS.queue_cap[1], CLIENT_CFG_DEFAULTS.queue_cap),
+    };
+  } catch {
+    return { ...CLIENT_CFG_DEFAULTS }; // 无文件/损坏：默认值起步
+  }
+}
+
+function clientCfgSave(c: ClientCfgFile): void {
+  fs.mkdirSync(path.dirname(clientCfgPath), { recursive: true });
+  const tmp = clientCfgPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(c, null, 1));
+  fs.renameSync(tmp, clientCfgPath); // 同盘原子替换
+}
+
+// ---------------------------------------------------------------------------
 // 文件夹监控（仅 desktop 形态）：main 进程轮询检测，候选推 renderer 排队派发
 //   - 轮询而非 fs.watch：watch 事件在跨网络盘 / Windows 过滤驱动下不可靠；
 //     秒级 stat 遍历对数千文件量级的库足够轻（与引擎侧稳定性取向一致）
@@ -2522,6 +2588,7 @@ app.whenReady().then(() => {
   registerIpc();
   registerUpdateIpc();
   initUpdater();
+  clientCfgPath = path.join(app.getPath("userData"), CLIENT_CFG_FILE);
   watchStorePath = path.join(app.getPath("userData"), WATCH_FILE);
   watchLoad();
   void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）

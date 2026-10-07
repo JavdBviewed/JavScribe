@@ -13,24 +13,26 @@ test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dis
   await expect(page.locator(".tb-logo")).toBeVisible();
   await expect(page.locator(".tb-app")).toHaveText("JavScribe Client");
   for (const id of ["win-min", "win-max", "win-close"]) await expect(page.locator(`#${id}`)).toBeVisible();
-  // 侧边栏三视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务）
+  // 侧边栏四视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务 / 客户端设置）
   await expect(page.locator("#nav")).toBeVisible();
   const navLabels = page.locator("#nav .view-tab > span:not(.nav-badge)");
-  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务"]);
-  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs"]);
+  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务", "客户端设置"]);
+  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs", "ccfg"]);
   // 默认视图 = dispatch（新 userData，localStorage 空）
   await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveClass(/on/);
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
   await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
   const sections = await page.locator("main > section").evaluateAll((els) => els.map((e) => e.id));
-  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs"]);
+  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg"]);
   await expect(page.locator("#sec-engines h2")).toHaveText("字幕服务");
   await expect(page.locator("#sec-dispatch h2")).toHaveText("生成字幕");
   await expect(page.locator("#sec-jobs h2")).toHaveText("字幕任务");
+  await expect(page.locator("#sec-ccfg h2")).toHaveText("客户端设置");
   await expect(page.locator("#sec-engines .kicker")).toHaveText("Services");
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
+  await expect(page.locator("#sec-ccfg .kicker")).toHaveText("Client");
 });
 
 test("视图切换：nav 点击切视图 + localStorage 持久化", async ({ page }) => {

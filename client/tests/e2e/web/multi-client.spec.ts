@@ -137,6 +137,8 @@ test("服务端级操作提示：暂停所有 tooltip + 服务设置弹窗横幅
   await page.locator('button.set[data-name="mock"]').click();
   await expect(page.locator("#modal .cfg-global-note")).toBeVisible({ timeout: 15_000 });
   await expect(page.locator("#modal .cfg-global-note")).toContainText("所有连接该服务的客户端");
-  // 客户端设置卡片仍标注「只保存在客户端本机」
-  await expect(page.locator("#modal .ccfg-foot")).toContainText("只保存在客户端本机");
+  // 客户端设置已迁出弹窗（独立「客户端设置」tab）：弹窗内不再有客户端卡片，例外文案同步移除
+  await expect(page.locator("#modal .cfg-sec-client")).toHaveCount(0);
+  await expect(page.locator("#modal #ccfg-save")).toHaveCount(0);
+  await expect(page.locator("#modal .cfg-global-note")).not.toContainText("下方「客户端设置」卡片例外");
 });

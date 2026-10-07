@@ -1650,6 +1650,20 @@ body.desktop main > section.view-on { display: block; }
   border-top: 1px solid var(--line);
 }
 .ccfg-foot .cfg-foot-note { min-width: 0; }
+
+/* ---------- 客户端设置 tab（sec-ccfg：独立视图，非弹窗） ---------- */
+.cc-cards { display: flex; flex-direction: column; gap: 14px; max-width: 780px; }
+.cc-card { margin-top: 6px; }
+.cc-only-badge {
+  flex: none; align-self: center;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--accent); background: var(--accent-soft);
+  padding: 1px 8px; border-radius: 999px;
+}
+.cc-watch-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.cc-watch-row #cc-watch-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-card .cfg-row input[type="number"] { width: 220px; }
+.cc-card .cfg-row input[type="text"] { width: 100%; max-width: 480px; }
 .set-note-title { font-weight: 700; margin-bottom: 4px; }
 
 /* 帮助图标 tooltip 方向变体（由 JS 按视口空间临时加类） */
