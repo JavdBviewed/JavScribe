@@ -22,11 +22,11 @@
 ## 最新版下载
 
 <!-- release-latest:client -->
-🖥️ **JavScribe Client**（桌面客户端）v0.2.26：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.26/jav-scribe-client-0.2.26-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.26/jav-scribe-client-0.2.26-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.26/jav-scribe-client-0.2.26-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.26/jav-scribe-client_0.2.26_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.26)
+🖥️ **JavScribe Client**（桌面客户端）v0.2.27：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.27/jav-scribe-client-0.2.27-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.27/jav-scribe-client-0.2.27-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.27/jav-scribe-client-0.2.27-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.27/jav-scribe-client_0.2.27_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.27)
 （客户端 · Docker 形态从本仓库 `web/` 构建，版本与安装形态同步，见 [web/README.md](web/README.md)）
 
 <!-- release-latest:serve -->
-⚙️ **JavScribe Serve**（headless 服务端）v0.2.5：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.5/JavScribe-Serve-0.2.5-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.5/JavScribe-Serve-0.2.5-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.5)
+⚙️ **JavScribe Serve**（headless 服务端）v0.2.6：[Windows](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.6/JavScribe-Serve-0.2.6-win-x64.zip) · [Linux](https://github.com/JavdBviewed/JavScribe/releases/download/serve-v0.2.6/JavScribe-Serve-0.2.6-linux-x64.zip) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/serve-v0.2.6)
 
 [全部 Release →](https://github.com/JavdBviewed/JavScribe/releases)（发布后本区自动钉到最新 tag）
 
