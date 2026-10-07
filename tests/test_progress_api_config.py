@@ -147,7 +147,8 @@ def test_auth_and_masking() -> None:
             # 19 基础项 + 3 内嵌字幕/指纹项 + 3 扫描规则项 + 1 缓存保留项
             # + 5 新增可调项（formats/tag_formats/output_dir/jasna.output/polish.timeout_s）
             # + 1 转译并发项（infer.concurrency）
-            assert len(items) == 32, len(items)
+            # + 1 合并批任务数项（infer.coalesce_max_jobs）
+            assert len(items) == 33, len(items)
             assert items["subtitle.lang_tag"]["value"] == "zh"
             assert items["infer.device"]["options"] == ["auto", "cpu", "cuda"]
             assert items["subtitle.skip_embedded"]["options"] == ["off", "target", "any"]

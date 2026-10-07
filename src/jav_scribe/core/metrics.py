@@ -157,6 +157,21 @@ class MetricsRegistry:
         ap("# HELP javscribe_model_loaded 当前是否有已加载的推理模型（1/0）。")
         ap("# TYPE javscribe_model_loaded gauge")
         ap(f"javscribe_model_loaded {1 if bool(getattr(e, 'model_loaded', False)) else 0}")
+        # coalesce（模型预热）指标：无 coalesce_stats 的旧 engine 渲染 0（向后兼容）
+        _cs = getattr(e, "coalesce_stats", None)
+        _stats = _cs() if callable(_cs) else {}
+        ap("# HELP javscribe_model_loads_total 推理进程启动（模型加载）次数累计。")
+        ap("# TYPE javscribe_model_loads_total counter")
+        ap(f"javscribe_model_loads_total {int(_stats.get('model_loads', 0))}")
+        ap("# HELP javscribe_coalesce_applied_total coalesce 合并覆盖多任务的进程次数累计。")
+        ap("# TYPE javscribe_coalesce_applied_total counter")
+        ap(f"javscribe_coalesce_applied_total {int(_stats.get('coalesce_applied', 0))}")
+        ap("# HELP javscribe_infer_last_batch_files 最近一次推理进程覆盖的文件数。")
+        ap("# TYPE javscribe_infer_last_batch_files gauge")
+        ap(f"javscribe_infer_last_batch_files {int(_stats.get('last_batch_files', 0))}")
+        ap("# HELP javscribe_infer_last_batch_jobs 最近一次推理进程覆盖的任务数。")
+        ap("# TYPE javscribe_infer_last_batch_jobs gauge")
+        ap(f"javscribe_infer_last_batch_jobs {int(_stats.get('last_batch_jobs', 0))}")
         aw = getattr(e, "active_workers", None)
         ap("# HELP javscribe_infer_active 当前在途转译任务数。")
         ap("# TYPE javscribe_infer_active gauge")
@@ -294,6 +309,8 @@ class LiveSampler:
                 gpu = {"present": True, **g}
         paused_jobs = sum(1 for j in list(getattr(e, "jobs", []) or []) if getattr(j, "paused", False))
         aw = getattr(e, "active_workers", None)
+        cs = getattr(e, "coalesce_stats", None)
+        stats = cs() if callable(cs) else {}
         return {
             "ok": True,
             "uptime_s": int(time.time() - self._started),
@@ -301,6 +318,10 @@ class LiveSampler:
             "model_loaded": bool(getattr(e, "model_loaded", False)),
             "concurrency": int(getattr(e, "concurrency", 1) or 1),
             "active_workers": int(aw()) if callable(aw) else 0,
+            "model_loads": int(stats.get("model_loads", 0)),
+            "coalesce_applied": int(stats.get("coalesce_applied", 0)),
+            "last_batch_files": int(stats.get("last_batch_files", 0)),
+            "last_batch_jobs": int(stats.get("last_batch_jobs", 0)),
             "jobs": {
                 "running": last["running"] if last else 0,
                 "queued": last["queued"] if last else 0,

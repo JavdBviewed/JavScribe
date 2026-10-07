@@ -35,6 +35,8 @@ def _base_cfg(fake: Path) -> dict:
             "model": "models",
             "device": "cpu",
             "log_level": "DEBUG",
+            # 本文件测并发池语义：钉 coalesce=1（=现行为），隔离「队列并入在跑进程」变量
+            "coalesce_max_jobs": 1,
         },
         "subtitle": {
             "formats": ["srt"],

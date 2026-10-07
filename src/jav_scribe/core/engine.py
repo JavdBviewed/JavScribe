@@ -129,6 +129,12 @@ class Engine:
         # retry_job 放行的文件：resubmit 时豁免内嵌字幕判定（一次性）
         self._force_embedded: set[Path] = set()
         self._inflight_lock = threading.Lock()
+        # coalesce（模型预热）合并统计（R3 可观测：/metrics json + prometheus 单一口径）
+        self._coalesce_lock = threading.Lock()
+        self._coalesce_applied = 0   # 覆盖多 Job 的进程次数
+        self._model_loads = 0        # 推理进程启动（模型加载）次数
+        self._last_batch_files = 0   # 最近一次进程覆盖文件数
+        self._last_batch_jobs = 0    # 最近一次进程覆盖 Job 数
         self._rtf = RtfHistory(Path(data_dir) / "rtf-history.json") if data_dir else None
         # 任务历史持久化：serve 重建后「已完成」任务仍在任务表可见
         self._jobs_path = Path(data_dir) / JOBS_HISTORY_NAME if data_dir else None
@@ -171,6 +177,27 @@ class Engine:
         except (TypeError, ValueError):
             v = 1
         return max(1, min(4, v))
+
+    @property
+    def coalesce_max_jobs(self) -> int:
+        """合并批任务数（模型复用）：Job 进入转写阶段时，把队列中最多 N-1 个
+        同源排队任务并入本次推理进程（一次模型加载覆盖整批）。
+        1 = 现行为（每任务一个进程）；1~50，/config 热调，保存后对后续任务生效。"""
+        try:
+            v = int(self.cfg.get("infer", {}).get("coalesce_max_jobs", 5))
+        except (TypeError, ValueError):
+            v = 5
+        return max(1, min(50, v))
+
+    def coalesce_stats(self) -> dict:
+        """coalesce 合并统计快照（单锁保护；/metrics json 与 prometheus 渲染消费）。"""
+        with self._coalesce_lock:
+            return {
+                "coalesce_applied": self._coalesce_applied,
+                "model_loads": self._model_loads,
+                "last_batch_files": self._last_batch_files,
+                "last_batch_jobs": self._last_batch_jobs,
+            }
 
     def active_workers(self) -> int:
         """当前正跑任务的 worker 数（≤ 并发度；监控快照用）。"""
@@ -558,28 +585,12 @@ class Engine:
                 self.log(f"[engine] 派发任务 {job.id}（在途 {len(self._workers)}/{cap}）")
             w.start()
 
-    def _pipeline(self, job: Job) -> None:
-        # 开跑门：与 pause_job 同一把锁，commit / requeue 二选一，零竞态窗口。
-        # 若挂起发生在 drain 派发之后、此处提交之前 → 回到队首重排，不占资源。
-        with self._sched_lock:
-            if job.paused:
-                self._pending_jobs.insert(0, job)
-                job.committed = False
-                requeue = True
-            else:
-                job.committed = True
-                requeue = False
-        if requeue:
-            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前，重新排队）")
-            self._release_slot()
-            return
-        lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
-        sub_cfg = self.cfg.get("subtitle", {})
-        mode = str(sub_cfg.get("skip_embedded", "target") or "target").lower()
+    def _precheck_job(self, job: Job, lang: str, sub_cfg: dict, mode: str) -> list[Task]:
+        """预检：逐文件定跳过语义（已存在字幕 / 内嵌字幕 / 在途冲突）。
 
-        # ---- 预检：逐文件定跳过语义（已存在字幕 / 内嵌字幕 / 在途冲突）。
-        # 必须在任何批量推理之前完成：_infer_one 会把全部 PENDING 文件拉进
-        # 同一批次，检查若滞后于批次，应跳过的文件会被顺带生成字幕。
+        必须在任何批量推理之前完成：_infer_one 会把全部 PENDING 文件拉进
+        同一批次，检查若滞后于批次，应跳过的文件会被顺带生成字幕。
+        """
         ready: list[Task] = []
         for task in job.files:
             if task.status != TaskStatus.PENDING:
@@ -630,11 +641,90 @@ class Engine:
                     continue
                 self._inflight_files.add(key)
             ready.append(task)
+        return ready
+
+    def _collect_coalesce(self, job: Job) -> list[Job]:
+        """前瞻合并：取队列中最多 N-1 个后续同源排队任务并入本次推理进程（S1 模型预热）。
+
+        不越暂停线：coalesce_max_jobs<=1 / 队列暂停 / 服务停止中均不合并。
+        在 _sched_lock 内按入队顺序扫描候选（与 drain 派发 / pause_job 原子互斥，
+        不重复派发、不丢挂起）：同源 source_kind、未挂起、未取消、未提交、
+        仍有 PENDING 文件的 Job 被摘出队列并置 committed 位。
+        """
+        n = self.coalesce_max_jobs
+        if n <= 1 or self._paused or self._stop_evt.is_set():
+            return []
+        picked: list[Job] = []
+        with self._sched_lock:
+            keep: list[Job] = []
+            for cand in self._pending_jobs:
+                if (
+                    len(picked) < n - 1
+                    and cand is not job
+                    and cand.source_kind == job.source_kind
+                    and not cand.paused
+                    and not cand.cancel_requested
+                    and not cand.committed
+                    and any(t.status == TaskStatus.PENDING for t in cand.files)
+                ):
+                    cand.committed = True
+                    picked.append(cand)
+                else:
+                    keep.append(cand)
+            if picked:
+                self._pending_jobs = keep
+        if not picked:
+            return []
+        total_files = 0
+        detail: list[str] = []
+        for c in picked:
+            n_files = 0
+            for t in c.files:
+                if t.status == TaskStatus.PENDING:
+                    t.phase_detail = "随批加载"  # R3：复用现有 phase_detail 展示路径
+                    n_files += 1
+            total_files += n_files
+            detail.append(f"{c.id}（{n_files} 文件）")
+        self.log(
+            f"[engine] coalesce 合并：并入 {len(picked)} 个后续 Job，"
+            f"一次模型加载覆盖 {total_files} 个文件: {'、'.join(detail)}"
+        )
+        return picked
+
+    def _pipeline(self, job: Job) -> None:
+        # 开跑门：与 pause_job 同一把锁，commit / requeue 二选一，零竞态窗口。
+        # 若挂起发生在 drain 派发之后、此处提交之前 → 回到队首重排，不占资源。
+        with self._sched_lock:
+            if job.paused:
+                self._pending_jobs.insert(0, job)
+                job.committed = False
+                requeue = True
+            else:
+                job.committed = True
+                requeue = False
+        if requeue:
+            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前，重新排队）")
+            self._release_slot()
+            return
+        lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)
+        sub_cfg = self.cfg.get("subtitle", {})
+        mode = str(sub_cfg.get("skip_embedded", "target") or "target").lower()
+
+        # ---- 预检：逐文件定跳过语义（已存在字幕 / 内嵌字幕 / 在途冲突）。
+        # 必须在任何批量推理之前完成（见 _precheck_job 注释）。
+        ready = self._precheck_job(job, lang, sub_cfg, mode)
+
+        # ---- coalesce：主任务有可转写文件时，把最多 N-1 个后续同源排队任务
+        # 并入本次推理进程（一次模型加载覆盖整批；N=1 不合并，行为=现状）。
+        extra_jobs = self._collect_coalesce(job) if ready else []
+        batch: list[tuple[Job, Task]] = [(job, t) for t in ready]
+        for ej in extra_jobs:
+            batch.extend((ej, t) for t in self._precheck_job(ej, lang, sub_cfg, mode))
 
         # ---- 批量推理：一次加载模型处理全部预检通过的文件
-        for task in ready:
+        for j, task in batch:
             if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                if job.cancel_requested:
+                if j.cancel_requested:
                     task.status = TaskStatus.CANCELED
                     task.message = "已取消"
                     task.finished = time.time()
@@ -643,16 +733,24 @@ class Engine:
                         self._inflight_files.discard(task.path.resolve())
                     continue
                 # 前一批次已统一收尾（DONE/ERROR）的文件直接跳过
-                self._process_one(job, task, lang)
+                self._process_one(j, task, lang, batch=batch)
             with self._inflight_lock:
                 self._inflight_files.discard(task.path.resolve())
-        self._polish_job(job)
-        self._emby_job(job)
+        for j in (job, *extra_jobs):
+            self._polish_job(j)
+            self._emby_job(j)
+            if j is not job:
+                # 并入任务不经过 _run_job：在此收尾（finished/统计/持久化，幂等）
+                j.finished = j.finished or time.time()
+                self._count_terminals([j])
+                self._save_jobs()
+                self.log(f"[engine] ===== 任务 {j.id} 结束（coalesce 并入 {job.id}） =====")
 
     # ------------------------------------------------------------------
     # Stage 1: optional restore
     # ------------------------------------------------------------------
-    def _process_one(self, job: Job, task: Task, lang: str) -> None:
+    def _process_one(self, job: Job, task: Task, lang: str,
+                     batch: list[tuple[Job, Task]] | None = None) -> None:
         task.started = time.time()
         task.status = TaskStatus.RUNNING
         task.live_phase = "preparing"
@@ -663,7 +761,7 @@ class Engine:
         task.transcribe_started = None
         task.last_progress_at = None
         if self._restore(task):
-            self._infer_one(job, task, lang)
+            self._infer_one(job, task, lang, batch=batch)
         if (self._stop_evt.is_set() or job.cancel_requested) and task.status == TaskStatus.RUNNING:
             task.status = TaskStatus.CANCELED
             task.message = "已取消"
@@ -755,13 +853,40 @@ class Engine:
             if wall > 5 and (t.duration_s or t.speech_s):
                 self._rtf.record(device, model, t.duration_s, t.speech_s, wall)
 
-    def _infer_one(self, job: Job, task: Task, lang: str) -> None:
-        # One infer process per job: model loaded once, all files in the batch.
-        todo = [t for t in job.files if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and not t.output_files]
-        if not todo:
+    def _infer_one(self, job: Job, task: Task, lang: str,
+                   batch: list[tuple[Job, Task]] | None = None) -> None:
+        # One infer process per batch: model loaded once, all files in the batch.
+        # batch=None（默认，单任务）= 现行为：拉本任务全部 PENDING 文件；
+        # batch=coalesce 合并批：拉整批（可能跨多个 Job）预检通过的文件。
+        if batch is None:
+            items: list[tuple[Job, Task]] = [
+                (job, t) for t in job.files
+                if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and not t.output_files
+            ]
+        else:
+            items = [(j, t) for j, t in batch
+                     if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING) and not t.output_files]
+        if not items:
             return
+        todo = [t for _j, t in items]
+        # Job/Task 均为 eq dataclass（不可哈希）：按对象身份去重，不能用 dict 哈希
+        jobs: list[Job] = []
+        for j, _t in items:
+            if not any(j is x for x in jobs):
+                jobs.append(j)
+        job_of: dict[int, Job] = {id(t): j for j, t in items}
+        multi = len(jobs) > 1
         cmd, cwd = self._build_infer_command([t.source for t in todo])
-        self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型）")
+        if multi:
+            self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型，覆盖 {len(jobs)} 个任务）")
+        else:
+            self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型）")
+        with self._coalesce_lock:
+            self._model_loads += 1
+            self._last_batch_files = len(todo)
+            self._last_batch_jobs = len(jobs)
+            if multi:
+                self._coalesce_applied += 1
         # 日志解析与「当前文件」指针是 job 级私有的（并发 worker 互不串扰）
         parser = LogParser()
         cur: dict = {"t": None}
@@ -770,10 +895,19 @@ class Engine:
         def on_line(line: str) -> None:
             self.log(f"  [infer] {line}")
             evt = parser.feed(line)
-            t = self._match_task(job, evt.file_path, evt.file_idx, todo, cur)
+            t = self._match_task(evt.file_path, evt.file_idx, todo, cur)
+            if evt.kind == "file_start":
+                # 已取消 Job 的文件也要占「当前文件」位：否则后续无 path 的
+                # segment 行会错归到上一个文件
+                cur["t"] = t
+            # coalesce：被取消的 Job 的文件事件全部丢弃（不推进状态、不记输出）；
+            # 单任务模式保持现状（进程由 stop_check 终止，事件照常处理）。
+            if multi and t is not None:
+                cj = job_of.get(id(t))
+                if cj is not None and cj.cancel_requested:
+                    return
             now = time.time()
             if evt.kind == "file_start":
-                cur["t"] = t
                 if t is not None:
                     t.status = TaskStatus.RUNNING
                     t.phase = TaskPhase.SUBTITLING
@@ -830,18 +964,22 @@ class Engine:
                 self.log("  [infer] 模型加载中…")
 
         self._model_up()
+        # 单任务：任一取消即杀进程（现状）；合并批：全部 Job 都取消才终止，
+        # 单个被取消 Job 不得杀整个进程（R2）
         ok = self._run_command(cmd, cwd=cwd, on_line=on_line,
-                               stop_check=lambda: job.cancel_requested)
+                               stop_check=lambda: all(j.cancel_requested for j in jobs))
         self._model_down()  # 推理进程已退出，模型随进程释放
         if not ok:
             for t in todo:
+                j = job_of[id(t)]
                 if t.status == TaskStatus.RUNNING:
-                    if job.cancel_requested or self._stop_evt.is_set():
+                    if j.cancel_requested or self._stop_evt.is_set():
                         # 取消/停止时已产出字幕的文件保留：留给 finalize 循环收尾为 DONE
-                        if t.output_files:
+                        # （合并批：被取消任务的文件不算交付，直接 CANCELED）
+                        if t.output_files and not multi:
                             continue
                         t.status = TaskStatus.CANCELED
-                        t.message = "已取消" if job.cancel_requested else "服务停止"
+                        t.message = "已取消" if j.cancel_requested else "服务停止"
                     else:
                         t.status = TaskStatus.ERROR
                         t.message = t.message or "引擎退出非零"
@@ -850,17 +988,26 @@ class Engine:
 
         # Finalize outputs for every file that got something written.
         for t in todo:
-            if t.output_files:
-                self._finalize_task(t, lang, job)
+            j = job_of[id(t)]
+            if t.output_files and not (multi and j.cancel_requested):
+                self._finalize_task(t, lang, j)
             if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                if t.output_files:
+                if multi and j.cancel_requested:
+                    # 被取消的并入任务：不收尾、不保留输出（孤儿 srt 留在原处，
+                    # 不带语言标签，后续重跑预检不会误判为已交付）
+                    t.status = TaskStatus.CANCELED
+                    t.message = "已取消"
+                    t.output_files = []
+                elif t.output_files:
+                    # 与旧代码同序：已产出字幕一律收尾为 DONE（取消/停止亦然）；
+                    # 单任务模式 multi=False 时本分支与 5913fdd 逐字等价
                     t.status = TaskStatus.DONE
                     t.message = t.message or "完成"
                     t.progress = 1.0
-                elif job.cancel_requested or self._stop_evt.is_set():
+                elif j.cancel_requested or self._stop_evt.is_set():
                     # 取消/停止时未开始的文件（同批后续项）：不报错，标已取消
                     t.status = TaskStatus.CANCELED
-                    t.message = "已取消" if job.cancel_requested else "服务停止"
+                    t.message = "已取消" if j.cancel_requested else "服务停止"
                 else:
                     t.status = TaskStatus.ERROR
                     t.message = t.message or "无字幕输出"
@@ -903,7 +1050,7 @@ class Engine:
                 t.progress = max(t.progress, lo + (hi - lo) * frac)
             t.eta_s = None
 
-    def _match_task(self, job: Job, path: Optional[str], idx: Optional[int],
+    def _match_task(self, path: Optional[str], idx: Optional[int],
                     todo: list[Task], cur: dict) -> Task | None:
         if path:
             target = Path(path).resolve()
