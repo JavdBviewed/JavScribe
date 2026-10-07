@@ -226,6 +226,8 @@ def _job_rows(
         "source_kind": job.get("source_kind"),
         "sub_status": (local_sub_status or {}).get(job.get("id") or ""),
         "paused": bool(job.get("paused", False)),  # serve 单任务挂起（0.2.3+）
+        "batch_id": job.get("batch_id"),          # 主任务归属（serve 恒带；单文件任务=None）
+        "batch_label": job.get("batch_label"),
     }
     files = job.get("files")
     if not files:
@@ -331,6 +333,9 @@ class UploadTask:
     wb_fails: int = 0  # 回写连续失败计数（内部，不外发）
     # 用户主动暂停（区别于重启中断的 paused）：恢复时前端据此展示「继续」
     task_paused: bool = False
+    # 主任务（batch）归属：扫描/文件夹上传同一提交共享 batch_id；单文件上传不带（None=普通行）
+    batch_id: str | None = None
+    batch_label: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -350,6 +355,8 @@ class UploadTask:
             "sub_status": self.sub_status,
             "writeback": self.writeback,
             "task_paused": self.task_paused,
+            "batch_id": self.batch_id,
+            "batch_label": self.batch_label,
         }
 
 
@@ -537,6 +544,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     sub_status=e.get("sub_status"),
                     writeback=e.get("writeback"),
                     task_paused=bool(e.get("task_paused")),
+                    batch_id=e.get("batch_id") or None,
+                    batch_label=e.get("batch_label") or None,
                 )
             except (TypeError, ValueError):
                 continue
@@ -632,6 +641,46 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _pause_evt.set()
         return True
 
+    # -- 主任务（batch）本地冻结：内存态不持久化（重启后未开始文件重新排队，语义自然）；
+    #    serve 侧 batch 暂停标记由 serve 自己持久化，重启不丢
+    _batch_local_paused: set[str] = set()  # 冻结中的主任务 batch_id 集合
+    _batch_local_evts: dict[str, asyncio.Event] = {}  # batch_id -> 唤醒信号（set=未冻结）
+
+    def _batch_local_evt(batch_id: str) -> asyncio.Event:
+        ev = _batch_local_evts.get(batch_id)
+        if ev is None:
+            ev = asyncio.Event()
+            ev.set()
+            _batch_local_evts[batch_id] = ev
+        return ev
+
+    async def _batch_freeze_wait(task: UploadTask) -> None:
+        """主任务冻结闸（全局暂停闸之前）：所属主任务冻结时停留闸前
+        （phase 保持 queued，行上 batch_paused=True）；继续后放行。
+        已占槽/提取/派发中的不打断（graceful，派发后由 serve 队列冻结接管）。"""
+        bid = task.batch_id
+        if not bid:
+            return
+        while bid in _batch_local_paused:
+            await _batch_local_evt(bid).wait()
+
+    def _batch_local_cancel(batch_id: str) -> int:
+        """主任务取消·本地部分：仅 queued 且无 job_id 的任务终态化（不中断
+        已占槽/提取/派发中的）。复用 error 终态+区分文案（不加新 phase 值，
+        缩影响面）；桶归 failed 与一般失败同桶、消息区分。返回取消数。"""
+        n = 0
+        for t in _uploads.values():
+            if t.batch_id != batch_id or t.job_id or t.phase != "queued":
+                continue
+            t.phase = "error"
+            t.error = "主任务已取消（未开始）"
+            t.progress = 0.0
+            t.finished = time.time()
+            n += 1
+        if n:
+            _save_uploads_state()
+        return n
+
     def _save_client_config() -> None:
         try:
             tmp = _client_cfg_path.with_name(_client_cfg_path.name + ".tmp")
@@ -650,6 +699,95 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             if k in _local_wb:
                 _local_wb.pop(k, None)
                 _gate.release(k)
+
+    # -- 主任务（batch）记录：客户端侧持久化（batches.json，重启对账用）；
+    #    serve 只按 batch_id 记暂停态，不存任务组本身
+    # 结构 {batch_id: {label, created, finished, services: {engine: [job_id]}}}
+    BATCH_CAP = 200
+    _batch_path = Path(data_dir) / "batches.json"
+    _batches: dict[str, dict] = {}
+
+    def _save_batches() -> None:
+        try:
+            tmp = _batch_path.with_name(_batch_path.name + ".tmp")
+            tmp.write_text(json.dumps(_batches, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_batch_path)
+        except OSError:
+            pass  # 状态落盘失败不阻塞主管线
+
+    def _load_batches() -> None:
+        try:
+            raw = json.loads(_batch_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        for bid, rec in raw.items():
+            if isinstance(rec, dict):
+                _batches[str(bid)] = rec
+
+    def _batch_ensure(batch_id: str, label: str | None = None) -> None:
+        """提交时建主任务记录（尚无服务任务）。"""
+        rec = _batches.get(batch_id)
+        if rec is None:
+            rec = {"label": label or "", "created": time.time(),
+                   "finished": None, "services": {}}
+            _batches[batch_id] = rec
+        if label and not rec.get("label"):
+            rec["label"] = label
+        _save_batches()
+
+    def _batch_upsert(batch_id: str, label: str | None, engine: str, job_id: str) -> None:
+        """派发成功后把服务任务登记进主任务（AUTO 解析后的真实服务名）。"""
+        rec = _batches.get(batch_id)
+        if rec is None:
+            _batch_ensure(batch_id, label)
+            rec = _batches[batch_id]
+        if label and not rec.get("label"):
+            rec["label"] = label
+        services = rec.setdefault("services", {})
+        ids = services.setdefault(engine, [])
+        if job_id and job_id not in ids:
+            ids.append(job_id)
+        _save_batches()
+
+    def _batch_cap() -> None:
+        """上限 200：先逐最旧 finished，再最旧 created。"""
+        while len(_batches) > BATCH_CAP:
+            finished = [b for b in _batches if _batches[b].get("finished")]
+            if finished:
+                victim = min(finished, key=lambda b: _batches[b].get("finished") or 0)
+            else:
+                victim = min(_batches, key=lambda b: _batches[b].get("created") or 0)
+            _batches.pop(victim, None)
+        _save_batches()
+
+    def _batch_maybe_finish() -> None:
+        """完成对账（回写 tick 驱动）：主任务本地任务全终态 且 服务侧任务
+        全部 finished 或已不在快照（缺失=200 窗过期/服务重启）→ finished。"""
+        changed = False
+        for bid, rec in list(_batches.items()):
+            if rec.get("finished"):
+                continue
+            live = [t for t in _uploads.values() if t.batch_id == bid]
+            if any(not t.finished for t in live):
+                continue
+            all_done = True
+            for eng, ids in (rec.get("services") or {}).items():
+                jobs = poller.jobs.get(eng) or []
+                for jid in ids or []:
+                    job = next((j for j in jobs if j.get("id") == jid), None)
+                    if job is not None and job.get("state") != "finished":
+                        all_done = False
+                        break
+                if not all_done:
+                    break
+            if all_done:
+                rec["finished"] = time.time()
+                changed = True
+        if changed:
+            _batch_cap()
+            _save_batches()
 
     @app.get("/api/health")
     async def api_health() -> dict:
@@ -730,9 +868,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         # 隐藏本机专属动作（字幕不会落回本机，源视频不在本机磁盘）。
         local_job_ids = {t.job_id for t in _uploads.values() if t.job_id}
         for name, details in poller.jobs.items():
+            info = poller.engines.get(name)
+            bpaused = set(info.batch_paused) if info is not None else set()
             for job in details:
                 for r in _job_rows(name, job, wb_index, sub_index):
                     r["local"] = bool(job.get("id")) and job.get("id") in local_job_ids
+                    r["batch_paused"] = bool(r.get("batch_id")) and r["batch_id"] in bpaused
                     rows.append(r)
         # 本机上传管线在「服务端任务出现之前」的阶段（提取音轨 / 派发 / 失败）
         # 也渲染成任务行——否则提交后任务表空白，用户会以为没提交成功而重复提交。
@@ -760,6 +901,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     "finished": t.finished,
                     "source_kind": "upload",
                     "sub_status": t.sub_status,
+                    "batch_id": t.batch_id,
+                    "batch_label": t.batch_label,
+                    "batch_paused": bool(t.batch_id) and t.batch_id in _batch_local_paused,
                     "writeback": None,
                     "file": t.name,
                     "status": "error" if t.phase == "error" else (
@@ -905,6 +1049,81 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         return {"ok": True, "paused": bool(_client_cfg["pipeline_paused"]),
                 "engines": engines_out}
 
+    # -- 主任务（batch）：暂停 / 继续 / 取消（本机管线 + 所有在线服务） --------------
+    async def _batch_op(batch_id: str, action: str) -> dict:
+        """无 body。本机：pause/resume=置/清冻结标记并唤醒闸；cancel=queued 无
+        job_id 任务终态（文案区分）+ 清冻结标记。服务：fan-out 所有在线服务
+        （serve 未持有该 batch 也照记标记恒 200；旧镜像 404 → 该引擎标 unsupported，
+        不阻塞整体）。"""
+        if action == "pause":
+            _batch_local_paused.add(batch_id)
+            _batch_local_evt(batch_id).clear()
+            local_out = {"frozen": True}
+        elif action == "resume":
+            _batch_local_paused.discard(batch_id)
+            _batch_local_evt(batch_id).set()
+            local_out = {"released": True}
+        else:  # cancel
+            _batch_local_paused.discard(batch_id)
+            _batch_local_evt(batch_id).set()
+            local_out = {"canceled": _batch_local_cancel(batch_id)}
+        engines_out: list[dict] = []
+        for name, info in sorted(poller.engines.items(), key=lambda kv: kv[0]):
+            if not info.online or store.get(name) is None:
+                engines_out.append({"engine": name, "ok": False, "error": "服务离线"})
+                continue
+            entry = store.get(name)
+            eng = JavScribeEngine(name, entry["url"])
+            try:
+                if action == "pause":
+                    res = await eng.batch_pause(batch_id)
+                elif action == "resume":
+                    res = await eng.batch_resume(batch_id)
+                else:
+                    res = await eng.batch_cancel(batch_id)
+                engines_out.append({"engine": name, "ok": True, "result": res})
+            except httpx.HTTPStatusError as ex:
+                if ex.response.status_code == 404:
+                    engines_out.append({"engine": name, "ok": False, "unsupported": True,
+                                        "error": "服务版本过旧，不支持主任务操作"})
+                else:
+                    engines_out.append({"engine": name, "ok": False,
+                                        "error": f"服务请求失败: HTTP {ex.response.status_code}"})
+            except httpx.HTTPError as ex:
+                engines_out.append({"engine": name, "ok": False, "error": f"服务不可达: {ex}"})
+            finally:
+                await eng.close()
+        return {"ok": True, "batch_id": batch_id, "action": action,
+                "engines": engines_out, "local": local_out}
+
+    @app.post("/api/batch/{batch_id}/pause")
+    async def api_batch_pause(batch_id: str) -> dict:
+        return await _batch_op(batch_id, "pause")
+
+    @app.post("/api/batch/{batch_id}/resume")
+    async def api_batch_resume(batch_id: str) -> dict:
+        return await _batch_op(batch_id, "resume")
+
+    @app.post("/api/batch/{batch_id}/cancel")
+    async def api_batch_cancel(batch_id: str) -> dict:
+        return await _batch_op(batch_id, "cancel")
+
+    @app.get("/api/batches")
+    async def api_list_batches() -> list[dict]:
+        """主任务记录列表（客户端侧持久化；前端对账已完成/已过期的主任务）。"""
+        out = [
+            {
+                "batch_id": bid,
+                "label": rec.get("label") or bid,
+                "created": rec.get("created"),
+                "finished": rec.get("finished"),
+                "services": rec.get("services") or {},
+            }
+            for bid, rec in _batches.items()
+        ]
+        out.sort(key=lambda r: r.get("created") or 0, reverse=True)
+        return out
+
     # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
 
     async def _pause_gate_wait(task: UploadTask, resume_phase: str) -> None:
@@ -934,7 +1153,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         try:
             async with _lock_for(task.engine):
                 res = await eng.upload_audio(
-                    audio_tmp.read_bytes(), task.name or "remote"
+                    audio_tmp.read_bytes(), task.name or "remote",
+                    batch_id=task.batch_id, batch_label=task.batch_label,
                 )
                 task.job_id = res["job_id"]
                 task.cached = bool(res.get("cached"))
@@ -946,6 +1166,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             await eng.close()
         task.phase = "done"
         task.progress = 1.0
+        if task.batch_id and task.job_id:
+            # AUTO 此时已解析为真实服务名 → 按真实服务登记
+            _batch_upsert(task.batch_id, task.batch_label, task.engine, task.job_id)
 
     async def _run_upload(task: UploadTask, video_tmp: Path) -> None:
         audio_tmp = video_tmp.with_suffix(".opus")
@@ -1001,6 +1224,9 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         os.close(fd)
         task.phase = "queued"
         try:
+            await _batch_freeze_wait(task)
+            if task.phase == "error":
+                return  # 冻结期间被主任务取消：终态已置，不再走管线
             await _pause_gate_wait(task, "queued")
             await _gate.acquire(task.id, lambda: task.engine)
             try:
@@ -1057,7 +1283,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             raise
 
     @app.post("/api/upload", status_code=202)
-    async def api_upload(file: UploadFile = File(...), engine: str = Form(...)) -> dict:
+    async def api_upload(
+        file: UploadFile = File(...),
+        engine: str = Form(...),
+        batch_id: str | None = Form(None),
+        batch_label: str | None = Form(None),
+    ) -> dict:
         resolve_engine(engine)
         _prune_uploads()
         max_bytes = int(UPLOAD_MAX_GB * 1024**3)
@@ -1082,8 +1313,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             engine=engine,
             name=file.filename or "remote",
             size_mb=round(received / 1048576, 1),
+            batch_id=batch_id or None,
+            batch_label=batch_label or None,
         )
         _uploads[task.id] = task
+        if task.batch_id:
+            _batch_ensure(task.batch_id, task.batch_label)
         _save_uploads_state()
         asyncio.create_task(_run_upload(task, tmp))
         return {
@@ -1102,6 +1337,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         name: str = Form("remote"),
         size_mb: float = Form(0),
         duration_s: float = Form(0),
+        batch_id: str | None = Form(None),
+        batch_label: str | None = Form(None),
     ) -> dict:
         """浏览器本地提音轨后只传 opus：跳过服务端提取，直接派发服务。"""
         resolve_engine(engine)
@@ -1128,8 +1365,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             size_mb=size_mb or round(received / 1048576, 1),
             phase="dispatching",
             audio_mb=round(received / 1048576, 1),
+            batch_id=batch_id or None,
+            batch_label=batch_label or None,
         )
         _uploads[task.id] = task
+        if task.batch_id:
+            _batch_ensure(task.batch_id, task.batch_label)
         _save_uploads_state()
         asyncio.create_task(_run_audio(task, tmp))
         return {
@@ -1806,6 +2047,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             {str(k): str(v) for k, v in sub_raw.items() if isinstance(v, str)}
             if isinstance(sub_raw, dict) else {}
         )
+        batch_id_raw = body.get("batch_id") if isinstance(body, dict) else None
+        batch_label_raw = body.get("batch_label") if isinstance(body, dict) else None
+        batch_id = str(batch_id_raw) if batch_id_raw else None
+        batch_label = str(batch_label_raw) if batch_label_raw else None
+        if batch_id:
+            _batch_ensure(batch_id, batch_label)
         _prune_uploads()
         # 防重：同一影片在跑/在队（含提取中）时跳过，已终态（完成回写 / 提取失败）
         # 的允许重新提交（在跑的任务可先经任务行取消按钮取消，serve v0.1.7+ 支持）。
@@ -1828,6 +2075,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 size_mb=round(p.stat().st_size / 1048576, 1),
                 local_path=str(p),
                 sub_status=sub_map.get(str(p)),
+                batch_id=batch_id,
+                batch_label=batch_label,
             )
             _uploads[task.id] = task
             created.append(task.id)
@@ -1889,8 +2138,10 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         """轮询快照就绪后：把已完成的本地扫描任务字幕写回本机影片旁。
 
         所有终态出口统一走 _wb_close：离开回写表 + 释放在途槽（槽释放唯一出口）。
+        顺带做主任务（batch）完成对账（_batch_maybe_finish）。
         """
         _prune_uploads()
+        _batch_maybe_finish()
 
         def _wb_close(task: UploadTask) -> None:
             _local_wb.pop(task.id, None)
@@ -1988,6 +2239,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     _save_scan_tasks_state()
     _load_uploads_state()
     _save_uploads_state()
+    _load_batches()
+    _save_batches()
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

@@ -120,7 +120,8 @@ def test_upload_pipeline_dispatches_opus() -> None:
     """2s tone: upload -> extract (progress) -> fake workshop gets an ogg opus."""
     captured: dict = {}
 
-    async def fake_upload_audio(self, audio_bytes: bytes, name: str) -> dict:
+    async def fake_upload_audio(self, audio_bytes: bytes, name: str,
+                           batch_id: str | None = None, batch_label: str | None = None) -> dict:
         captured["bytes"] = audio_bytes
         captured["name"] = name
         return {"job_id": "job-fake-1", "cached": False}

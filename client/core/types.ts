@@ -21,6 +21,8 @@ export interface Engine {
   error?: string | null;
   /** 服务队列已挂起（serve 0.2.3+ /health.paused；旧服务无此字段） */
   paused?: boolean;
+  /** 该服务当前处于 batch 暂停态的 batch_id 集合（/health.batch_paused；旧服务无此字段 = 空集） */
+  batch_paused?: string[];
   /** 参与自动负载均衡（工作台 v0.2.11+；false 时不接收 auto 派发的新任务） */
   enabled?: boolean;
 }
@@ -70,6 +72,12 @@ export interface JobRow {
   source_kind?: string | null;
   /** 服务任务被单任务挂起（serve 0.2.3+ /jobs 行字段；排队挂起时行 status 仍是 pending） */
   paused?: boolean;
+  /** 主任务（batch）归属：同一提交（扫描/文件夹）的子任务共享 batch_id；单文件上传 = null（不套主任务壳） */
+  batch_id?: string | null;
+  /** 主任务标签（扫描目录名 / 文件夹名） */
+  batch_label?: string | null;
+  /** 该行所属主任务是否处于 batch 暂停态（serve 行=job.batch_id∈引擎 batch_paused；本机行=task.batch_id∈本地冻结集） */
+  batch_paused?: boolean;
   /** 本机管线任务 id（仅工作台本机行：暂停/继续→重提取重提交用） */
   task_id?: string | null;
   /** 本机视频路径（仅本机扫描/监听行有；浏览器上传任务为 null → 无重试/继续按钮） */
@@ -108,6 +116,31 @@ export interface UploadStatus {
   writeback?: string | null;
   /** 用户主动暂停（工作台 0.2.12+；区别于重启中断的 paused） */
   task_paused?: boolean;
+  /** 主任务（batch）归属（客户端提交时透传；单文件 = null） */
+  batch_id?: string | null;
+  /** 主任务标签（扫描目录名 / 文件夹名） */
+  batch_label?: string | null;
+}
+
+/** 主任务（batch）记录：客户端维度任务组（记录持久化在客户端；serve 只按 batch_id 记其持有子任务的暂停态） */
+export interface BatchRecord {
+  batch_id: string;
+  /** 主任务标签（扫描目录名 / 文件夹名） */
+  label?: string | null;
+  created?: number | null;
+  finished?: number | null;
+  /** 服务名 -> job_id 列表（派发成功时登记；AUTO 已解析为真实服务名） */
+  services?: Record<string, string[]>;
+}
+
+/** 主任务操作（暂停/继续/取消）结果：本机任务立即生效 + 各服务 fan-out 结果
+ *  （离线/旧版服务 404 单条失败不阻塞整体，unsupported=服务版本过旧不支持主任务操作） */
+export interface BatchOpResult {
+  ok: boolean;
+  batch_id: string;
+  action: "pause" | "resume" | "cancel";
+  engines: { engine: string; ok: boolean; unsupported?: boolean; error?: string; result?: Record<string, unknown> }[];
+  local?: { frozen?: boolean; released?: boolean; canceled?: number };
 }
 
 /** 服务端监控快照（serve 0.2.4+ GET /metrics/json → 工作台 /api/engines/{name}/metrics） */
