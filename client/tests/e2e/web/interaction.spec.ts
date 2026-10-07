@@ -250,8 +250,9 @@ test("文件夹批量：chip 文案 → 顺序流水线 1/2 → 批量完成（�
   await page.selectOption("#engine-select", "mock");
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");
-  await expect(page.locator("#meta-upload", { hasText: "文件 1/2 ·" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("#meta-upload", { hasText: "文件 2/2 ·" })).toBeVisible({ timeout: 120_000 });
+  // S4 并发泵：两链同 tick 启动，step 面板单实例 last-writer-wins（逐任务证据走任务表）
+  // → 原「先 1/2 后 2/2」的串行时序断言改为「任一前缀可见」（行为覆盖由下方任务行/完成文案承担）
+  await expect(page.locator("#meta-upload", { hasText: /文件 [12]\/2 ·/ })).toBeVisible({ timeout: 15_000 });
   // 批量完成后自动切到任务看板：先断言任务行，再切回派发页断言终态文案
   await expect(page.locator(".job-row .fn", { hasText: "video-a.mp4" })).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(".job-row .fn", { hasText: "video-b.mkv" })).toBeVisible();

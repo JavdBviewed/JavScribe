@@ -5,9 +5,12 @@
  *     - 超过 MAX_BYTES 或空文件返回 { skipped: true }，由调用方决定回退
  *     - onProgress(p)：0..1，节流至 ~100 次
  *   MAX_BYTES：wasm 线性内存上限 ~2GB，1.6GB 是含中间数据的安全上限
- * 串行队列：批量时一次只跑一个文件，避免 wasm 内存叠加。
+ * 并发：extract_workers 可 resize 池（设置保存后热生效，app 注入 limit 读者）。
+ * 注意：ffmpeg.wasm 单实例 EXEC 为同步阻塞 → 实际并发 ≤1，池上限是逻辑闸（不建多实例，
+ * 避免 wasm 内存叠加——基线串行语义的推广）。
  */
 import { DEFAULT_MAX_EXTRACT_BYTES, OPUS_EXTRACT_ARGS } from "../core/constants";
+import { CLIENT_CFG_DEFAULTS, createPool } from "../core/concurrency";
 
 // 历史行为（基线 1:1 保留）：app 直接传回调函数，而实现按 opts 对象读 onProgress
 // （函数上没有 onProgress 属性），因此当前生产代码本地提取阶段没有实时百分比。
@@ -19,6 +22,10 @@ export interface JavExtractAPI {
   extractAudio: (f: File, opts?: ExtractOpts) => Promise<Blob | { skipped: true }>;
   MAX_BYTES: number;
   fits: (f: File | null) => boolean;
+  /** S4：注入 extract_workers 实时读者（app 持有 state.ccfg 闭包；保存后热生效）。 */
+  setExtractLimit?: (read: () => number) => void;
+  /** S4：extract_workers 调大后释放池等待者。 */
+  wakeExtract?: () => void;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,7 +37,8 @@ const MAX_BYTES =
     : DEFAULT_MAX_EXTRACT_BYTES;
 let inst: FFmpegLike | null = null;
 let loading: Promise<FFmpegLike> | null = null;
-let queue: Promise<unknown> = Promise.resolve();
+// S4：串行队列 → 可 resize 池（extract_workers 消费点；默认值仅启动初期，app init 后注入实时读者）
+const pool = createPool(() => CLIENT_CFG_DEFAULTS.extract_workers);
 
 function ensure(): Promise<FFmpegLike> {
   if (inst && inst.loaded) return Promise.resolve(inst);
@@ -116,18 +124,21 @@ function extractAudio(f: File, opts?: ExtractOpts) {
     | { onProgress?: ExtractProgress }
     | undefined;
   const onProgress = optsObj?.onProgress;
-  const prev = queue;
-  let release: () => void = () => {};
-  queue = new Promise<void>((r) => { release = r; });
-  return prev
-    .then(() => runOne(f, onProgress))
-    .finally(() => { release(); });
+  // skipped 分支不进池（无提取动作，不占并发槽）
+  return pool.run(() => runOne(f, onProgress));
 }
 
 const api: JavExtractAPI = {
   extractAudio,
   MAX_BYTES,
   fits: (f) => !!f && f.size > 0 && f.size <= MAX_BYTES,
+  setExtractLimit: (read) => {
+    pool.setLimitReader(read);
+    pool.wake(); // 调大立即释放等待者（调小无害：不中断在跑者）
+  },
+  wakeExtract: () => {
+    pool.wake();
+  },
 };
 
 // 与迁移前一致：挂 window，app.ts 按需取用（模块加载即就位，先于任何 dispatch）

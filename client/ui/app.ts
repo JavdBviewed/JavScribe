@@ -8,6 +8,7 @@ import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRo
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, normalizeClientConfig } from "../core/concurrency";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
 import { fmtSrtSpan, fmtSrtTime, parseSrt, type SrtCue, type SrtParseResult } from "../core/srt";
@@ -44,6 +45,7 @@ interface AppState {
   _metrics: Record<string, MetricsResponse>; // 引擎名 -> 监控快照（卡片迷你趋势图）
   latestServe: ServeRelease | null;   // 最新服务端 Release（服务端无界面，新版本提示落在卡片角标）
   extractMode: "auto" | "local" | "server";
+  ccfg: ClientConfig | null;    // S4：客户端并发设置（热重载：refresh 读回 + 本端保存即时应用）
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
   watchWriteBack: Set<string>;          // watch 派发任务完成后强制写回（不受 autoSave 门控；仅 desktop 会写入）
@@ -103,6 +105,7 @@ const state: AppState = {
     ? savedExtract
     : "auto",
   autoSave: localStorage.getItem("javweb_autosave") === "1",
+  ccfg: null,
   writeBackJobs: new Map(),
   watchWriteBack: new Set(),
   _fsFileDir: null,
@@ -339,9 +342,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   async function refresh() {
     try {
-      const [health, engines, jobs, summary] = await Promise.all([
+      const [health, engines, jobs, summary, ccRaw] = await Promise.all([
         t.getHealth(), t.listEngines(), t.listJobs(),
         t.listJobsSummary ? t.listJobsSummary().catch(() => null) : Promise.resolve(null),
+        // S4：客户端并发设置读回（多端/他端保存后 ≤5s 热生效；失败保留上一值）
+        t.getClientConfig ? t.getClientConfig().catch(() => null) : Promise.resolve(null),
       ]);
       const allOnline = health.online === health.engines && health.engines > 0;
       $("health").textContent = `v${health.version} · 服务 ${health.online}/${health.engines} 在线`;
@@ -350,6 +355,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       renderEngines(engines);
       state._jobs = jobs;
       state._summary = summary;
+      reconcilePending(); // S4：行接管 pending 记账（行到终态即释 cap 槽）
+      if (ccRaw) {
+        const ccNow = normalizeClientConfig(ccRaw);
+        if (!state.ccfg
+          || ccNow.extract_workers !== state.ccfg.extract_workers
+          || ccNow.queue_cap !== state.ccfg.queue_cap) {
+          state.ccfg = ccNow;
+          jav()?.wakeExtract?.(); // 提取并发变更 → 释放池等待者（调小无害：不中断在跑者）
+          pumpDispatch();         // 在途封顶变更 → 立即重判排队项
+        }
+      }
       renderJobs(jobs);
       if (platform.kind === "web" && typeof t.engineMetrics === "function") {
         for (const e of engines) {
@@ -374,6 +390,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       viewBadge(jobs.filter((r) => r.status === "running").length);
     } catch (_e) { /* 网络抖动：保留上一次渲染 */ }
     watchPump(); // watch 队列安全网：漏触发的消费在 5s 内自愈
+    pumpDispatch(); // S4：任务终态/在途变化可能释出 cap 槽 → 重触发排队派发
     if (platform.kind === "web") void refreshUpdateWeb();
     else void refreshServeLatest(); // 桌面端：服务端新版本提示（GitHub Release 对比，静默降级）
   }
@@ -2150,14 +2167,91 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   type DispatchOutcome = [boolean, UploadStatus | { error: string }];
 
+  // ---------- S4：per-service 在途封顶（queue_cap）记账 + 泵 ----------
+  // 在途窗 = 派发链启动 → 任务终态（done/skipped/error/canceled）：
+  //   chainInFlight : 派发链（提取→上传→提交）进行中，链结算即减（提交成败都结算）
+  //   pendingJobIds : 已提交但任务表行尚未可见（≤5s 桥接窗，refresh 见行即移入行计数）
+  //   行计数        : 任务表有 job_id + 本机归属 + 非终态（countInFlightRows；本机管线行
+  //                   无 job_id 由链记账覆盖，防双算）
+  // 三者相加 = inFlightOf(engine)；任一记账到终态/行可见即释槽，pumpDispatch 为重触发入口。
+  const chainInFlight = new Map<string, number>();
+  const pendingJobIds = new Map<string, Set<string>>();
+  let batchStartNext: (() => void) | null = null; // 文件夹批量封顶等待的续发（泵重触发）
+  let singleQueuedFile: File | null = null;       // 等 cap 槽位的单文件（文件变更/重新派发即失效，身份匹配防误发）
+
+  function inFlightOf(engine: string): number {
+    let n = chainInFlight.get(engine) || 0;
+    const pj = pendingJobIds.get(engine);
+    if (pj) n += pj.size;
+    n += countInFlightRows(state._jobs, engine);
+    return n;
+  }
+
+  function queueCapNow(): number {
+    return state.ccfg?.queue_cap ?? CLIENT_CFG_DEFAULTS.queue_cap;
+  }
+
+  function canDispatch(engine: string): boolean {
+    return canStartInFlight({ engine, cap: queueCapNow(), inFlight: inFlightOf, engines: state.engines });
+  }
+
+  /** 带记账派发：链启动 +1 / 链结算 -1；提交成功带 job_id 进 pending（等行接管） */
+  function dispatchTracked(f: File, engine: string, labelPrefix?: string): Promise<DispatchOutcome> {
+    chainInFlight.set(engine, (chainInFlight.get(engine) || 0) + 1);
+    return dispatchOne(f, engine, labelPrefix).then(
+      (d) => {
+        chainInFlight.set(engine, (chainInFlight.get(engine) || 0) - 1);
+        if (d[0]) {
+          const up = d[1] as UploadStatus;
+          if (up.job_id) {
+            let st = pendingJobIds.get(engine);
+            if (!st) { st = new Set<string>(); pendingJobIds.set(engine, st); }
+            st.add(String(up.job_id));
+          }
+        }
+        return d;
+      },
+      (e: unknown) => {
+        chainInFlight.set(engine, (chainInFlight.get(engine) || 0) - 1);
+        throw e;
+      },
+    );
+  }
+
+  /** refresh 见到 job_id 行 → 移出 pending（行接管在途计数；行到终态即释槽） */
+  function reconcilePending(): void {
+    const seen = new Set<string>();
+    for (const r of state._jobs) if (r.job_id) seen.add(String(r.job_id));
+    for (const [e, st] of [...pendingJobIds]) {
+      for (const id of [...st]) if (seen.has(id)) st.delete(id);
+      if (!st.size) pendingJobIds.delete(e);
+    }
+  }
+
+  /** 泵重触发入口（refresh / 链结算 / 设置保存均调）：只释放排队项，不产生新任务 */
+  function pumpDispatch(): void {
+    if (batchStartNext) batchStartNext();
+    if (singleQueuedFile && !state.busy && state.file === singleQueuedFile && !state.folderFiles) {
+      const engine = engineSelect.value;
+      if (engine && canDispatch(engine)) startSingle(engine);
+    }
+  }
+
   function startSingle(engine: string) {
     const file = state.file;
-    if (!file) return;
+    if (!file) { singleQueuedFile = null; return; }
+    if (!canDispatch(engine)) {
+      // 在途封顶（queue_cap）：不阻塞 UI，等 cap 槽位释放 → pumpDispatch 重触发（≤5s 轮询安全网）
+      singleQueuedFile = file;
+      showStatus(`「${engine}」在途任务已达上限（${queueCapNow()}），排队等待空位`, "");
+      return;
+    }
+    singleQueuedFile = null; // 显式派发（含泵触发）：排队标记作废
     state.busy = true;
     updateGo();
     localStorage.setItem("javweb_engine", engine);
     preparePipeline();
-    dispatchOne(file, engine).then(([ok, d]) => {
+    dispatchTracked(file, engine).then(([ok, d]) => {
       if (ok) {
         const up = d as UploadStatus;
         state.writeBackJobs.set(engine + "|" + up.job_id, {
@@ -2178,37 +2272,62 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     });
   }
 
-  async function startBatch(engine: string) {
+  // S4：泵驱动并发派发（基线为串行 for-await；在途封顶下各链并行推进至 cap）。
+  // 完成 = 全部链 settled（提交或失败），不等任务终态（终态由任务表记账并释 cap 槽）。
+  function startBatch(engine: string) {
     const queue = (state.folderFiles || []).filter((v) => !v.hasSub).map((v) => v.file);
+    singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
     state.busy = true;
     updateGo();
     localStorage.setItem("javweb_engine", engine);
     preparePipeline(`文件 1/${queue.length}`);
-    let okN = 0;
-    for (let i = 0; i < queue.length; i++) {
-      const prefix = `文件 ${i + 1}/${queue.length} · `;
-      preparePipeline(prefix + (effectiveMode(queue[i]) === "local" ? "开始本地提取…" : "开始上传…"));
-      const [ok, d] = await dispatchOne(queue[i], engine, prefix);
-      if (ok) {
-        okN++;
-        const up = d as UploadStatus;
-        if (up.job_id) {
-          state.writeBackJobs.set(engine + "|" + up.job_id, {
-            engine, videoName: queue[i].name, dirHandle: queue[i]._dirHandle || null,
-            videoPath: queue[i]._localPath || null,
-          });
-        }
+    const total = queue.length;
+    let okN = 0, started = 0, settled = 0, done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      batchStartNext = null;
+      showStatus(
+        okN === total
+          ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
+          : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
+        okN ? "ok" : "err"
+      );
+      finishBatch();
+      refresh();
+      if (okN > 0) webShowView("jobs"); // 批量完成进任务看板
+    };
+    const startNext = (): void => {
+      if (done) return;
+      while (started < total) {
+        if (!canDispatch(engine)) break; // 封顶：等 refresh / 链结算 / 设置保存重触发
+        const idx = started++;
+        const file = queue[idx];
+        const prefix = `文件 ${idx + 1}/${total} · `;
+        preparePipeline(prefix + (effectiveMode(file) === "local" ? "开始本地提取…" : "开始上传…"));
+        void (async () => {
+          let ok = false;
+          let d: UploadStatus | { error: string } = { error: "" };
+          try { [ok, d] = await dispatchTracked(file, engine, prefix); } catch (_e) { ok = false; }
+          if (ok) {
+            okN++;
+            const up = d as UploadStatus;
+            if (up.job_id) {
+              state.writeBackJobs.set(engine + "|" + up.job_id, {
+                engine, videoName: file.name, dirHandle: file._dirHandle || null,
+                videoPath: file._localPath || null,
+              });
+            }
+          }
+          settled++;
+          startNext(); // 链结算后立即试下一项
+          if (settled === total) finish();
+        })();
       }
-    }
-    showStatus(
-      okN === queue.length
-        ? `批量完成：已提交 ${okN}/${queue.length} 项，见「字幕任务」`
-        : `批量完成：成功 ${okN}/${queue.length} 项，其余失败（可重新选择文件夹）`,
-      okN ? "ok" : "err"
-    );
-    finishBatch();
-    refresh();
-    if (okN > 0) webShowView("jobs"); // 批量完成进任务看板
+    };
+    startNext();
+    if (started < total) batchStartNext = startNext; // 封顶等待：泵重触发
+    if (settled === total) finish(); // 空队列（全有字幕）
   }
 
   function finishBatch() {
@@ -3311,6 +3430,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           if (!it) { watchRender(); return; }
           const engine = engineSelect.value;
           if (!engine) { watchRender(); return; } // 未选服务：留队列等（onchange / 5s 轮询会再触发）
+          if (!canDispatch(engine)) return; // S4 在途封顶：留队列等（refresh / watchPump 5s 安全网重触发）
           watchQueue.shift();
           watchDispatchingPath = it.path;
           state.busy = true;
@@ -3321,7 +3441,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           Object.defineProperty(f, "size", { value: it.size, configurable: true });
           f._localPath = it.path;
           preparePipeline("监听");
-          dispatchOne(f, engine, "监听 · ").then(([ok, d]) => {
+          dispatchTracked(f, engine, "监听 · ").then(([ok, d]) => {
             watchDispatchingPath = null;
             state.busy = false;
             updateGo();
@@ -3673,6 +3793,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (isNaN(qc) || qc < 1 || qc > 16) { toast("转译并发需在 1 ~ 16 之间", "err"); return; }
         try {
           await t.putClientConfig!({ extract_workers: ew, queue_cap: qc });
+          // S4：保存成功才应用本端内存（R2：保存失败不落内存，下轮 refresh 读回自愈）
+          state.ccfg = normalizeClientConfig({ ...(state.ccfg || {}), extract_workers: ew, queue_cap: qc });
+          jav()?.wakeExtract?.(); // 提取并发变更 → 释放池等待者
+          pumpDispatch();         // 在途封顶变更 → 立即重判排队项
           toast("客户端设置已保存（立即生效，无需重启）", "ok");
           for (const row of rows) row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
           ccDirty();
@@ -3787,6 +3911,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
+  // S4：提取并发读者注入（闭包实时读 state.ccfg，注入一次不缓存值）+ 启动读回客户端设置（验收 d）
+  jav()?.setExtractLimit?.(() => state.ccfg?.extract_workers ?? CLIENT_CFG_DEFAULTS.extract_workers);
+  if (t.getClientConfig) void t.getClientConfig()
+    .then((cc) => { state.ccfg = normalizeClientConfig(cc); })
+    .catch(() => {});
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 }
