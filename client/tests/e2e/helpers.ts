@@ -92,7 +92,7 @@ export async function waitForEngineOnline(page: Page) {
  * 派发成功（单文件/批量/扫描提交）后 app 会自动切到「字幕任务」，
  * 再操作「生成字幕 / 字幕服务」区块前必须先切回对应 tab。
  */
-export async function goTab(page: Page, view: "dispatch" | "jobs" | "engines") {
+export async function goTab(page: Page, view: "dispatch" | "jobs" | "engines" | "ccfg") {
   await page.locator(`#nav .view-tab[data-view="${view}"]`).click();
   await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
 }

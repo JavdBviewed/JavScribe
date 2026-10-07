@@ -9,7 +9,7 @@
 
 import { TransportError, type ScanOpts, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
+  ClientConfig, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -123,6 +123,8 @@ export const desktopTransport: Transport = {
   retryJob: (engine, jobId) => call<{ jobId: string }>("retryJob", engine, jobId),
   cancelJob: (engine, jobId) => call<{ status: string }>("cancelJob", engine, jobId),
   getConfig: (name) => call<ConfigItem[]>("getConfig", name),
+  getClientConfig: () => call<ClientConfig>("getClientConfig"),
+  putClientConfig: (cfg) => call("putClientConfig", JSON.stringify(cfg)),
   // 就绪自检：main 侧把错误包装进 payload（ok=false），不 throw，UI 降级展示
   // 就绪自检：main 侧错误已包进 payload（不 throw），这里解包 IPC 外层 {ok,data}
   getReadiness: async (name) => {

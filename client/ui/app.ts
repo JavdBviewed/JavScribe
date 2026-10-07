@@ -431,7 +431,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   let viewBadge: (n: number) => void = () => {};
 
   // web 壳顶部视图 tab 钩子：desktop 形态恒空操作（桌面用侧边栏）
-  let webShowView: (v: "dispatch" | "jobs" | "engines") => void = () => {};
+  let webShowView: (v: "dispatch" | "jobs" | "engines" | "ccfg") => void = () => {};
+
+  // 文件夹监听「客户端设置 tab」钩子：桌面形态由 watch 块接线（与派单页监听面板同一数据源）；web 形态恒 null
+  let ccWatchCtl: {
+    state(): WatchState | null;
+    set(on: boolean, path: string): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
+    pickDir(): Promise<string | null>;
+  } | null = null;
 
   // ---- web 形态：GET /api/update（独立链路，失败静默，绝不拖累主刷新） ----
   let updateWeb: UpdateInfo | null = null;
@@ -2513,7 +2520,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const GROUP_ZH: Record<string, string> = {
     subtitle: "字幕", infer: "推理引擎", vad: "VAD 过滤", polish: "AI 润色",
     emby: "Emby 刷新", jasna: "音频修复", scan: "扫描规则", storage: "缓存清理",
-    client: "客户端（本机工作台）",
   };
   // 组职责一句话（组标题右侧）
   const GROUP_DESC: Record<string, string> = {
@@ -2525,7 +2531,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     jasna: "识别前先对音轨降噪修复",
     scan: "服务端「扫描目录」的判定规则",
     storage: "服务端临时缓存的清理周期",
-    client: "本机提取并发与服务队列上限（只影响客户端，不改服务端设置）",
   };
   // enum 选项的中文展示（提交值仍是原始值）
   const ENUM_ZH: Record<string, Record<string, string>> = {
@@ -2671,11 +2676,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return;
     }
     body.innerHTML = '<div class="muted">加载设置中…</div>';
-    const ccPromise = platform.kind === "web" && t.getClientConfig
-      ? t.getClientConfig().catch(() => null)  // 取不到不阻断服务端设置展示
-      : Promise.resolve<ClientConfig | null>(null);
-    Promise.all([t.getConfig(name), ccPromise])
-      .then(([items, cc]) => renderConfigForm(name, items, cc))
+    t.getConfig(name)
+      .then((items) => renderConfigForm(name, items))
       .catch((err: Error) => {
         body.innerHTML = `
         <div class="set-note err">
@@ -2686,7 +2688,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
   }
 
-  function renderConfigForm(name: string, items: ConfigItem[], clientCfg: ClientConfig | null) {
+  function renderConfigForm(name: string, items: ConfigItem[]) {
     state.cfgItems = items;
     const e = (state.engines || []).find((x) => x.name === name);
     const groups: Record<string, ConfigItem[]> = {};
@@ -2711,32 +2713,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </div>`;
     }
     html += `
-    <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）；下方「客户端设置」卡片例外，只保存在本机。</div>`;
+    <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）。</div>`;
     // 组件就绪自检卡片（serve 0.2.6+ GET /ready）：打开弹窗即拉取一次
     html += `
     <section class="cfg-sec cfg-sec-ready" data-sec="ready">
       <h4 class="cfg-sec-title">组件就绪${`<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>`}${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
       <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
     </section>`;
-    if (clientCfg) {
-      html += `
-      <section class="cfg-sec cfg-sec-client" data-sec="client">
-        <h4 class="cfg-sec-title">${esc(GROUP_ZH.client)}${GROUP_DESC.client ? `<span class="cfg-sec-desc">${esc(GROUP_DESC.client)}</span>` : ""}</h4>
-        <div class="cfg-sec-body">
-          <div class="cfg-row ccfg-row" data-base="${clientCfg.extract_workers}">
-            <span class="cfg-lab">音轨提取并发${helpIcon("本机（客户端部署机）同时运行 ffmpeg 提取音轨的数量。越大提取越快，但本机 CPU/IO 占用越高。封顶 1 ~ 8，保存后立即生效。")}</span>
-            <input id="ccfg-extract_workers" type="number" min="1" max="8" value="${clientCfg.extract_workers}" spellcheck="false" autocomplete="off"></div>
-          <div class="cfg-row ccfg-row" data-base="${clientCfg.queue_cap}">
-            <span class="cfg-lab">转译并发（服务队列上限）${helpIcon("服务端逐条串行转译。此项为「同时在途任务数上限」≈ 服务队列深度，超出的任务在本机排队等待派发。调低可保护服务端内存/磁盘与队列稳定，也缩小服务重启时丢失排队任务的风险面。封顶 1 ~ 16，保存后立即生效。")}</span>
-            <input id="ccfg-queue_cap" type="number" min="1" max="16" value="${clientCfg.queue_cap}" spellcheck="false" autocomplete="off"></div>
-        </div>
-        <div class="ccfg-foot">
-          <span class="cfg-foot-note">只保存在客户端本机，不影响服务端</span>
-          <span id="ccfg-dirty" class="muted small">无改动</span>
-          <span class="cfg-foot-actions"><button type="button" id="ccfg-save" class="btn" hidden>保存客户端设置</button></span>
-        </div>
-      </section>`;
-    }
     for (const [g, list] of Object.entries(groups)) {
       html += `
       <section class="cfg-sec" data-sec="${esc(g)}">
@@ -2757,8 +2740,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     body.innerHTML = html;
     loadReadiness(name);
     // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
-    // （客户端卡片 .ccfg-row 独立跟踪、独立保存，不混入服务端「保存设置」）
-    body.querySelectorAll<HTMLElement>(".cfg-row:not(.ccfg-row)").forEach((row) => {
+    body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
       const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
       if (!ctl) return;
       const sync = (): void => {
@@ -2779,46 +2761,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
     });
     applyGating(body);
-    // 客户端卡片：独立改动追踪 + 独立保存按钮（不与 serve #cfg-save 混流）
-    const ccfgRows = Array.from(body.querySelectorAll<HTMLElement>(".ccfg-row"));
-    if (ccfgRows.length) {
-      const ccDirty = (): void => {
-        let n = 0;
-        for (const row of ccfgRows) {
-          const ctl = row.querySelector("input") as HTMLInputElement;
-          const changed = ctl.value !== (row.dataset.base ?? "");
-          row.classList.toggle("dirty", changed);
-          if (changed) n++;
-        }
-        const d = $("ccfg-dirty");
-        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
-        const b = $("ccfg-save");
-        if (b) b.hidden = n === 0;
-      };
-      for (const row of ccfgRows) {
-        const ctl = row.querySelector("input") as HTMLInputElement;
-        ctl.addEventListener("input", ccDirty);
-        ctl.addEventListener("change", ccDirty);
-      }
-      ($("ccfg-save") as HTMLButtonElement).onclick = async () => {
-        const ew = parseInt(($("ccfg-extract_workers") as HTMLInputElement).value, 10);
-        const qc = parseInt(($("ccfg-queue_cap") as HTMLInputElement).value, 10);
-        if (isNaN(ew) || ew < 1 || ew > 8) { toast("音轨提取并发需在 1 ~ 8 之间", "err"); return; }
-        if (isNaN(qc) || qc < 1 || qc > 16) { toast("转译并发需在 1 ~ 16 之间", "err"); return; }
-        try {
-          await t.putClientConfig!({ extract_workers: ew, queue_cap: qc });
-          toast("客户端设置已保存（立即生效，无需重启）", "ok");
-          for (const row of ccfgRows) {
-            row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
-          }
-          ccDirty();
-        } catch (e) {
-          toast((e as Error).message, "err");
-        }
-      };
-    }
     ($("cfg-reset") as HTMLButtonElement).onclick = () => {
-      body.querySelectorAll<HTMLElement>(".cfg-row:not(.ccfg-row)").forEach((row) => {
+      body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
         const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
         if (!ctl) return;
         const base = JSON.parse(row.dataset.base ?? '""') as boolean | string;
@@ -3403,6 +3347,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           });
         }
         watchPump = watchPumpImpl;
+        ccWatchCtl = {
+          state: () => wState,
+          set: async (on, pth) => {
+            const r = await b.set(on ? { enabled: true, path: pth } : { enabled: false });
+            if (r.state) { wState = r.state; watchRender(); watchPumpImpl(); } // 面板与 tab 同源刷新
+            return r;
+          },
+          pickDir: async () => {
+            const p = await b.pickDir();
+            if (p) { watchPath.value = p; watchToggle.disabled = false; watchRender(); }
+            return p;
+          },
+        };
 
         watchPath.oninput = () => {
           watchToggle.disabled = !watchPath.value.trim();
@@ -3575,12 +3532,204 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     renderUpSidebar();
   }
 
+  // ---------- 客户端设置 tab（本机工作台并发 + 桌面专属：更新设置 / 文件夹监听） ----------
+  // 每次激活重渲染（与服务设置弹窗一致：每次打开取最新值）；ccViewSeq 丢弃过期异步结果
+  function ccWatchStatusText(st: WatchState | null): string {
+    if (!st) return "监听未启用";
+    const parts: string[] = [];
+    if (st.on) {
+      parts.push(`监听中 · 每 ${Math.round(st.pollMs / 1000)}s`);
+      if (st.processed) parts.push(`已处理 ${st.processed}`);
+    } else {
+      parts.push(st.path ? "未监听" : "未监听 · 请先选择文件夹");
+    }
+    if (st.lastError) parts.push(`监听出错：${st.lastError}`);
+    return parts.join(" · ");
+  }
+
+  function ccWatchRenderBits(st: WatchState | null): void {
+    const pathEl = $("cc-watch-path");
+    if (pathEl) {
+      pathEl.textContent = st?.path || "未选择文件夹";
+      pathEl.classList.toggle("muted", !st?.path);
+    }
+    const statusEl = $("cc-watch-status");
+    if (statusEl) statusEl.textContent = ccWatchStatusText(st);
+    const toggle = $("cc-watch-toggle") as HTMLButtonElement | null;
+    if (toggle) {
+      toggle.textContent = st?.enabled ? "停止监听" : "开始监听";
+      toggle.disabled = !st?.path;
+    }
+  }
+
+  let ccViewSeq = 0;
+  async function renderCcView(): Promise<void> {
+    const body = $("cc-body");
+    if (!body) return;
+    const seq = ++ccViewSeq;
+    body.innerHTML = '<div class="muted small">加载中…</div>';
+    // 并发设置：web = /api/client-config；desktop = IPC（userData/client-config.json 独立落盘）
+    let cc: ClientConfig | null = null;
+    let ccErr = "";
+    if (t.getClientConfig) {
+      try { cc = await t.getClientConfig(); } catch (e) { ccErr = (e as Error).message; }
+    }
+    // 桌面专属数据源：更新设置（与更新弹窗高级区同源 settings.json）+ 文件夹监听（与派单页监听面板同源 watch.json）
+    let upCfg: UpdateSettings | null = upSettings;
+    let ws: WatchState | null = null;
+    if (platform.kind === "desktop") {
+      if (!upCfg) {
+        try {
+          const b = upBridge();
+          upCfg = b ? await b.getSettings() : null;
+          if (upCfg) upSettings = upCfg;
+        } catch { upCfg = null; }
+      }
+      ws = ccWatchCtl ? ccWatchCtl.state() : null;
+    }
+    if (seq !== ccViewSeq) return; // 视图已切走，丢弃过期渲染
+    let html = '<div class="cc-cards">';
+    if (cc) {
+      html += `
+    <section class="cfg-sec cc-card" data-sec="ccfg-concurrency">
+      <h4 class="cfg-sec-title">并发控制<span class="cfg-sec-desc">本机（客户端部署机）资源占用 · 保存后立即生效</span></h4>
+      <div class="cfg-sec-body">
+        <div class="cfg-row ccfg-row" data-base="${cc.extract_workers}">
+          <span class="cfg-lab">音轨提取并发${helpIcon("本机（客户端部署机）同时运行 ffmpeg 提取音轨的数量。越大提取越快，但本机 CPU/IO 占用越高。封顶 1 ~ 8，保存后立即生效。")}</span>
+          <input id="ccfg-extract_workers" type="number" min="1" max="8" value="${cc.extract_workers}" spellcheck="false" autocomplete="off"></div>
+        <div class="cfg-row ccfg-row" data-base="${cc.queue_cap}">
+          <span class="cfg-lab">转译并发（服务队列上限）${helpIcon("服务端逐条串行转译。此项为「同时在途任务数上限」≈ 服务队列深度，超出的任务在本机排队等待派发。调低可保护服务端内存/磁盘与队列稳定，也缩小服务重启时丢失排队任务的风险面。封顶 1 ~ 16，保存后立即生效。")}</span>
+          <input id="ccfg-queue_cap" type="number" min="1" max="16" value="${cc.queue_cap}" spellcheck="false" autocomplete="off"></div>
+      </div>
+      <div class="ccfg-foot">
+        <span class="cfg-foot-note">只保存在客户端本机，不影响服务端</span>
+        <span id="ccfg-dirty" class="muted small">无改动</span>
+        <span class="cfg-foot-actions"><button type="button" id="ccfg-save" class="btn" hidden>保存客户端设置</button></span>
+      </div>
+    </section>`;
+    } else {
+      html += `
+    <section class="cfg-sec cc-card" data-sec="ccfg-concurrency">
+      <h4 class="cfg-sec-title">并发控制<span class="cfg-sec-desc">本机（客户端部署机）资源占用 · 保存后立即生效</span></h4>
+      <div class="set-note err"><div class="set-note-title">无法读取客户端并发设置</div>${esc(ccErr || "接口不可用")}</div>
+    </section>`;
+    }
+    if (platform.kind === "desktop") {
+      html += `
+    <section class="cfg-sec cc-card" data-sec="ccfg-desktop-update">
+      <h4 class="cfg-sec-title">桌面端更新<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">与「检查更新」弹窗高级区同源（settings.json）</span></h4>
+      <div class="cfg-sec-body">
+        <label class="chk-row"><input type="checkbox" id="cc-up-enabled"${upCfg && upCfg.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label>
+        <div class="cfg-row"><span class="cfg-lab">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
+        <input id="cc-up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upCfg?.mirror || "")}"></div>
+        <div class="cfg-row"><span class="cfg-lab">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
+        <input id="cc-up-proxy" class="mono" type="text" placeholder="留空直连 GitHub" value="${esc(upCfg?.proxy || "")}"></div>
+      </div>
+      <div class="ccfg-foot">
+        <span class="cfg-foot-note">保存后立即生效（代理下次检查/下载即走新代理）</span>
+        <span class="cfg-foot-actions"><button type="button" id="cc-up-save" class="btn">保存更新设置</button></span>
+      </div>
+    </section>
+    <section class="cfg-sec cc-card" data-sec="ccfg-desktop-watch">
+      <h4 class="cfg-sec-title">文件夹监听<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">目录新视频自动排队生成字幕（与「生成字幕」页监听面板同源）</span></h4>
+      <div class="cfg-sec-body">
+        <div class="cfg-row"><span class="cfg-lab">监听目录</span>
+        <div class="cc-watch-row"><span id="cc-watch-path" class="mono muted">${esc(ws?.path || "") || "未选择文件夹"}</span><button type="button" class="btn" id="cc-watch-pick">选择文件夹</button></div></div>
+      </div>
+      <div class="ccfg-foot">
+        <span class="cfg-foot-note" id="cc-watch-status">${esc(ccWatchStatusText(ws))}</span>
+        <span class="cfg-foot-actions"><button type="button" class="btn" id="cc-watch-toggle"${ws && ws.path ? "" : " disabled"}>${ws && ws.enabled ? "停止监听" : "开始监听"}</button></span>
+      </div>
+    </section>`;
+    }
+    html += "</div>";
+    body.innerHTML = html;
+    // 并发卡：改动追踪 + 独立保存（原弹窗卡片语义原样迁移）
+    if (cc) {
+      const rows = Array.from(body.querySelectorAll<HTMLElement>(".ccfg-row"));
+      const ccDirty = (): void => {
+        let n = 0;
+        for (const row of rows) {
+          const ctl = row.querySelector("input") as HTMLInputElement;
+          const changed = ctl.value !== (row.dataset.base ?? "");
+          row.classList.toggle("dirty", changed);
+          if (changed) n++;
+        }
+        const d = $("ccfg-dirty");
+        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        const b = $("ccfg-save");
+        if (b) b.hidden = n === 0;
+      };
+      for (const row of rows) {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        ctl.addEventListener("input", ccDirty);
+        ctl.addEventListener("change", ccDirty);
+      }
+      const saveBtn = $("ccfg-save") as HTMLButtonElement | null;
+      if (saveBtn) saveBtn.onclick = async () => {
+        const ew = parseInt(($("ccfg-extract_workers") as HTMLInputElement).value, 10);
+        const qc = parseInt(($("ccfg-queue_cap") as HTMLInputElement).value, 10);
+        if (isNaN(ew) || ew < 1 || ew > 8) { toast("音轨提取并发需在 1 ~ 8 之间", "err"); return; }
+        if (isNaN(qc) || qc < 1 || qc > 16) { toast("转译并发需在 1 ~ 16 之间", "err"); return; }
+        try {
+          await t.putClientConfig!({ extract_workers: ew, queue_cap: qc });
+          toast("客户端设置已保存（立即生效，无需重启）", "ok");
+          for (const row of rows) row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
+          ccDirty();
+        } catch (e) {
+          toast((e as Error).message, "err");
+        }
+      };
+    }
+    // 桌面专属：更新设置（与更新弹窗高级区同数据源，保存后同步侧边栏「自动更新」勾选）
+    const upSave = $("cc-up-save") as HTMLButtonElement | null;
+    if (upSave) {
+      upSave.onclick = async () => {
+        const b = upBridge();
+        if (!b) return;
+        const next = {
+          enabled: ($("cc-up-enabled") as HTMLInputElement).checked,
+          mirror: (($("cc-up-mirror") as HTMLInputElement).value || "").trim(),
+          proxy: (($("cc-up-proxy") as HTMLInputElement).value || "").trim(),
+        };
+        try {
+          upSettings = await b.putSettings(next);
+          const auto = $("up-auto") as HTMLInputElement | null;
+          if (auto) auto.checked = upSettings.enabled;
+          toast("更新设置已保存（立即生效）", "ok");
+        } catch (e) {
+          toast((e as Error).message, "err");
+        }
+      };
+    }
+    // 桌面专属：文件夹监听（与派单页监听面板同数据源）
+    const wPick = $("cc-watch-pick") as HTMLButtonElement | null;
+    if (wPick) {
+      wPick.onclick = async () => {
+        const ctl = ccWatchCtl;
+        if (!ctl) return;
+        const p = await ctl.pickDir();
+        if (p) ccWatchRenderBits(ctl.state());
+      };
+      const wToggle = $("cc-watch-toggle") as HTMLButtonElement;
+      wToggle.onclick = async () => {
+        const ctl = ccWatchCtl;
+        if (!ctl) return;
+        const st = ctl.state();
+        const wantOn = !st?.enabled;
+        const r = await ctl.set(wantOn, (st?.path || "").trim());
+        if (!r.ok) { toast(r.error || "监听设置失败", "err"); return; }
+        if (r.state) ccWatchRenderBits(ctl.state());
+      };
+    }
+  }
+
   // ---------- 共享工作台导航 + 平台必要的桌面窗口控制 ----------
   // Web 与 Desktop 使用同一套导航节点、视图状态和交互；桌面只额外保留窗口控制。
-  const VIEWS = ["engines", "dispatch", "jobs"] as const;
+  const VIEWS = ["engines", "dispatch", "jobs", "ccfg"] as const;
   type ViewName = (typeof VIEWS)[number];
   const secs: Record<ViewName, HTMLElement> = {
-    engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"),
+    engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"), ccfg: $("sec-ccfg"),
   };
   const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>("#nav .view-tab[data-view]"));
   const navBadge = $("nav-badge") as HTMLElement | null;
@@ -3595,6 +3744,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       item.setAttribute("aria-selected", active ? "true" : "false");
     }
     try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
+    if (view === "ccfg") void renderCcView(); // 激活即重渲染（取最新值；seq 丢弃过期异步）
   };
   webShowView(initialView);
   for (const item of navItems) {

@@ -104,7 +104,7 @@ export interface Transport {
   getReadiness?(name: string): Promise<ReadinessPayload>;
   /** 保存设置；失败 throw(detail 或 "<status>") */
   putConfig(name: string, values: Record<string, unknown>): Promise<void>;
-  /** 客户端（本机工作台）并发设置；仅 web 工作台有，desktop 形态无此方法 */
+  /** 客户端（本机工作台）并发设置；web = /api/client-config，desktop = IPC（userData/client-config.json 独立落盘） */
   getClientConfig?(): Promise<import("./types").ClientConfig>;
   putClientConfig?(cfg: import("./types").ClientConfig): Promise<void>;
   /** 整片上传（带进度）；受理成功返回 uploadId 进入轮询 */
