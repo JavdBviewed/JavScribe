@@ -161,6 +161,19 @@ jobs:
     steps:
       # gh release create 需在本地 git 仓库解析 tag → 必须 checkout（本 job 不构建代码）
       - uses: actions/checkout@v4
+      - name: 校验 web 版本 = package.json 版本（web 无独立 tag，随 client 同号）
+        run: |
+          want="$(node -p "require('./package.json').version")"
+          pyproj="$(grep -m1 '^version = ' web/pyproject.toml | cut -d'"' -f2)"
+          initt="$(grep -m1 '__version__' web/src/jav_scribe_web/__init__.py | cut -d'"' -f2)"
+          if [ "$pyproj" != "$want" ]; then
+            echo "::error::web/pyproject.toml 版本 $pyproj 与 package.json $want 不一致"
+            exit 1
+          fi
+          if [ "$initt" != "$want" ]; then
+            echo "::error::web __init__.__version__ $initt 与 package.json $want 不一致"
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist-all

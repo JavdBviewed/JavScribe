@@ -10,7 +10,9 @@
                                 拼到 html_url 前，适配内网/国内网络）
   - JAV_UPDATE_INTERVAL_S       后台检查间隔秒数（默认 86400；GitHub unauth 限流 60/h）
 - tag 规范：`serve-v*` 对应字幕服务（GPU 服务端）Release（exe + ghcr 镜像），
-  `client-v*` 对应 JavScribe Client 桌面端，`web-v*` 仅版本标记（部署即发布）。
+  `client-v*` 对应 JavScribe Client（桌面安装与 web 部署形态同号同发）；
+  web 无独立 tag（部署即发布），版本随 client，唯一源头是根 package.json，
+  web/pyproject.toml 与 __init__.__version__ 跟随同步。
   服务端无自有界面，服务端的新版本提示由前端（本工作台 / 桌面端）展示。
 - 拉取失败保留上一次快照 + 记 last_error；/api/update 永不因网络抛错。
 """

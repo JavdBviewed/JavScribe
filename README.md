@@ -71,7 +71,7 @@ JAV_ENGINES="服务A=http://<服务端IP>:8300" docker compose -f docker/docker-
 | 组件 | 版本号 | 发布方式 |
 |---|---|---|
 | 服务端 `serve` | 独立 `vX.Y.Z` | tag `serve-v*` → CI 打 headless exe（win/linux）+ GitHub Release + ghcr 镜像 |
-| 客户端（Docker + 安装形态） | **同号同发** | tag `client-v*` 与 `web-v*` 同一 commit → CI 出安装包；web 镜像在部署机 `docker compose --build` |
+| 客户端（桌面安装 + web 部署形态） | **同号同发** | tag `client-v*` → CI 出桌面安装包；web 无独立 tag，版本随 client，部署机 `docker compose --build` |
 
 ## 安全要点
 
