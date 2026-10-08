@@ -2994,6 +2994,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function showModal(title: string) {
     $("modal-title").textContent = title;
     $("modal-body").innerHTML = "";
+    $("modal").classList.remove("modal-wide");
     modalBackdrop.hidden = false;
   }
 
@@ -3009,6 +3010,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   function openSettings(name: string) {
     showModal(`「${name}」服务设置`);
+    $("modal").classList.add("modal-wide"); // 仅服务设置加宽一倍（其他复用 #modal 的弹窗不受影响）
     const e = (state.engines || []).find((x) => x.name === name);
     const body = $("modal-body");
     if (!e || !e.has_key) {
@@ -3079,18 +3081,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     html += `
     <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）。</div>`;
-    // 组件就绪自检卡片（serve 0.2.6+ GET /ready）：打开弹窗即拉取一次
+    // tab 分类：总览（组件就绪）+ 各设置组；组顺序 = GROUP_ZH 既定顺序，未知组（服务端新增）排末尾兜底
+    const orderedGroups = [
+      ...Object.keys(GROUP_ZH).filter((k) => groups[k]),
+      ...Object.keys(groups).filter((k) => !(k in GROUP_ZH)),
+    ];
+    const tabBtnHtml = (key: string, label: string, on: boolean): string =>
+      `<button type="button" class="cfg-tab${on ? " on" : ""}" role="tab" data-pane="${esc(key)}" aria-selected="${on ? "true" : "false"}">${esc(label)}<i class="cfg-tab-dot" hidden></i></button>`;
+    html += '<div class="cfg-tabs" role="tablist" id="cfg-tabs">';
+    html += tabBtnHtml("ready", "总览", true);
+    for (const g of orderedGroups) html += tabBtnHtml(g, GROUP_ZH[g] || g, false);
+    html += "</div>";
+    // 总览 pane = 组件就绪自检卡片（serve 0.2.6+ GET /ready）：打开弹窗即拉取一次
     html += `
-    <section class="cfg-sec cfg-sec-ready" data-sec="ready">
-      <h4 class="cfg-sec-title">组件就绪${`<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>`}${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
-      <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
-    </section>`;
-    for (const [g, list] of Object.entries(groups)) {
+    <div class="cfg-tab-pane" data-pane="ready" role="tabpanel">
+      <section class="cfg-sec cfg-sec-ready" data-sec="ready">
+        <h4 class="cfg-sec-title">组件就绪${`<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>`}${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
+        <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
+      </section>
+    </div>`;
+    for (const g of orderedGroups) {
+      const list = groups[g];
       html += `
-      <section class="cfg-sec" data-sec="${esc(g)}">
-        <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
-        <div class="cfg-sec-body">${list.map(configFieldHtml).join("")}</div>
-      </section>`;
+      <div class="cfg-tab-pane" data-pane="${esc(g)}" role="tabpanel" hidden>
+        <section class="cfg-sec" data-sec="${esc(g)}">
+          <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
+          <div class="cfg-sec-body">${list.map(configFieldHtml).join("")}</div>
+        </section>
+      </div>`;
     }
     const hasSecret = items.some((i) => i.type === "secret");
     html += `
@@ -3104,6 +3122,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     </div>`;
     body.innerHTML = html;
     loadReadiness(name);
+    // tab 切换：全部 pane 常驻 DOM 仅显隐（输入值/dirty 态保留）；未保存项在所属 tab 上点圆点
+    const cfgTabs = Array.from(body.querySelectorAll<HTMLButtonElement>(".cfg-tab"));
+    const cfgPanes = Array.from(body.querySelectorAll<HTMLElement>(".cfg-tab-pane"));
+    const syncCfgTabDots = (): void => {
+      for (const p of cfgPanes) {
+        const dot = body.querySelector<HTMLElement>(
+          `.cfg-tab[data-pane="${CSS.escape(p.dataset.pane || "")}"] .cfg-tab-dot`);
+        if (dot) dot.hidden = p.querySelectorAll<HTMLElement>(".cfg-row.dirty").length === 0;
+      }
+    };
+    const showCfgPane = (key: string): void => {
+      for (const tb of cfgTabs) {
+        const on = (tb.dataset.pane || "") === key;
+        tb.classList.toggle("on", on);
+        tb.setAttribute("aria-selected", on ? "true" : "false");
+      }
+      for (const p of cfgPanes) p.hidden = (p.dataset.pane || "") !== key;
+    };
+    for (const tb of cfgTabs) tb.onclick = () => showCfgPane(tb.dataset.pane || "ready");
     // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
     body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
       const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
@@ -3118,6 +3155,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
         const r = $("cfg-reset");
         if (r) r.hidden = n === 0;
+        syncCfgTabDots();
       };
       ctl.addEventListener("input", sync);
       ctl.addEventListener("change", sync);

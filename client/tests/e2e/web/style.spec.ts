@@ -109,7 +109,7 @@ test("设置弹窗：未登记 Key 表单", async ({ page }) => {
   await shot(page, "style-09-settings-keyless", { element: "#modal" });
 });
 
-test("设置弹窗：配置表单（8 组白名单）", async ({ page }) => {
+test("设置弹窗：配置表单（tab 布局：总览 + 设置组两列）", async ({ page }) => {
   await goTab(page, "engines");
   await page.click('article.eng .icon-btn.set');
   await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
@@ -120,6 +120,11 @@ test("设置弹窗：配置表单（8 组白名单）", async ({ page }) => {
   await page.waitForTimeout(200);
   await freezeForShot(page, req);
   await shot(page, "style-10-settings-form", { fullPage: true });
+  // 切「字幕」tab：设置组 pane 两列布局入帧
+  await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
+  await page.waitForTimeout(150);
+  await freezeForShot(page, req);
+  await shot(page, "style-10b-settings-tab-subtitle", { fullPage: true });
 });
 
 test("扫描结果表（字幕标记行）", async ({ page }) => {

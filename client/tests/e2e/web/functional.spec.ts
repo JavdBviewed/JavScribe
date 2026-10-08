@@ -3,7 +3,7 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   WEB_URL, MOCK_URL, MOCK_KEY, FIXTURES, makeScanDir,
   mockReset, mockSeed, mockPause, mockResume, mockConfigMode, mockControl, addEngine, cleanEngines, waitForJobRow, waitForEngineListed, waitForJobsEmpty,
-  resetPipelinePause, mockSpeed, goTab, waitForEngineOnline,
+  resetPipelinePause, mockSpeed, goTab, waitForEngineOnline, waitForEngineKey,
 } from "../helpers";
 import path from "node:path";
 import http from "node:http";
@@ -721,6 +721,7 @@ test("组件就绪自检 /ready：全就绪透传 + 单项异常 + 旧服务/不
 test("服务设置弹窗：组件就绪卡片（全就绪 + 单项异常）", async ({ page }) => {
   await page.goto("/");
   await waitForEngineOnline(page);
+  await waitForEngineKey(page); // 冷进程首开弹窗防 has_key 快照竞态（helper 既有模式）
   await goTab(page, "engines");
   await page.locator('button.set[data-name="mock"]').click();
   await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible();
@@ -736,4 +737,36 @@ test("服务设置弹窗：组件就绪卡片（全就绪 + 单项异常）", as
   await expect(page.locator("#modal .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
   await expect(page.locator("#modal .ready-row.st-fail")).toHaveCount(1);
   await mockReset(req);
+});
+
+test("服务设置弹窗：tab 分类（加宽 + 切换保留输入 + 未保存圆点）", async ({ page }) => {
+  await page.goto("/");
+  await waitForEngineOnline(page);
+  await waitForEngineKey(page); // 冷进程首开弹窗防 has_key 快照竞态（helper 既有模式）
+  await goTab(page, "engines");
+  await page.locator('button.set[data-name="mock"]').click();
+  // 加宽：仅服务设置挂 modal-wide（#modal 多弹窗共用容器）
+  await expect(page.locator("#modal")).toHaveClass(/modal-wide/);
+  // tab 栏：总览 + 8 设置组（mock /config 白名单）；默认激活总览（组件就绪卡可见）
+  const tabs = page.locator("#cfg-tabs .cfg-tab");
+  await expect(tabs).toHaveCount(9);
+  await expect(page.locator('#cfg-tabs .cfg-tab[data-pane="ready"]')).toHaveClass(/on/);
+  await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible({ timeout: 10_000 });
+  // 切到推理引擎：总览隐藏、组 pane 显示
+  await page.locator('#cfg-tabs .cfg-tab[data-pane="infer"]').click();
+  await expect(page.locator("#modal .cfg-sec[data-sec=infer]")).toBeVisible();
+  await expect(page.locator("#modal .cfg-sec-ready")).toBeHidden();
+  // 切走再切回，输入值保留（pane 常驻 DOM 仅显隐）
+  const model = page.locator("#cfg-infer-model");
+  await model.fill("custom-model-x");
+  await page.locator('#cfg-tabs .cfg-tab[data-pane="ready"]').click();
+  await page.locator('#cfg-tabs .cfg-tab[data-pane="infer"]').click();
+  await expect(model).toHaveValue("custom-model-x");
+  // 未保存圆点：推理引擎有、总览无
+  await expect(page.locator('#cfg-tabs .cfg-tab[data-pane="infer"] .cfg-tab-dot')).toBeVisible();
+  await expect(page.locator('#cfg-tabs .cfg-tab[data-pane="ready"] .cfg-tab-dot')).toBeHidden();
+  // 重置改动：圆点清除、回到无改动
+  await page.locator("#cfg-reset").click();
+  await expect(page.locator('#cfg-tabs .cfg-tab[data-pane="infer"] .cfg-tab-dot')).toBeHidden();
+  await expect(page.locator("#cfg-dirty")).toHaveText("无改动");
 });
