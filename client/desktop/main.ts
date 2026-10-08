@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
+import { jobRows, pickJobDetail } from "../core/job-rows";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 import {
   type EmbeddedSub,
@@ -412,7 +413,8 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       summaries.map(async (s) => {
         try {
           const d = await httpJson<any>(entry.url + "/jobs/" + encodeURIComponent(String(s.id)), { timeoutMs: 5000 });
-          return d.data;
+          // 明细仅采纳 200 且带 id 的响应；404 错误体回退摘要（摘要必带 id），杜绝幻行
+          return pickJobDetail(d.status, d.data, s);
         } catch {
           return s; // 单任务明细失败：摘要兜底，不拖垮引擎
         }
@@ -467,70 +469,6 @@ function refresh(): Promise<Snapshot> {
     });
   }
   return inFlight;
-}
-
-/** 任务行展平（等价 web/src/jav_scribe_web/api.py 的 _job_rows） */
-function jobRows(infos: EngineInfo[]): any[] {
-  const rows: any[] = [];
-  for (const info of infos) {
-    for (const job of info._details) {
-      const base = {
-        engine: info.name,
-        job_id: job?.id ?? null,
-        label: job?.label || "",
-        state: job?.state ?? null,
-        created: job?.created ?? null,
-        finished: job?.finished ?? null,
-        source_kind: job?.source_kind ?? null,
-        // 主任务（batch）归属：serve 持久化字段，旧 serve 无字段 → null（单文件行为不变）
-        batch_id: job?.batch_id ?? null,
-        batch_label: job?.batch_label ?? null,
-        batch_paused: !!(job?.batch_id) && info.batch_paused.includes(String(job.batch_id)),
-      };
-      const files = job?.files;
-      if (!files || !files.length) {
-        const total = job?.total || 0;
-        const done = job?.done || 0;
-        const finished = job?.state === "finished";
-        rows.push({
-          ...base,
-          file: job?.label || String(job?.id),
-          status: finished ? "done" : "running",
-          progress: total ? done / total : finished ? 1 : 0,
-          position: "",
-          duration_s: null,
-          position_s: null,
-          message: `${done}/${total}`,
-          output_files: [],
-        });
-      } else {
-        for (const t of files) {
-          rows.push({
-            ...base,
-            file: t?.name || "",
-            status: t?.status,
-            phase: t?.phase ?? null,
-            progress: t?.progress || 0,
-            position: t?.position || "",
-            duration_s: t?.duration_s ?? null,
-            position_s: t?.position_s ?? null,
-            phase_detail: t?.phase_detail || "",
-            eta_s: t?.eta_s ?? null,
-            message: t?.message || "",
-            finished: t?.finished ?? null,
-            output_files: t?.output_files || [],
-          });
-        }
-      }
-    }
-  }
-  // running 优先 + created 降序（JS sort 稳定，等价 Python 的 (running?0:1, -created)）
-  rows.sort(
-    (a, b) =>
-      (a.status === "running" ? 0 : 1) - (b.status === "running" ? 0 : 1) ||
-      ((b.created || 0) - (a.created || 0)),
-  );
-  return rows;
 }
 
 // ---------------------------------------------------------------------------
