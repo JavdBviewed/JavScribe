@@ -107,10 +107,15 @@ test("整片直传（extract-select=server 逃生通道）：上传视频→提�
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
-test("文件夹批量：chip →（2 项）→ 批量完成 toast → 两行看板完成", async ({ page, request }) => {
+test("文件夹批量：待选表手动勾选 →（2 项）→ 批量完成 toast → 两行看板完成", async ({ page, request }) => {
   await slowJobs(request);
   await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录，相对路径自动带上
-  await expect(page.locator("#folder-chip-text")).toHaveText("3 个视频（1 个已有字幕，将跳过）");
+  // 夹具小文件均低于默认「忽略小于 200MB」→ 默认 0 勾选，待选表 3 行
+  await expect(page.locator("#folder-chip-text")).toHaveText("已选 0 / 3");
+  await expect(page.locator("#folder-table tbody tr")).toHaveCount(3);
+  await page.locator("#folder-table tbody tr", { hasText: "video-a.mp4" }).locator("input[type=checkbox]").check();
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
+  await expect(page.locator("#folder-chip-text")).toHaveText("已选 2 / 3");
   await page.selectOption("#engine-select", "mock");
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");
@@ -264,15 +269,35 @@ test("扫描全流程：3 项（1 有字幕）→ 全选 → 入队 3 项 → �
   await expect(page.locator(".job-row .fn", { hasText: "SUB-001.mkv" })).toBeVisible({ timeout: 40_000 });
 });
 
-test("扫描：Windows 路径客户端拦截（toast 引导用选择文件夹）", async ({ page }) => {
+test("扫描：Windows 盘符路径放行（无客户端拦截，校验错误来自服务端）", async ({ page }) => {
   await page.selectOption("#engine-select", "mock");
   await page.locator("#scan-path").fill("D:\\Videos");
   await page.click("#scan-go");
+  // 放行语义：请求已发到服务端，错误来自服务端路径校验（Linux 下 D:\Videos 非绝对路径），
+  // 不再是客户端「请改用上方选择文件夹」拦截
   const t = page.locator("#toasts .toast.err");
-  await expect(t).toBeVisible({ timeout: 5_000 });
-  expect(await t.textContent()).toContain("请改用上方「选择文件夹」");
-  expect(await t.textContent()).toContain("选择文件夹");
+  await expect(t).toBeVisible({ timeout: 15_000 });
+  const text = await t.textContent();
+  expect(text).not.toContain("请改用上方「选择文件夹」");
+  expect(text).not.toContain("本机绝对路径");
+});
+
+test("扫描提交 400 回退：服务读不到本机路径 → 本机提取上传", async ({ page, request }) => {
+  await slowJobs(request);
+  const dir = makeScanDir("javscribe-desktop-scan-__notfound__"); // mock serve 对此目录 400「文件不存在」
+  await page.selectOption("#engine-select", "mock");
+  await page.locator("#scan-path").fill(dir);
+  await page.click("#scan-go");
+  // 本机扫描 3 项（默认 200MB 阈值下全过小不勾；AKDL-002 另有同目录 srt）
+  await expect(page.locator("#scan-table tbody tr")).toHaveCount(3);
+  await page.locator("#scan-table tbody tr", { hasText: "AKDL-001.mp4" }).locator("input[type=checkbox]").check();
+  await page.click("#scan-submit");
+  // 400「文件不存在」→ 自动回退本机提取+上传通路（与「选择文件夹」同链）
+  await expect(page.locator("#toasts .toast", { hasText: "已改为本机提取后上传到该服务" })).toBeVisible({ timeout: 15_000 });
+  // 回退后扫描 UI 清空；任务由任务看板跟踪（本机管线：提取→上传→提交）
   await expect(page.locator("#scan-results")).toBeHidden();
+  await goView(page, "jobs");
+  await expect(page.locator(".job-row .fn", { hasText: "AKDL-001.mp4" })).toBeVisible({ timeout: 40_000 });
 });
 
 test("删除服务：confirm → 卡片移除", async ({ page }) => {

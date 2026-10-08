@@ -549,6 +549,10 @@ const server = http.createServer((req, res) => {
       for (const f of files) {
         if (typeof f !== "string" || !f.startsWith("/")) return sendErr(400, `非法路径: ${f}`);
       }
+      // e2e 缝隙：路径含 __notfound__ → 400「文件不存在」（模拟远程 serve 读不到客户端本机路径；
+      // 与真实 serve validate_submit_files 同形，供「提交 400 回退本机提取上传」用例触发）
+      const nf = files.find((f) => f.includes("__notfound__"));
+      if (nf) return sendErr(400, `文件不存在: ${nf.split("/").pop()}`);
       // 主任务（batch）：body 带 batch → 单 job 多文件 pending 起步（tick 每 job 晋升 1 个，串行；非 batch 保持旧口径）
       const batchId = body.batch_id || null;
       const batchLabel = body.batch_label || null;

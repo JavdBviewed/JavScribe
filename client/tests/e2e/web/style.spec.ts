@@ -45,9 +45,11 @@ test("单文件 chip 选中态", async ({ page }) => {
   await shot(page, "style-03-file-chip", { element: "#sec-dispatch" });
 });
 
-test("文件夹 chip（N 视频 M 已有字幕）", async ({ page }) => {
+test("文件夹 chip + 待选表（默认 0 勾选）", async ({ page }) => {
   await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录
-  await expect(page.locator("#folder-chip-text")).toHaveText("3 个视频（1 个已有字幕，将跳过）");
+  // 夹具小文件均低于默认「忽略小于 200MB」→ 默认 0 勾选，待选表 3 行
+  await expect(page.locator("#folder-chip-text")).toHaveText("已选 0 / 3");
+  await expect(page.locator("#folder-table tbody tr")).toHaveCount(3);
   await freezeForShot(page, req);
   await shot(page, "style-04-folder-chip", { element: "#sec-dispatch" });
 });

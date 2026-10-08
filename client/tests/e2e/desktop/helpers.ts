@@ -28,8 +28,8 @@ const REPO_FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 export const DIST = join(ROOT, "client", "dist-desktop");
 
 /** Desktop 后台扫描的安全夹具：只在 /tmp 建目录，不触碰真实媒体/网盘路径。 */
-export function makeScanDir(): string {
-  const dir = join(tmpdir(), "javscribe-desktop-scan-e2e");
+export function makeScanDir(name = "javscribe-desktop-scan-e2e"): string {
+  const dir = join(tmpdir(), name);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   copyFileSync(join(FIXTURES, "video-a.mp4"), join(dir, "AKDL-001.mp4"));

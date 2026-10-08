@@ -25,7 +25,7 @@ const desktop: DesktopBridge = (window as unknown as { javDesktop: DesktopBridge
 
 function call<T = unknown>(method: string, ...args: string[]): Promise<T> {
   return desktop.call(method, args).then((r) => {
-    if (!r.ok) throw new TransportError(r.error || "未知错误", !!r.network);
+    if (!r.ok) throw new TransportError(r.error || "未知错误", !!r.network, r.code);
     return r.data as T;
   });
 }

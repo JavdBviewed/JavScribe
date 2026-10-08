@@ -32,8 +32,16 @@ export const desktopPlatform: PlatformAdapter = {
   async pickVideoFolder() {
     const items = await desktop.pickVideoFolder();
     if (!items) return null; // 用户取消
-    // 视频过滤/字幕判定由 app.setFolder 统一做（与 web 同一路径）
-    return items.map((it) => shimFile(it.name, it.size, it.path, it.rel));
+    // 视频过滤/字幕判定 main 侧已按「客户端设置 · 扫描规则」算好（_meta 随 shim 进
+    // setFolder；与 web 渲染层同口径，修复旧版 hasSub 恒 false）
+    return items.map((it) => {
+      const f = shimFile(it.name, it.size, it.path, it.rel);
+      f._meta = {
+        sub_status: it.sub_status, sub_name: it.sub_name, sub_token: it.sub_token,
+        no_sub_token: it.no_sub_token, too_small: it.too_small,
+      };
+      return f;
+    });
   },
 
   canWriteBack: (info) => !!info.videoPath,

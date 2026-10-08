@@ -9,6 +9,8 @@ import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, Watch
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, normalizeClientConfig } from "../core/concurrency";
+import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
+import { TransportError } from "../core/transport";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
 import { fmtSrtSpan, fmtSrtTime, parseSrt, type SrtCue, type SrtParseResult } from "../core/srt";
@@ -18,6 +20,8 @@ const DEFAULT_TITLE = "JavScribe 字幕工作台";
 interface AppState {
   file: File | null;
   folderFiles: FolderVideo[] | null;
+  folderChecked: Set<string>;      // 文件夹待选表勾选项（key=rel；有字幕/过小默认不勾，与扫描表同口径）
+  folderPage: number;              // 文件夹待选表当前页（0 起；勾选态全局维护，与翻页互不影响）
   filter: string;
   source: string;                  // 任务来源筛选：all / local（本机派发）/ serve（他端任务）
   busy: boolean;
@@ -66,6 +70,8 @@ function readPageSize(key: string): number {
 const state: AppState = {
   file: null,
   folderFiles: null,
+  folderChecked: new Set(),
+  folderPage: 0,
   filter: "all",
   source: "all",
   busy: false,
@@ -197,6 +203,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const extractSelect = $("extract-select") as HTMLSelectElement;
   const autosave = $("autosave") as HTMLInputElement;
   const scanPath = $("scan-path") as HTMLInputElement;
+  if (platform.kind === "desktop") scanPath.placeholder = "本机绝对路径（如 D:\\Videos 或 /media/jav）";
   const scanGo = $("scan-go") as HTMLButtonElement;
   const scanSubmit = $("scan-submit") as HTMLButtonElement;
   const scanSelectAll = $("scan-select-all") as HTMLInputElement;
@@ -1889,7 +1896,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function pendingCount() {
-    if (state.folderFiles) return state.folderFiles.filter((v) => !v.hasSub).length;
+    if (state.folderFiles) return state.folderChecked.size;
     return state.file ? 1 : 0;
   }
 
@@ -2312,16 +2319,37 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     updateGo();
   };
 
-  // ---------- 选择文件夹（浏览器本地过滤，不依赖服务端） ----------
-  function videoExt(name: string): string {
-    const m = /\.([a-z0-9]{1,8})$/i.exec(name);
-    return m ? m[1].toLowerCase() : "";
+  // ---------- 选择文件夹（本地过滤 + 待选表，规则统一消费「客户端设置 · 扫描规则」） ----------
+  function folderRules(): FolderScanRules {
+    // 与「扫描目录」同源：client config 的 scan_* 键；未设置过 = 内置默认
+    const cc = state.ccfg || ({} as ClientConfig);
+    return {
+      video_exts: cc.scan_video_exts?.length
+        ? cc.scan_video_exts.map((x) => String(x).toLowerCase().replace(/^\./, "")).filter(Boolean)
+        : [...VIDEO_EXTS],
+      subtitle_patterns: cc.scan_subtitle_patterns?.length
+        ? cc.scan_subtitle_patterns.map((x) => (String(x).toLowerCase().startsWith(".") ? String(x).toLowerCase() : "." + String(x).toLowerCase())).filter(Boolean)
+        : [...LOCAL_SUB_PATTERNS],
+      min_size_mb: typeof cc.scan_min_size_mb === "number" ? cc.scan_min_size_mb : 200,
+      has_sub_tokens: Array.isArray(cc.scan_has_sub_tokens) ? cc.scan_has_sub_tokens : [],
+      no_sub_tokens: Array.isArray(cc.scan_no_sub_tokens) ? cc.scan_no_sub_tokens : ["c"],
+    };
+  }
+
+  function folderKey(v: FolderVideo): string {
+    return v.file.webkitRelativePath || v.file.name;
+  }
+  function folderHasSub(v: FolderVideo): boolean {
+    return v.sub_status !== "none";
   }
 
   function clearFolder() {
     state.folderFiles = null;
+    state.folderChecked = new Set();
+    state.folderPage = 0;
     folderInput.value = "";
     $("folder-chip").hidden = true;
+    $("folder-pending").hidden = true;
     resetPipeline();
     updateGo();
   }
@@ -2332,7 +2360,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     fileInput.value = "";
     $("file-chip").hidden = true;
     drop.classList.remove("has-file");
-    // 同目录名集合：用于判断「<stem>.zh.srt / <stem>.srt」是否已随文件夹选中
+    const rules = folderRules();
+    // 同目录名集合：判断「<stem>.zh.srt / <stem>.srt」是否已随文件夹选中
+    //（web 渲染层判定；desktop 原生选择目录 main 侧已判好，随 _meta 带入）
     const byDir = new Map<string, Set<string>>();
     for (const f of files) {
       const rel = f.webkitRelativePath || f.name;
@@ -2342,27 +2372,130 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const vids: FolderVideo[] = [];
     for (const f of files) {
-      if (!VIDEO_EXTS.includes(videoExt(f.name)) || f.size <= 0) continue;
+      if (!folderIsVideo(f.name, rules) || f.size <= 0) continue;
       const rel = f.webkitRelativePath || f.name;
       const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
-      const base = f.name.replace(/\.[^.]+$/, "").toLowerCase();
-      const names = byDir.get(dir) || new Set<string>();
-      const hasSub = LOCAL_SUB_PATTERNS.some((pat) => names.has(base + pat));
-      vids.push({ file: f, hasSub });
+      const meta = f._meta || folderVideoMeta(f.name, f.size, byDir.get(dir) || new Set(), rules);
+      vids.push({ file: f, ...meta });
     }
     if (!vids.length) {
-      toast("该文件夹里没有支持的视频文件（mp4 / mkv / ts / mov …）", "err");
+      toast("该文件夹里没有支持的视频文件（可到「客户端设置 · 扫描规则」调整扩展名）", "err");
       return;
     }
     state.folderFiles = vids;
-    const subN = vids.filter((v) => v.hasSub).length;
-    $("folder-chip-text").textContent = subN
-      ? `${vids.length} 个视频（${subN} 个已有字幕，将跳过）`
-      : `${vids.length} 个视频`;
+    // 默认勾选 = 无字幕项（外部 srt / 标记（名）默认不勾；过小默认不勾可手勾）——与扫描表同口径
+    state.folderChecked = new Set(vids.filter((v) => !folderHasSub(v) && !v.too_small).map(folderKey));
+    state.folderPage = 0;
     $("folder-chip").hidden = false;
+    $("folder-pending").hidden = false;
+    renderFolderTable();
     resetPipeline();
     updateGo();
   }
+
+  function folderSubCell(v: FolderVideo): string {
+    if (v.sub_status === "external") {
+      return `<span class="tag subtag" title="同目录字幕：${esc(v.sub_name || "")}">外部 srt</span>`;
+    }
+    if (v.sub_status === "named") {
+      return `<span class="tag subtag" title="文件名含标记 ${esc(v.sub_token || "")}，按规则视为已压字幕（可在「客户端设置 · 扫描规则」改判）">标记（名）</span>`;
+    }
+    if (v.no_sub_token) {
+      return `<span class="tag subtag ok" title="文件名含标记 ${esc(v.no_sub_token)}，按规则视为无字幕版（可在「客户端设置 · 扫描规则」改判）">无字幕（名）</span>`;
+    }
+    return '<span class="muted" title="本地不检查内嵌字幕轨">未检查</span>';
+  }
+
+  function renderFolderTable(): void {
+    const items = state.folderFiles || [];
+    const PAGE = state.scanPageSize; // 复用扫描表每页行数档位（同一 localStorage 键）
+    const pages = Math.max(1, Math.ceil(items.length / PAGE));
+    const pg = Math.min(Math.max(0, state.folderPage), pages - 1);
+    const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
+    $("folder-table").innerHTML = pageItems.length ? `
+      <table class="scan-table">
+        <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
+        <tbody>
+          ${pageItems.map((v) => `
+            <tr class="${folderHasSub(v) ? "has-sub" : ""}${v.too_small ? " too-small" : ""}">
+              <td class="col-check"><input type="checkbox" data-key="${esc(folderKey(v))}"${state.folderChecked.has(folderKey(v)) ? " checked" : ""}></td>
+              <td class="scan-name mono" title="${esc(folderKey(v))}">${esc(v.file.name)}${v.too_small ? '<span class="tag tinytag" title="低于「忽略小于」阈值，不默认选中；可手动勾选提交">过小</span>' : ""}</td>
+              <td class="mono">${mb(v.file.size)} MB</td>
+              <td class="col-sub">${folderSubCell(v)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>` : '<div class="muted small">该文件夹里没有视频文件</div>';
+    $("folder-table").querySelectorAll("input[type=checkbox]").forEach((cb) => {
+      const input = cb as HTMLInputElement;
+      input.onchange = () => {
+        if (input.checked) state.folderChecked.add(input.dataset.key || "");
+        else state.folderChecked.delete(input.dataset.key || "");
+        updateFolderSummary();
+      };
+    });
+    renderFolderPager(items.length);
+    updateFolderSummary();
+  }
+
+  function renderFolderPager(total: number): void {
+    const el = $("folder-pager");
+    const pages = Math.max(1, Math.ceil(total / state.scanPageSize));
+    if (pages <= 1) { el.hidden = true; el.innerHTML = ""; return; }
+    const pg = Math.min(Math.max(0, state.folderPage), pages - 1);
+    const go = (next: number) => {
+      const clamped = Math.min(Math.max(0, next), pages - 1);
+      if (clamped === state.folderPage) return;
+      state.folderPage = clamped;
+      renderFolderTable();
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    };
+    el.innerHTML = `
+      <button type="button" class="pg-btn txt" id="fpg-prev"${pg === 0 ? " disabled" : ""}>← 上一页</button>
+      <span class="pg-info mono">第 ${pg + 1} / ${pages} 页 · 共 ${total} 个文件</span>
+      <button type="button" class="pg-btn txt" id="fpg-next"${pg >= pages - 1 ? " disabled" : ""}>下一页 →</button>` +
+      `<select id="fpg-size" class="pg-size" title="待选表每页行数" aria-label="每页行数">${PAGE_SIZE_OPTS}</select>`;
+    el.hidden = false;
+    (el.querySelector("#fpg-prev") as HTMLButtonElement).onclick = () => go(pg - 1);
+    (el.querySelector("#fpg-next") as HTMLButtonElement).onclick = () => go(pg + 1);
+    const sizeSel = el.querySelector("#fpg-size") as HTMLSelectElement;
+    sizeSel.value = String(state.scanPageSize);
+    sizeSel.onchange = () => {
+      state.scanPageSize = Number(sizeSel.value) || 10;
+      localStorage.setItem("javweb_scan_pagesize", String(state.scanPageSize));
+      state.folderPage = 0;
+      renderFolderTable();
+    };
+  }
+
+  function updateFolderSummary(): void {
+    const items = state.folderFiles || [];
+    const n = state.folderChecked.size;
+    const nSub = items.filter(folderHasSub).length;
+    const nSmall = items.filter((v) => v.too_small && !state.folderChecked.has(folderKey(v))).length;
+    let text = items.length ? `已选 ${n} / ${items.length}` : "";
+    if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
+    if (nSmall) text += ` · ${nSmall} 个过小未选`;
+    $("folder-count").textContent = text;
+    $("folder-chip-text").textContent = items.length ? `已选 ${n} / ${items.length}` : "";
+    // 「全选」只覆盖非「忽略」文件：too_small 只能手动勾选（与扫描表同口径）
+    const selectable = items.filter((v) => !v.too_small).length;
+    (document.getElementById("folder-select-all") as HTMLInputElement).checked =
+      selectable > 0 && state.folderChecked.size === selectable;
+  }
+
+  (document.getElementById("folder-select-all") as HTMLInputElement).onchange = (ev) => {
+    const checked = (ev.target as HTMLInputElement).checked;
+    const items = state.folderFiles || [];
+    state.folderChecked = checked
+      ? new Set(items.filter((v) => !v.too_small).map(folderKey))
+      : new Set<string>();
+    $("folder-table").querySelectorAll("input[type=checkbox]")
+      .forEach((cb) => {
+        const input = cb as HTMLInputElement;
+        input.checked = state.folderChecked.has(input.dataset.key || "");
+      });
+    updateFolderSummary();
+  };
 
   pickFolder.onclick = async (ev) => {
     ev.stopPropagation();
@@ -2504,28 +2637,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // S4：泵驱动并发派发（基线为串行 for-await；在途封顶下各链并行推进至 cap）。
   // 完成 = 全部链 settled（提交或失败），不等任务终态（终态由任务表记账并释 cap 槽）。
-  function startBatch(engine: string) {
-    const queue = (state.folderFiles || []).filter((v) => !v.hasSub).map((v) => v.file);
-    singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
-    // 主任务（batch）：同一文件夹提交共享 batch_id（单文件上传不套壳）
-    const batch = { id: genBatchId(), label: batchLabelForFolder() };
+  // 公共泵：文件夹批量 / 扫描 400 回退共用（差异只在 finishNote 文案与 afterDone 收尾）。
+  function runDispatchQueue(
+    queue: FolderFile[],
+    engine: string,
+    batch: { id: string; label: string },
+    finishNote: (okN: number, total: number) => string,
+    afterDone: (okN: number) => void,
+  ): void {
     state.busy = true;
     updateGo();
     localStorage.setItem("javweb_engine", engine);
-    preparePipeline(`文件 1/${queue.length}`);
     const total = queue.length;
     let okN = 0, started = 0, settled = 0, done = false;
     const finish = (): void => {
       if (done) return;
       done = true;
       batchStartNext = null;
-      showStatus(
-        okN === total
-          ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
-          : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
-        okN ? "ok" : "err"
-      );
-      finishBatch();
+      showStatus(finishNote(okN, total), okN ? "ok" : "err");
+      afterDone(okN);
       refresh();
       if (okN > 0) webShowView("jobs"); // 批量完成进任务看板
     };
@@ -2557,16 +2687,73 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         })();
       }
     };
+    if (total > 0) preparePipeline(`文件 1/${total}`); // 空队列不亮管线
     startNext();
     if (started < total) batchStartNext = startNext; // 封顶等待：泵重触发
-    if (settled === total) finish(); // 空队列（全有字幕）
+    if (settled === total) finish(); // 空队列
+  }
+
+  function startBatch(engine: string) {
+    // 待选表：只提交勾选的项（旧「全有字幕自动跳过」改由表内勾选表达）
+    const queue = (state.folderFiles || [])
+      .filter((v) => state.folderChecked.has(folderKey(v)))
+      .map((v) => v.file);
+    singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
+    if (!queue.length) return;
+    // 主任务（batch）：同一文件夹提交共享 batch_id（单文件上传不套壳）
+    const batch = { id: genBatchId(), label: batchLabelForFolder() };
+    runDispatchQueue(
+      queue,
+      engine,
+      batch,
+      (okN, total) => okN === total
+        ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
+        : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
+      () => finishBatch(),
+    );
+  }
+
+  // 「扫描目录」400 回退：所选服务读不到本机路径（浏览器电脑的盘符路径）→ 本机提取后上传
+  function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string }) {
+    const queue: FolderFile[] = files.map((p) => {
+      const it = state.scanItems.find((i) => i.path === p);
+      const f = new File([new Blob()], it ? it.name : p.split(/[\\/]/).pop() || p) as FolderFile;
+      if (it) Object.defineProperty(f, "size", { value: it.size, configurable: true });
+      f._localPath = p;
+      return f;
+    });
+    // 清扫描 UI（回退后任务由任务看板跟踪）
+    state.scanItems = [];
+    state.scanChecked = new Set();
+    state.lastScan = null;
+    state.scanPage = 0;
+    $("scan-pager").hidden = true;
+    $("scan-results").hidden = true;
+    $("scan-submit").hidden = true;
+    $("scan-table").innerHTML = "";
+    runDispatchQueue(
+      queue,
+      engine,
+      batch,
+      (okN, total) => okN === total
+        ? `回退完成：本机提取上传已提交 ${okN}/${total} 项，见「字幕任务」`
+        : `回退完成：成功 ${okN}/${total} 项，其余失败`,
+      () => {
+        state.busy = false;
+        updateGo();
+        watchPump();
+      },
+    );
   }
 
   function finishBatch() {
     state.busy = false;
     state.folderFiles = null;
+    state.folderChecked = new Set();
+    state.folderPage = 0;
     folderInput.value = "";
     $("folder-chip").hidden = true;
+    $("folder-pending").hidden = true;
     updateGo();
     watchPump();
   }
@@ -3398,10 +3585,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         return;
       }
     }
-    if (/^[a-zA-Z]:[\\/]/.test(path)) {
-      toast(platform.kind === "desktop"
-        ? "「扫描目录」需要本机绝对路径（如 /media/jav）；盘符路径（如 D:\\Videos）请改用上方「选择文件夹」"
-        : "这是浏览器电脑的本地路径（如 D:\\Videos）。「扫描目录」只能读客户端部署机上的目录（如 /media/jav）；要处理浏览器电脑上的文件夹，请用上方「选择文件夹」", "err");
+    if (platform.kind === "web" && /^[a-zA-Z]:[\\/]/.test(path)) {
+      toast("这是浏览器电脑的本地路径（如 D:\\Videos）。「扫描目录」只能读客户端部署机上的目录（如 /media/jav）；要处理浏览器电脑上的文件夹，请用上方「选择文件夹」", "err");
       return;
     }
     scanGo.disabled = true;
@@ -3443,7 +3628,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (!items.length) {
       $("scan-table").innerHTML =
         '<div class="muted small">没有找到符合条件的视频文件。可到「客户端设置 · 扫描规则」调整扩展名'
-      + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
+      + (platform.kind === "web"
+        ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」"
+        : "；路径需被所选服务可读（本地服务可填 D:\\Videos 等本机路径）") + "）</div>";
       renderScanPager(0);
     } else {
       const PAGE = state.scanPageSize;
@@ -3603,6 +3790,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       refresh();
       webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
+      if (platform.kind === "desktop" && e instanceof TransportError && e.code === "not-found") {
+        toast("所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
+        dispatchLocalScanPaths(engine, files, { id: genBatchId(), label: batchLabelForScan() });
+        return;
+      }
       toast((e as Error).message, "err");
     } finally {
       updateScanSummary();

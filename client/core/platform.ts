@@ -1,3 +1,4 @@
+import type { FolderVideoMeta } from "./folder-scan";
 // 平台适配层：UI 共享层（ui/app.ts）里的四类"平台动词"
 // （选文件 / 选文件夹 / 写回源目录 / 触发下载）按形态分派：
 //   - web 形态（platform-web）：File System Access API + <input type=file> 兜底
@@ -16,8 +17,21 @@ export interface PickedFile {
 }
 
 /** 「选择文件夹」里的视频项（含所在目录句柄，用于完成后写回源目录） */
-export type FolderFile = File & { _dirHandle?: FileSystemDirectoryHandle | null; _localPath?: string };
-export interface FolderVideo { file: FolderFile; hasSub: boolean; }
+export type FolderFile = File & {
+  _dirHandle?: FileSystemDirectoryHandle | null;
+  _localPath?: string;
+  /** main 进程侧已判定的字幕/过小元数据（desktop 原生选择目录时携带；缺省则渲染层按扫描规则判定） */
+  _meta?: FolderVideoMeta;
+};
+export interface FolderVideo {
+  file: FolderFile;
+  /** 字幕判定（与「扫描目录」同口径）：external（同目录 srt）/ named（文件名标记）/ none */
+  sub_status: "external" | "named" | "none";
+  sub_name: string | null;
+  sub_token: string | null;
+  no_sub_token: string | null;
+  too_small: boolean;
+}
 
 /** 任务完成后写回所需上下文（dispatch 时捕获） */
 export interface WriteBackInfo {

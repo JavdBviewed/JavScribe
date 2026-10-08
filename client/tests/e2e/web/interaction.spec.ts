@@ -242,9 +242,15 @@ test("整片上传回退路径（extract-select=server）：上传视频→提�
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
-test("文件夹批量：chip 文案 → 顺序流水线 1/2 → 批量完成（有字幕跳过）", async ({ page }) => {
+test("文件夹批量：待选表手动勾选 → 顺序流水线 1/2 → 批量完成", async ({ page }) => {
   await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录，相对路径自动带上
-  await expect(page.locator("#folder-chip-text")).toHaveText("3 个视频（1 个已有字幕，将跳过）");
+  // 夹具小文件均低于默认「忽略小于 200MB」→ 默认 0 勾选，待选表 3 行
+  await expect(page.locator("#folder-chip-text")).toHaveText("已选 0 / 3");
+  await expect(page.locator("#folder-table tbody tr")).toHaveCount(3);
+  // 手动勾选两个无字幕项（video-c 同目录带 zh.srt，不勾不提交）
+  await page.locator("#folder-table tbody tr", { hasText: "video-a.mp4" }).locator("input[type=checkbox]").check();
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
+  await expect(page.locator("#folder-chip-text")).toHaveText("已选 2 / 3");
   await page.selectOption("#engine-select", "mock");
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");

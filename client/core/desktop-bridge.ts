@@ -9,6 +9,8 @@ export interface TCallResult {
   data?: unknown;
   error?: string;
   network?: boolean;
+  /** 结构化错误码（如 not-found=服务读不到本机路径，渲染层据此回退本机提取+上传） */
+  code?: string;
 }
 
 /** 上传字节进度（main 进程 httpPutBytes ≥100ms 节流推送） */
@@ -45,12 +47,18 @@ export interface PickFileResult {
   size: number;
 }
 
-/** 文件夹枚举项：rel 含根目录名（与 web webkitRelativePath 同构） */
+/** 文件夹枚举项：rel 含根目录名（与 web webkitRelativePath 同构）；
+ *  字幕/过小判定 main 侧按「客户端设置 · 扫描规则」算好回传（与 web 渲染层同口径） */
 export interface PickFolderItem {
   path: string;
   name: string;
   size: number;
   rel: string;
+  sub_status: "external" | "named" | "none";
+  sub_name: string | null;
+  sub_token: string | null;
+  no_sub_token: string | null;
+  too_small: boolean;
 }
 
 export interface FileOpResult {

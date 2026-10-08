@@ -36,10 +36,12 @@ export type UploadDispatch =
 
 export class TransportError extends Error {
   network = false;
-  constructor(message: string, network = false) {
+  code: string | null = null;
+  constructor(message: string, network = false, code?: string | null) {
     super(message);
     this.name = "TransportError";
     this.network = network;
+    this.code = code ?? null;
   }
 }
 

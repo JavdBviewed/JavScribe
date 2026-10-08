@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
+import { folderIsVideo, folderTokensIn, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { jobRows, pickJobDetail } from "../core/job-rows";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 import {
@@ -514,18 +515,11 @@ const DESKTOP_SCAN_DEFAULTS = {
 };
 // 文件名 token 切分：连续字母数字段（- 空格 _ . [ ] 等分隔均切开）；整词相等匹配
 // 天然排除粘番号（SSIS-123C）、CD 集数（CD1/1CD）、词内词（Uncut/CUT）。
-const _NAME_TOKEN_RE = /[A-Za-z0-9]+/g;
 const _SCAN_TOKEN_RE = /^[a-z0-9]{1,16}$/;
 
-/** 文件名按 token 整词匹配标记列表（大小写不敏感）：按列表顺序返回首个命中小写标记；未命中 null。 */
+/** 文件名按 token 整词匹配（语义单点在 core/folder-scan.ts；此处保留旧名供扫描项判定复用） */
 function scanTokensIn(name: string, tokens: string[]): string | null {
-  if (!name || !tokens.length) return null;
-  const parts = new Set((name.match(_NAME_TOKEN_RE) || []).map((x) => x.toLowerCase()));
-  for (const tok of tokens) {
-    const t = String(tok).toLowerCase();
-    if (t && parts.has(t)) return t;
-  }
-  return null;
+  return folderTokensIn(name, tokens);
 }
 
 type DesktopScanOptions = {
@@ -1084,15 +1078,48 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
 //   dirNames 顺带收集每个目录的小写文件名集合（「同 stem 已有字幕」判定用，与 setFolder 规则一致）
 // ---------------------------------------------------------------------------
 
-interface WalkedVideo { path: string; name: string; size: number; rel: string; }
+interface WalkedVideo {
+  path: string; name: string; size: number; rel: string;
+  // 字幕/过小判定（按「客户端设置 · 扫描规则」；与 web 渲染层 folderVideoMeta 同口径）
+  sub_status: "external" | "named" | "none";
+  sub_name: string | null;
+  sub_token: string | null;
+  no_sub_token: string | null;
+  too_small: boolean;
+}
 
-function walkVideos(root: string, dirNames?: Map<string, Set<string>>): WalkedVideo[] {
+function walkVideos(
+  root: string,
+  options?: Partial<DesktopScanOptions>,
+  dirNames?: Map<string, Set<string>>,
+): WalkedVideo[] {
+  // 选项默认吃本机 client config（「客户端设置 · 扫描规则」）；未传=全默认
+  const opts = safeScanOptions(undefined, options ?? clientScanCfg());
+  const rules: FolderScanRules = {
+    video_exts: opts.video_exts,
+    subtitle_patterns: opts.subtitle_patterns,
+    min_size_mb: opts.min_size_mb,
+    has_sub_tokens: opts.has_sub_tokens,
+    no_sub_tokens: opts.no_sub_tokens,
+  };
+  const names = dirNames ?? new Map<string, Set<string>>();
   const videos: WalkedVideo[] = [];
-  walkTree(root, path.basename(root), videos, dirNames ?? new Map<string, Set<string>>());
+  walkTree(root, path.basename(root), videos, names, rules);
+  // 第二遍：每视频按同目录文件名集判定字幕（walk 完成后各目录集合已齐全）
+  for (const v of videos) {
+    const meta = folderVideoMeta(v.name, v.size, names.get(path.dirname(v.path)) ?? new Set(), rules);
+    v.sub_status = meta.sub_status;
+    v.sub_name = meta.sub_name;
+    v.sub_token = meta.sub_token;
+    v.no_sub_token = meta.no_sub_token;
+    v.too_small = meta.too_small;
+  }
   return videos;
 }
 
-function walkTree(dir: string, rel: string, videos: WalkedVideo[], dirNames: Map<string, Set<string>>): void {
+function walkTree(
+  dir: string, rel: string, videos: WalkedVideo[], dirNames: Map<string, Set<string>>, rules: FolderScanRules,
+): void {
   if (videos.length >= 5000) return;
   let entries: fs.Dirent[];
   try {
@@ -1108,14 +1135,16 @@ function walkTree(dir: string, rel: string, videos: WalkedVideo[], dirNames: Map
     names.add(e.name.toLowerCase());
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      walkTree(full, rel + "/" + e.name, videos, dirNames);
+      walkTree(full, rel + "/" + e.name, videos, dirNames, rules);
     } else if (e.isFile()) {
-      const m = /\.([a-z0-9]{1,8})$/i.exec(e.name);
-      if (!m || !VIDEO_EXTS.includes(m[1].toLowerCase())) continue;
+      if (!folderIsVideo(e.name, rules)) continue;
       try {
         const size = fs.statSync(full).size;
         if (size <= 0) continue;
-        videos.push({ path: full, name: e.name, size, rel: rel + "/" + e.name });
+        videos.push({
+          path: full, name: e.name, size, rel: rel + "/" + e.name,
+          sub_status: "none", sub_name: null, sub_token: null, no_sub_token: null, too_small: false,
+        });
       } catch {
         /* 权限怪癖 / 扫描中途消失：跳过 */
       }
@@ -1462,7 +1491,16 @@ function registerIpc(): void {
             }),
             timeoutMs: 30000,
           });
-          if (r.status !== 201) throw configError(r.status, r.data);
+          if (r.status !== 201) {
+            const err = configError(r.status, r.data);
+            // 400「文件不存在」= 服务读不到本机路径（远程服务场景）：结构化上抛，
+            // 渲染层据此自动回退本机提取+上传
+            const bodyErr = (r.data as { error?: unknown })?.error;
+            if (r.status === 400 && typeof bodyErr === "string" && bodyErr.startsWith("文件不存在")) {
+              (err as Error & { code?: string }).code = "not-found";
+            }
+            throw err;
+          }
           const d = r.data as { job_id?: string; files?: number };
           if (batch && d?.job_id) batchUpsert(batch.id, batch.label || "", entry.name, String(d.job_id));
           return { ok: true, data: { files: Number(d?.files || 0), jobId: String(d?.job_id || "") } };
@@ -1497,8 +1535,11 @@ function registerIpc(): void {
           return { ok: false, error: "unknown method: " + args?.method };
       }
     } catch (e) {
-      const err = e as Error & { network?: boolean };
-      return { ok: false, error: err.message || String(e), network: !!err.network };
+      const err = e as Error & { network?: boolean; code?: string };
+      return {
+        ok: false, error: err.message || String(e), network: !!err.network,
+        ...(err.code ? { code: err.code } : {}),
+      };
     }
   });
 
@@ -1698,7 +1739,7 @@ function registerIpc(): void {
       properties: ["openDirectory"],
     });
     if (r.canceled || !r.filePaths.length) return null;
-    return walkVideos(r.filePaths[0]);
+    return walkVideos(r.filePaths[0], safeScanOptions(undefined, clientScanCfg()));
   });
 
   // 通用目录选择（「扫描目录」浏览按钮；title 可自定义）
@@ -2419,7 +2460,7 @@ async function watchTickInner(): Promise<void> {
   }
   try {
     const dirNames = new Map<string, Set<string>>();
-    const videos = walkVideos(root, dirNames);
+    const videos = walkVideos(root, undefined, dirNames); // 监听只需视频列表，字幕判定用不到
     const processed = new Set(watchSettings.processed);
     const nowSeen = new Map<string, { size: number; mtimeMs: number }>();
     for (const v of videos) {

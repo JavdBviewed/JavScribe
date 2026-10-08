@@ -85,7 +85,7 @@ test("派单栏结构（提取模式三选项桌面措辞 + autosave）", async 
 
 test("扫描面板结构（客户端部署机目录语义 + 桌面本机文案）", async ({ page }) => {
   await expect(page.locator(".scan-title")).toHaveText("扫描客户端目录");
-  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "例如 /mnt/115/JPMV/115DZL");
+  await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "本机绝对路径（如 D:\\Videos 或 /media/jav）");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
   await expect(page.locator(".scan-head .muted")).toHaveText(/扫描运行 JavScribe 的这台机器/);

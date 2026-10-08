@@ -118,6 +118,15 @@
       <button type="button" id="folder-x" class="icon-btn" title="清除文件夹">&#10005;</button>
     </div>
 
+    <div id="folder-pending" hidden>
+      <div class="scan-summary">
+        <label class="chk-row"><input type="checkbox" id="folder-select-all"><span>全选</span></label>
+        <span id="folder-count" class="muted small mono"></span>
+      </div>
+      <div id="folder-table" class="table-wrap"></div>
+      <div id="folder-pager" class="pager" hidden></div>
+    </div>
+
     <div id="dispatch-bar">
       <label class="field">
         <span class="field-label">选择服务<span class="help" tabindex="0" data-tip="选择由哪台字幕服务端处理：音轨上传到该服务、字幕在该服务上生成。选「⚖ 自动均衡」（≥2 台服务时出现）则每台新任务派发时实时分给在途任务最少的在线服务；服务卡片上的「参与均衡」可临时把某台移出均衡池。">?</span></span>
