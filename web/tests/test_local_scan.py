@@ -17,7 +17,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from jav_scribe_web import localscan  # noqa: E402
@@ -57,13 +56,33 @@ def test_normalize_rejects_bad_rules() -> None:
             pass
 
 
+def test_normalize_scan_tokens() -> None:
+    """文件名标记 token 归一化：逗号分隔字符串或列表 → 小写去重；空列表合法。"""
+    assert localscan.normalize_scan_tokens("c, C ,d", "has_sub_tokens") == ["c", "d"]
+    assert localscan.normalize_scan_tokens(["C", "c"], "no_sub_tokens") == ["c"]
+    assert localscan.normalize_scan_tokens("", "has_sub_tokens") == []
+    assert localscan.normalize_scan_tokens([], "no_sub_tokens") == []
+    for bad in ("c d", ".c", "x" * 17, 5, None, {"c": 1}):
+        try:
+            localscan.normalize_scan_tokens(bad, "has_sub_tokens")
+            raise AssertionError(f"应拒绝 {bad!r}")
+        except localscan.ScanError:
+            pass
+    try:
+        too_many = ",".join(f"t{i}" for i in range(201))
+        localscan.normalize_scan_tokens(too_many, "has_sub_tokens")
+        raise AssertionError("超 200 项应拒绝")
+    except localscan.ScanError:
+        pass
+
+
 def test_cfg_from_items_merges_defaults() -> None:
     # 缺键必须回落到默认规则（不能空集 -> 扫描全空）
     base = localscan.cfg_from_items([])
     assert base == copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
     sc = localscan._scan_cfg(base)
     assert len(sc["exts"]) >= 10 and ".srt" in sc["pats"] and sc["recurse"] is True
-    assert sc["min_size_mb"] == 200 and sc["naming_c"] == "no_sub"
+    assert sc["min_size_mb"] == 200 and sc["has_sub_tokens"] == [] and sc["no_sub_tokens"] == ["c"]
 
     cfg = localscan.cfg_from_items([
         {"path": "scan.video_exts", "value": ["mkv"]},
@@ -181,7 +200,7 @@ def test_standalone_c_heuristic() -> None:
         assert not localscan.standalone_c_in(n), n
 
 
-def test_scan_min_size_and_naming_c() -> None:
+def test_scan_min_size_and_name_tokens() -> None:
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         (d / "SSIS-123-C.mp4").write_bytes(b"x" * 1000)
@@ -190,11 +209,12 @@ def test_scan_min_size_and_naming_c() -> None:
         cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
         cfg["subtitle"]["skip_embedded"] = "off"
 
-        # 默认 200MB：全部过小；独立 C 默认 no_sub ⇒ 仅信息标，不触发确认
+        # 默认：c=疑似无字幕 ⇒ 仅信息标（带命中 token），不触发确认
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         assert len(by) == 3 and all(i["too_small"] for i in by.values())
         c = by["SSIS-123-C.mp4"]
         assert c["name_no_sub"] is True and c["name_sub"] is False
+        assert c["name_no_sub_token"] == "c" and c["name_sub_token"] is None
         assert c["has_subtitle"] is False and c["subtitle_status"] == "none"
 
         # 阈值 1MB：只有 1KB 的过小
@@ -207,22 +227,32 @@ def test_scan_min_size_and_naming_c() -> None:
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         assert not any(i["too_small"] for i in by.values())
 
-        # no_sub：仅信息标，不改变 has_subtitle / 状态
+        # 疑似已压字幕标记命中：标记（名）→ 已压字幕
         cfg["scan"]["min_size_mb"] = 1
-        cfg["scan"]["naming_c"] = "no_sub"
+        cfg["scan"]["has_sub_tokens"] = ["c"]
+        cfg["scan"]["no_sub_tokens"] = []
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         c = by["SSIS-123-C.mp4"]
-        assert c["name_no_sub"] is True and c["name_sub"] is False
+        assert c["name_sub"] is True and c["name_sub_token"] == "c"
+        assert c["has_subtitle"] is True and c["subtitle_status"] == "named"
+
+        # 双列表同时命中 → 无字幕优先（保守）
+        cfg["scan"]["no_sub_tokens"] = ["c"]
+        by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
+        c = by["SSIS-123-C.mp4"]
+        assert c["name_sub"] is False and c["name_no_sub"] is True
+        assert c["name_sub_token"] is None and c["name_no_sub_token"] == "c"
         assert c["has_subtitle"] is False and c["subtitle_status"] == "none"
 
-        # off：不识别
-        cfg["scan"]["naming_c"] = "off"
+        # 双空 = 不识别
+        cfg["scan"]["has_sub_tokens"] = []
+        cfg["scan"]["no_sub_tokens"] = []
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         c = by["SSIS-123-C.mp4"]
         assert c["name_sub"] is False and c["name_no_sub"] is False
 
         # 优先级：外部 srt > named
-        cfg["scan"]["naming_c"] = "has_sub"
+        cfg["scan"]["has_sub_tokens"] = ["c"]
         (d / "SSIS-123-C.zh.srt").write_text(SRT_OK.decode())
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         c = by["SSIS-123-C.mp4"]
@@ -327,74 +357,62 @@ def _make_tree(td: str) -> Path:
 
 
 def test_local_scan_api_rules_and_errors() -> None:
-    orig_config = JavScribeEngine.config
+    with tempfile.TemporaryDirectory() as td:
+        store, _poller = _make_store_and_poller(td)
+        media = _make_tree(td)
+        client = TestClient(build_app(store, _poller))
+        with client:
+            # client config 无扫描段 → 内置默认
+            r = client.get(
+                "/api/scan/local",
+                params={"engine": "车间A", "path": str(media)},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["rules"] == "defaults" and body["mapped"] is False
+            assert [it["name"] for it in body["items"]] == ["a.mp4", "b.mkv"]
+            assert body["has_sub_tokens"] == [] and body["no_sub_tokens"] == ["c"]
 
-    async def fake_unreachable(self):
-        raise httpx.ConnectError("boom")
+            # 客户端设置扫描段生效（部分合并：只发扩展名，其余保持默认）
+            r = client.put("/api/client-config", json={"scan_video_exts": "mkv"})
+            assert r.status_code == 200, r.text
+            assert r.json()["config"]["scan_video_exts"] == ["mkv"]
+            r = client.get(
+                "/api/scan/local",
+                params={"engine": "车间A", "path": str(media)},
+            )
+            body = r.json()
+            assert body["rules"] == "client"
+            assert [it["name"] for it in body["items"]] == ["b.mkv"]
+            assert body["min_size_mb"] == 200
 
-    async def fake_engine_cfg(self):
-        return {
-            "items": [
-                {"path": "scan.video_exts", "value": ["mkv"]},
-                {"path": "subtitle.skip_embedded", "value": "off"},
-            ],
-        }
+            # 错误映射
+            assert client.get(
+                "/api/scan/local", params={"engine": "nope", "path": str(media)}
+            ).status_code == 404
+            r = client.get(
+                "/api/scan/local",
+                params={"engine": "车间A", "path": "relative/x"},
+            )
+            assert r.status_code == 400 and "需要绝对路径" in r.json()["detail"]
+            r = client.get(
+                "/api/scan/local",
+                params={"engine": "车间A", "path": "/no/such/dir"},
+            )
+            assert r.status_code == 400 and "路径不存在" in r.json()["detail"]
 
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            store, _poller = _make_store_and_poller(td)
-            media = _make_tree(td)
-            JavScribeEngine.config = fake_unreachable  # 引擎不可达 -> 内置默认
-            client = TestClient(build_app(store, _poller))
-            with client:
-                r = client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": str(media)},
-                )
-                assert r.status_code == 200, r.text
-                body = r.json()
-                assert body["rules"] == "defaults" and body["mapped"] is False
-                assert [it["name"] for it in body["items"]] == ["a.mp4", "b.mkv"]
-
-                # 引擎自定义规则生效
-                JavScribeEngine.config = fake_engine_cfg
-                r = client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": str(media)},
-                )
-                body = r.json()
-                assert body["rules"] == "engine"
-                assert [it["name"] for it in body["items"]] == ["b.mkv"]
-
-                # 错误映射
-                assert client.get(
-                    "/api/scan/local", params={"engine": "nope", "path": str(media)}
-                ).status_code == 404
-                r = client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": "relative/x"},
-                )
-                assert r.status_code == 400 and "需要绝对路径" in r.json()["detail"]
-                r = client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": "/no/such/dir"},
-                )
-                assert r.status_code == 400 and "路径不存在" in r.json()["detail"]
-
-                r = client.post(
-                    "/api/scan/local/submit",
-                    json={"engine": "车间A", "files": [str(media / "c.txt")]},
-                )
-                assert r.status_code == 400 and "不是受支持的视频文件" in r.json()["detail"]
-                r = client.post(
-                    "/api/scan/local/submit",
-                    json={"engine": "车间A", "files": []},
-                )
-                assert r.status_code == 400
-                r = client.post("/api/scan/local/submit", json={"engine": "nope"})
-                assert r.status_code == 404
-    finally:
-        JavScribeEngine.config = orig_config
+            r = client.post(
+                "/api/scan/local/submit",
+                json={"engine": "车间A", "files": [str(media / "c.txt")]},
+            )
+            assert r.status_code == 400 and "不是受支持的视频文件" in r.json()["detail"]
+            r = client.post(
+                "/api/scan/local/submit",
+                json={"engine": "车间A", "files": []},
+            )
+            assert r.status_code == 400
+            r = client.post("/api/scan/local/submit", json={"engine": "nope"})
+            assert r.status_code == 404
 
 
 def _make_video(td: str, name: str = "testvid.mp4") -> Path:
@@ -410,63 +428,62 @@ def _make_video(td: str, name: str = "testvid.mp4") -> Path:
     return p
 
 
-def test_local_scan_api_size_and_naming_overrides() -> None:
-    orig_config = JavScribeEngine.config
+def test_local_scan_api_client_cfg_overrides() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        store, _poller = _make_store_and_poller(td)
+        media = Path(td) / "media2"
+        media.mkdir()
+        (media / "SSIS-123-C.mp4").write_bytes(b"x" * 1000)
+        (media / "SSIS-123C.mp4").write_bytes(b"x" * 1000)
+        (media / "big.mp4").write_bytes(b"x" * 3 * 1024 * 1024)
+        client = TestClient(build_app(store, _poller))
+        with client:
+            # 默认 200MB 全过小；c 整词命中 no_sub；粘番号 123C 不命中
+            r = client.get(
+                "/api/scan/local", params={"engine": "车间A", "path": str(media)})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["min_size_mb"] == 200 and body["rules"] == "defaults"
+            by = {it["name"]: it for it in body["items"]}
+            assert all(it["too_small"] for it in by.values())
+            assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
+            assert by["SSIS-123-C.mp4"]["name_no_sub_token"] == "c"
+            assert by["SSIS-123C.mp4"]["name_sub"] is False
+            assert by["SSIS-123C.mp4"]["name_no_sub"] is False
 
-    async def fake_unreachable(self):
-        raise httpx.ConnectError("boom")
+            # PUT 覆盖：忽略小于 1MB
+            r = client.put("/api/client-config", json={"scan_min_size_mb": 1})
+            assert r.status_code == 200, r.text
+            r = client.get(
+                "/api/scan/local", params={"engine": "车间A", "path": str(media)})
+            body = r.json()
+            assert body["min_size_mb"] == 1 and body["rules"] == "client"
+            by = {it["name"]: it for it in body["items"]}
+            assert by["big.mp4"]["too_small"] is False
+            assert by["SSIS-123-C.mp4"]["too_small"] is True
+            assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
 
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            store, _poller = _make_store_and_poller(td)
-            media = Path(td) / "media2"
-            media.mkdir()
-            (media / "SSIS-123-C.mp4").write_bytes(b"x" * 1000)
-            (media / "SSIS-123C.mp4").write_bytes(b"x" * 1000)
-            (media / "big.mp4").write_bytes(b"x" * 3 * 1024 * 1024)
-            JavScribeEngine.config = fake_unreachable  # 内置默认规则
-            client = TestClient(build_app(store, _poller))
-            with client:
-                # 默认 200MB：全部过小；独立 C 默认 no_sub => 信息标，粘番号 C => none
-                r = client.get(
-                    "/api/scan/local", params={"engine": "车间A", "path": str(media)})
-                assert r.status_code == 200, r.text
-                body = r.json()
-                assert body["min_size_mb"] == 200 and body["naming_c"] == "no_sub"
-                by = {it["name"]: it for it in body["items"]}
-                assert all(it["too_small"] for it in by.values())
-                assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
-                assert by["SSIS-123-C.mp4"]["name_sub"] is False
-                assert by["SSIS-123-C.mp4"]["subtitle_status"] == "none"
-                assert by["SSIS-123C.mp4"]["name_sub"] is False
-                assert by["SSIS-123C.mp4"]["subtitle_status"] == "none"
+            # PUT 覆盖：c → 疑似已压字幕（空串 = 关无字幕方向）
+            r = client.put(
+                "/api/client-config",
+                json={"scan_has_sub_tokens": "c", "scan_no_sub_tokens": ""},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["config"]["scan_has_sub_tokens"] == ["c"]
+            assert r.json()["config"]["scan_no_sub_tokens"] == []
+            r = client.get(
+                "/api/scan/local", params={"engine": "车间A", "path": str(media)})
+            body = r.json()
+            by = {it["name"]: it for it in body["items"]}
+            assert by["SSIS-123-C.mp4"]["name_sub"] is True
+            assert by["SSIS-123-C.mp4"]["subtitle_status"] == "named"
+            assert by["SSIS-123C.mp4"]["name_sub"] is False  # 粘番号不命中
 
-                # 覆盖：min_size_mb=1 + naming_c=no_sub
-                r = client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": str(media),
-                            "min_size_mb": 1, "naming_c": "no_sub"},
-                )
-                assert r.status_code == 200, r.text
-                body = r.json()
-                assert body["min_size_mb"] == 1 and body["naming_c"] == "no_sub"
-                by = {it["name"]: it for it in body["items"]}
-                assert by["big.mp4"]["too_small"] is False
-                assert by["SSIS-123-C.mp4"]["too_small"] is True
-                assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
-                assert by["SSIS-123-C.mp4"]["has_subtitle"] is False
-
-                # 非法值 -> 400
-                assert client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": str(media), "min_size_mb": -1},
-                ).status_code == 400
-                assert client.get(
-                    "/api/scan/local",
-                    params={"engine": "车间A", "path": str(media), "naming_c": "weird"},
-                ).status_code == 400
-    finally:
-        JavScribeEngine.config = orig_config
+            # 非法值 -> 400（归一化错误文案透出）
+            assert client.put("/api/client-config", json={"scan_min_size_mb": -1}).status_code == 400
+            assert client.put("/api/client-config", json={"scan_has_sub_tokens": "c d"}).status_code == 400
+            assert client.put("/api/client-config", json={"scan_video_exts": "mp4;bad"}).status_code == 400
+            assert client.put("/api/client-config", json={"scan_recurse": "yes"}).status_code == 400
 
 
 def _done_job(job_id: str, status: str = "done") -> dict:

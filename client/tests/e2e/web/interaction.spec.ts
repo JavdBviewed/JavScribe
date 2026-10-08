@@ -30,6 +30,8 @@ test.beforeEach(async ({ page, request }) => {
 // pipeline_paused 持久化在共享 web 数据目录：用例中途失败也要复位，防拖死后续本机管线用例
 test.afterEach(async () => {
   await resetPipelinePause(req);
+  // 扫描规则 minsize 在共享 client_config.json（跨套件持久）：统一还原默认 200
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 200 } }).catch(() => {});
 });
 
 /** 轮询等包含指定文案的 toast（避免「首个可见 toast」误匹配上一条操作的旧 toast，8s 内会共存） */
@@ -44,12 +46,8 @@ async function expectToast(page: Page, needle: string, timeoutMs = 15_000) {
 }
 
 test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起 → 继续任务 → 派发完成", async ({ page }) => {
-  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0；
-  // scanMinSizeMb 在页面加载时读入 state，必须 reload 后设置才生效
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload();
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 服务端即时置 0（共享 client_config，afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   page.on("dialog", (d) => d.accept());
   const scanDir = makeScanDir(`pause-${process.pid}-${Date.now()}`);
   // 1. 暂停所有（confirm 放行）
@@ -271,11 +269,8 @@ test("文件夹 chip 移除后派单禁用", async ({ page }) => {
 
 test("扫描全流程：本地目录 → 默认勾选无字幕 → 全选 → 提交入队（本机管线）", async ({ page }) => {
   const scanDir = makeScanDir(`submit-${process.pid}-${Date.now()}`);
-  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0 复刻旧语义
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload();
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 服务端即时置 0（afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   // 全选含已有字幕项 → 提交前弹确认（window.confirm），e2e 一律放行
   page.on("dialog", (d) => d.accept());
   await page.locator("#scan-path").fill(scanDir);
@@ -313,10 +308,8 @@ test("扫描翻页：105 文件 → 默认 10/页 11 页 → 切档 100 → 翻�
   for (let i = 1; i <= 105; i++) {
     copyFileSync(fx("video-a.mp4"), path.join(dir, `PAG-${String(i).padStart(3, "0")}.mp4`));
   }
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload(); // javweb_scan_minsize 只在页面加载时读入 state，setItem 后必须 reload
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 服务端即时置 0（afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   await page.locator("#scan-path").fill(dir);
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 120_000 });

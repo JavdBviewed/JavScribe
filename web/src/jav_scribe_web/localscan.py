@@ -14,6 +14,8 @@
   scan.video_exts         视频扩展名（无点、小写）
   scan.subtitle_patterns  已有字幕判定后缀（带点，".zh.srt"）
   scan.recurse            是否进入子目录
+  scan.has_sub_tokens     疑似已压字幕标记（文件名 token 整词命中，小写）
+  scan.no_sub_tokens      疑似无字幕标记（同上；默认 ["c"]）
   subtitle.skip_embedded  不参与普通目录扫描；普通扫描不读取视频内容，
                           内嵌字幕检查必须由用户后续主动发起。
   subtitle.embedded_langs 仅供主动内嵌字幕检查展示（norm_language 归一）
@@ -37,10 +39,17 @@ MAX_LIST_ITEMS = 200  # 列表配置项上限（与服务端一致）
 _VIDEO_EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
 # ".srt" / ".zh.srt" / ".en.vtt"：点 + 可选语言标签段 + 扩展名段
 _SUB_PATTERN_RE = re.compile(r"^\.(?:[a-z0-9]{1,16}\.)?[a-z0-9]{1,8}$")
-# 独立 C：前后都不是字母数字（行首/行尾、- 空格 _ . [ ] 等分隔均算独立）。
-# 由此天然排除：粘番号（SSIS-123C）、CD 集数（SSIS-123CD2 / CD1 / 1CD）、词内 C（Uncut/CUT）。
+# 文件名 token 切分：连续字母数字段（- 空格 _ . [ ] 等分隔均切开）。
+# 整词相等匹配（大小写不敏感）天然排除：粘番号（SSIS-123C）、CD 集数（SSIS-123CD2 /
+# CD1 / 1CD）、词内词（Uncut/CUT）——与旧「独立 C」语义一致，只是从写死 c
+# 泛化为可配置的标记列表（10-08 起规则归位客户端设置）。
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+# 独立 C：_STANDALONE_C_RE 仅为旧语义的薄封装保留（测试与兼容映射用）
 _STANDALONE_C_RE = re.compile(r"(?<![A-Za-z0-9])c(?![A-Za-z0-9])", re.IGNORECASE)
 NAMING_C_MODES = ("has_sub", "no_sub", "off")
+
+# 文件名标记 token 的合法形态（与 video_exts/subtitle_patterns 同口径：列表上限）
+_SCAN_TOKEN_RE = re.compile(r"^[a-z0-9]{1,16}$")
 
 # 引擎配置不可达时的兜底规则（与 serve 默认配置一致，loader.py）
 DEFAULT_SCAN_CFG: dict[str, Any] = {
@@ -49,12 +58,16 @@ DEFAULT_SCAN_CFG: dict[str, Any] = {
                        "ts", "m2ts", "mpg", "mpeg"],
         "subtitle_patterns": [".zh.srt", ".srt"],
         "recurse": True,
-        # 客户端侧文件属性规则（不进 serve /config 白名单）：
-        # min_size_mb  低于该值(MB)的文件「忽略」= 列表显示但不默认选中，显式勾选仍可提交
-        # naming_c     文件名独立 C 的语义：has_sub=视为已压字幕 / no_sub=视为无字幕版 / off=不识别
-        #               默认 no_sub：JAV 命名里独立 C（-C-/C 不粘番号、不粘 CD 集数）= 无字幕版
+        # 客户端侧文件属性规则（不进 serve /config 白名单，10-08 起存于客户端
+        # client config「扫描规则」组；本表 = 客户端无该段时的内置默认）：
+        # min_size_mb       低于该值(MB)的文件「忽略」= 列表显示但不默认选中，显式勾选仍可提交
+        # has_sub_tokens    疑似已压字幕标记：文件名 token 整词命中（大小写不敏感）→ 已压字幕版
+        # no_sub_tokens     疑似无字幕标记：命中显示「无字幕（名）」信息标
+        #                   双列表同时命中 → 无字幕优先（保守）。
+        #                   默认 c=无字幕：JAV 命名里独立 C（不粘番号、不粘 CD 集数）= 无字幕版
         "min_size_mb": 200,
-        "naming_c": "no_sub",
+        "has_sub_tokens": [],
+        "no_sub_tokens": ["c"],
     },
     "subtitle": {
         "skip_embedded": "target",
@@ -76,13 +89,26 @@ class ProbeError(Exception):
     """ffprobe 不可用或执行失败（区别于「探测成功但无字幕轨」；失败不缓存）。"""
 
 
-def standalone_c_in(name: str) -> bool:
-    """文件名是否含「独立 C」（见 _STANDALONE_C_RE 注释；大小写不敏感）。
+def scan_tokens_in(name: str, tokens: list[str]) -> Optional[str]:
+    """文件名按 [_NAME_TOKEN_RE] 切 token，与标记列表整词相等匹配（大小写不敏感）。
 
+    返回命中的第一个标记（按列表顺序；标记已归一为小写）；未命中 None。
     命中：SSIS-123-C / SSIS-123 C / SSIS-123_C / SSIS-123 (c) / C-SSIS-123
     不命中：SSIS-123C（粘番号）/ SSIS-123CD2、CD1、1CD（CD 集数）/ Uncut、CUT（词内）
     """
-    return bool(_STANDALONE_C_RE.search(name or ""))
+    if not name or not tokens:
+        return None
+    parts = {p.lower() for p in _NAME_TOKEN_RE.findall(name)}
+    for tok in tokens:
+        t = str(tok).lower()
+        if t and t in parts:
+            return t
+    return None
+
+
+def standalone_c_in(name: str) -> bool:
+    """文件名是否含「独立 C」（旧语义薄封装，等价 scan_tokens_in(name, ["c"])）。"""
+    return scan_tokens_in(name, ["c"]) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +285,47 @@ def normalize_subtitle_patterns(value: Any) -> list[str]:
     return out
 
 
+def normalize_scan_tokens(value: Any, key: str) -> list[str]:
+    """文件名标记列表归一：str（逗号分隔）或 list → 小写去重的 token 列表。
+
+    空列表合法（= 关闭该方向规则）；token 须为 1~16 位字母数字（整词匹配口径）。
+    """
+    items: list[str] = []
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = [x for x in value if isinstance(x, (str, int))]
+    else:
+        raise ScanError(f"{key} 需要字符串数组或逗号分隔字符串")
+    out: list[str] = []
+    for raw in items:
+        tok = str(raw).strip().lower()
+        if not tok:
+            continue
+        if not _SCAN_TOKEN_RE.match(tok):
+            raise ScanError(f"非法{key.replace('tokens', '标记')}: {raw!r}")
+        if tok not in out:
+            out.append(tok)
+    if len(out) > MAX_LIST_ITEMS:
+        raise ScanError(f"{key} 最多 {MAX_LIST_ITEMS} 项")
+    return out
+
+
+def _naming_c_to_tokens(naming_c: str) -> tuple[list[str], list[str]]:
+    """老三态 naming_c → 双 token 列表映射（兼容重启前暂停的旧任务续扫）。"""
+    if naming_c == "has_sub":
+        return ["c"], []
+    if naming_c == "no_sub":
+        return [], ["c"]
+    return [], []
+
+
 def _scan_cfg(cfg: dict) -> dict[str, Any]:
-    """归一化扫描规则；返回 {exts, pats, recurse, min_size_mb, naming_c}。"""
+    """归一化扫描规则；返回 {exts, pats, recurse, min_size_mb, has_sub_tokens, no_sub_tokens}。
+
+    新键 has_sub_tokens/no_sub_tokens 缺省时回落内置默认；若连新键都没有而带
+    老 naming_c 键（历史任务快照），按 _naming_c_to_tokens 映射，语义不丢。
+    """
     s = cfg.get("scan", {}) or {}
     try:
         exts = set(normalize_video_exts(s.get("video_exts") or []))
@@ -277,15 +342,29 @@ def _scan_cfg(cfg: dict) -> dict[str, Any]:
             raise ValueError
     except (TypeError, ValueError):
         min_size_mb = float(DEFAULT_SCAN_CFG["scan"]["min_size_mb"])
-    naming_c = str(s.get("naming_c", DEFAULT_SCAN_CFG["scan"]["naming_c"]) or "").lower()
-    if naming_c not in NAMING_C_MODES:
-        naming_c = "has_sub"
+    if "has_sub_tokens" in s or "no_sub_tokens" in s:
+        try:
+            has_sub_tokens = normalize_scan_tokens(
+                s.get("has_sub_tokens") or [], "has_sub_tokens")
+            no_sub_tokens = normalize_scan_tokens(
+                s.get("no_sub_tokens") or [], "no_sub_tokens")
+        except ScanError:
+            has_sub_tokens = list(DEFAULT_SCAN_CFG["scan"]["has_sub_tokens"])
+            no_sub_tokens = list(DEFAULT_SCAN_CFG["scan"]["no_sub_tokens"])
+    else:
+        naming_c = str(s.get("naming_c") or "").lower()
+        if naming_c in NAMING_C_MODES:
+            has_sub_tokens, no_sub_tokens = _naming_c_to_tokens(naming_c)
+        else:
+            has_sub_tokens = list(DEFAULT_SCAN_CFG["scan"]["has_sub_tokens"])
+            no_sub_tokens = list(DEFAULT_SCAN_CFG["scan"]["no_sub_tokens"])
     return {
         "exts": exts,
         "pats": pats,
         "recurse": recurse,
         "min_size_mb": min_size_mb,
-        "naming_c": naming_c,
+        "has_sub_tokens": has_sub_tokens,
+        "no_sub_tokens": no_sub_tokens,
     }
 
 
@@ -374,7 +453,7 @@ def validate_submit_files(raw: Any, cfg: dict) -> list[Path]:
         raise ScanError("files 需要非空数组（绝对路径列表）")
     _c = _scan_cfg(cfg)
     exts = _c["exts"]
-    # 注意：too_small / naming_c 只是「默认勾选与提示」信号，不拦提交——
+    # 注意：too_small / 文件名标记 只是「默认勾选与提示」信号，不拦提交——
     # 用户显式勾选小文件/已有字幕文件即放行（提交前的确认由前端负责）。
     out: list[Path] = []
     for item in raw:
@@ -416,10 +495,12 @@ class ScanCanceled(Exception):
 def _scan_item(f: Path, size: int, sc: dict[str, Any]) -> dict[str, Any]:
     """根据一个视频的元数据组装扫描行；绝不读取视频内容。"""
     sub = _subtitle_for(f, sc["pats"])
-    naming_c = sc["naming_c"]
-    name_c = naming_c != "off" and standalone_c_in(f.name)
-    named = naming_c == "has_sub" and name_c
-    no_sub_named = naming_c == "no_sub" and name_c
+    named_tok = scan_tokens_in(f.name, sc["has_sub_tokens"])
+    no_sub_tok = scan_tokens_in(f.name, sc["no_sub_tokens"])
+    if named_tok is not None and no_sub_tok is not None:
+        named_tok = None  # 双列表同时命中 → 无字幕优先（保守）
+    named = named_tok is not None
+    no_sub_named = no_sub_tok is not None
     return {
         "path": str(f),
         "name": f.name,
@@ -432,6 +513,8 @@ def _scan_item(f: Path, size: int, sc: dict[str, Any]) -> dict[str, Any]:
         "too_small": sc["min_size_mb"] > 0 and size < sc["min_size_mb"] * 1048576,
         "name_sub": named,
         "name_no_sub": no_sub_named,
+        "name_sub_token": named_tok,
+        "name_no_sub_token": no_sub_tok,
         "probe_failed": False,
     }
 

@@ -35,27 +35,27 @@ test("统一侧边导航：Web 与桌面共用同一组视图按钮", async ({ p
   await expect(page.locator("#nav")).toBeVisible();
   await expect(page.locator("#view-tabs")).toHaveCount(0);
   await expect(tabs).toHaveCount(4);
-  // 顺序与桌面端侧边栏一致：字幕服务 → 生成字幕 → 字幕任务 → 客户端设置
-  await expect(tabs.nth(0)).toHaveText("字幕服务");
-  await expect(tabs.nth(1)).toHaveText("生成字幕");
+  // 顺序（10-08 应用户要求交换）：生成字幕 → 字幕服务 → 字幕任务 → 客户端设置
+  await expect(tabs.nth(0)).toHaveText("生成字幕");
+  await expect(tabs.nth(1)).toHaveText("字幕服务");
   await expect(tabs.nth(2)).toContainText("字幕任务");
   await expect(tabs.nth(3)).toHaveText("客户端设置");
   // 默认视图 = 生成字幕（首页）：view-on + aria-selected 跟随，其余板块隐藏
-  await expect(tabs.nth(1)).toHaveClass(/on/);
-  await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect(tabs.nth(0)).toHaveClass(/on/);
+  await expect(tabs.nth(0)).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
   await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
   // 点击切换：view-on 与 aria-selected 移动
-  await tabs.nth(0).click();
-  await expect(tabs.nth(0)).toHaveClass(/on/);
-  await expect(tabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  await tabs.nth(1).click();
+  await expect(tabs.nth(1)).toHaveClass(/on/);
+  await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-dispatch")).not.toHaveClass(/view-on/);
   // localStorage 持久化：reload 后仍停在「字幕服务」
   await page.reload();
   await waitForEngineOnline(page);
-  await expect(tabs.nth(0)).toHaveClass(/on/);
+  await expect(tabs.nth(1)).toHaveClass(/on/);
   await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
 });
 
@@ -190,6 +190,8 @@ test("客户端设置 tab（web 形态）：并发卡可改可存，无仅桌面
   const tabs = page.locator("#nav .view-tab");
   await tabs.nth(3).click();
   await expect(page.locator("#sec-ccfg")).toHaveClass(/view-on/);
+  // 扫描规则卡（10-08 归位客户端设置）：6 控件在 web 形态也渲染；保存按钮无改动时保持隐藏
+  await expect(page.locator("#cc-scan-exts")).toBeVisible({ timeout: 10_000 });
   // 并发卡：范围校验与原弹窗卡片同语义（1~8 / 1~16）
   await expect(page.locator("#ccfg-extract_workers")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator("#ccfg-extract_workers")).toHaveAttribute("min", "1");

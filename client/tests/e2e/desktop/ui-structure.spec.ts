@@ -13,11 +13,11 @@ test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dis
   await expect(page.locator(".tb-logo")).toBeVisible();
   await expect(page.locator(".tb-app")).toHaveText("JavScribe Client");
   for (const id of ["win-min", "win-max", "win-close"]) await expect(page.locator(`#${id}`)).toBeVisible();
-  // 侧边栏四视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务 / 客户端设置）
+  // 侧边栏四视图导航（顺序：10-08 应用户要求交换 → 生成字幕 / 字幕服务 / 字幕任务 / 客户端设置）
   await expect(page.locator("#nav")).toBeVisible();
   const navLabels = page.locator("#nav .view-tab > span:not(.nav-badge)");
-  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务", "客户端设置"]);
-  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs", "ccfg"]);
+  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["生成字幕", "字幕服务", "字幕任务", "客户端设置"]);
+  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["dispatch", "engines", "jobs", "ccfg"]);
   // 默认视图 = dispatch（新 userData，localStorage 空）
   await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveClass(/on/);
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);

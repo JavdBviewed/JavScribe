@@ -50,6 +50,19 @@ export interface ClientConfig {
   queue_cap: number;
   /** 管线全局暂停（工作台持久化，重启不丢；与 /api/pause 联动） */
   pipeline_paused?: boolean;
+  // ---- 扫描规则（客户端侧；规则跟客户端走、不跟引擎走，10-08 自「服务设置」归位） ----
+  /** 视频扩展名（无点、小写）；缺省=内置默认列表 */
+  scan_video_exts?: string[];
+  /** 已有字幕判定后缀（带点，如 ".zh.srt"）；缺省=内置默认列表 */
+  scan_subtitle_patterns?: string[];
+  /** 是否进入子目录；缺省 true */
+  scan_recurse?: boolean;
+  /** 忽略小于该值（MB）：列表显示但不默认选中，0=不按大小过滤；缺省 200 */
+  scan_min_size_mb?: number;
+  /** 疑似已压字幕标记：文件名 token（整词、大小写不敏感）命中即视为已压字幕版；缺省空 */
+  scan_has_sub_tokens?: string[];
+  /** 疑似无字幕标记：文件名 token 命中显示「无字幕（名）」信息标；缺省 ["c"] */
+  scan_no_sub_tokens?: string[];
 }
 
 export interface JobRow {
@@ -234,10 +247,14 @@ export interface ScanItem {
   too_small?: boolean;
   /** 兼容旧响应字段；普通目录扫描不会执行 ffprobe，因此固定为 false */
   probe_failed?: boolean;
-  /** 文件名含独立 C、语义判为「已压字幕」（naming_c=has_sub） */
+  /** 文件名命中「疑似已压字幕标记」列表（整词、大小写不敏感；双列表同时命中时无字幕优先，此值为 false） */
   name_sub?: boolean;
-  /** 文件名含独立 C、语义设为「无字幕版」（naming_c=no_sub，默认；仅信息标） */
+  /** 文件名命中「疑似无字幕标记」列表（整词、大小写不敏感；仅信息标） */
   name_no_sub?: boolean;
+  /** name_sub 命中的具体标记（UI tooltip 展示；未命中为 null） */
+  name_sub_token?: string | null;
+  /** name_no_sub 命中的具体标记（UI tooltip 展示；未命中为 null） */
+  name_no_sub_token?: string | null;
 }
 
 /** 扫描目录响应（web 形态 GET /api/scan/local?engine=&path=；desktop 为本地 serve /scan） */
@@ -264,8 +281,10 @@ export interface ScanResult {
   truncated?: boolean;
   /** 生效的 scan.min_size_mb（MB；客户端侧规则） */
   min_size_mb?: number;
-  /** 生效的独立 C 语义：has_sub / no_sub / off */
-  naming_c?: string;
+  /** 生效的「疑似已压字幕标记」列表（整词、大小写不敏感） */
+  has_sub_tokens?: string[];
+  /** 生效的「疑似无字幕标记」列表（整词、大小写不敏感） */
+  no_sub_tokens?: string[];
   /** 普通扫描不会读取视频内容；内嵌字幕需要单独检查 */
   embedded_checked?: boolean;
   probe_errors?: string[];

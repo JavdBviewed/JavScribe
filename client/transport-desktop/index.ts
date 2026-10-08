@@ -7,7 +7,7 @@
 //      整片直传的服务端提取进度在任务看板呈现）
 //   - 无 _localPath 的合成 File（e2e setInputFiles 场景）走 data 通道读全量字节
 
-import { TransportError, type ScanOpts, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
+import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
   BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
@@ -169,10 +169,11 @@ export const desktopTransport: Transport = {
   },
 
   // Desktop 的扫描必须在客户端主进程执行：服务端只负责模型处理，不能替客户端扫描路径。
-  // 旧 scan 保留兼容；新 UI 优先使用可持久化的后台扫描任务。
-  scan: (name, p, _opts) => call<ScanResult>("scan", name, p),
-  startScanTask: async (name: string, p: string, opts?: ScanOpts) =>
-    call<ScanTaskSnapshot>("startScanTask", name, p, JSON.stringify(opts || {})),
+  // 旧 scan 保留兼容（代理 serve /scan）；新 UI 优先使用可持久化的后台扫描任务。
+  // 扫描规则来自本机 client-config.json（userData），服务离线也可扫。
+  scan: (name, p) => call<ScanResult>("scan", name, p),
+  startScanTask: async (name: string, p: string) =>
+    call<ScanTaskSnapshot>("startScanTask", name, p),
   listScanTasks: () => call<ScanTaskSnapshot[]>("listScanTasks"),
   getScanTask: (id: string) => call<ScanTaskSnapshot>("getScanTask", id),
   pauseScanTask: (id: string) => call<ScanTaskSnapshot>("pauseScanTask", id),

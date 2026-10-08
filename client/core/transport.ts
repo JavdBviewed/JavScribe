@@ -43,14 +43,6 @@ export class TransportError extends Error {
   }
 }
 
-/** 目录扫描选项（web 形态客户端侧文件属性规则；前端 localStorage 持久化） */
-export interface ScanOpts {
-  /** 忽略小于该值（MB）的文件：显示但不默认选中；0=不忽略 */
-  min_size_mb?: number;
-  /** 文件名独立 C 语义：has_sub（默认，视为已压字幕）/ no_sub / off */
-  naming_c?: string;
-}
-
 export interface Transport {
   /** 工作台健康（版本 + 在线数） */
   getHealth(): Promise<Health>;
@@ -120,10 +112,10 @@ export interface Transport {
   getUpload(id: string): Promise<UploadStatus>;
   /** 版本对比（GitHub 最新 Release vs 当前版本）；失败 throw(detail) */
   getUpdate(): Promise<UpdateInfo>;
-  /** 扫描客户端本机目录（web 形态：工作台部署所在机器）；失败 throw(detail) */
-  scan(name: string, path: string, opts?: ScanOpts): Promise<ScanResult>;
+  /** 扫描客户端本机目录（web 形态：工作台部署所在机器；规则=本机 client config「扫描规则」组）；失败 throw(detail) */
+  scan(name: string, path: string): Promise<ScanResult>;
   /** Web 形态后台扫描：立即返回 task id，刷新页面后仍可恢复查看。 */
-  startScanTask?(name: string, path: string, opts?: ScanOpts): Promise<import("./types").ScanTaskSnapshot>;
+  startScanTask?(name: string, path: string): Promise<import("./types").ScanTaskSnapshot>;
   listScanTasks?(): Promise<import("./types").ScanTaskSnapshot[]>;
   getScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
   pauseScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;

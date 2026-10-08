@@ -25,7 +25,6 @@ import * as path from "node:path";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
-import type { ScanOpts } from "../core/transport";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
 import {
   type EmbeddedSub,
@@ -571,12 +570,30 @@ const DESKTOP_SCAN_DEFAULTS = {
   video_exts: [...VIDEO_EXTS],
   subtitle_patterns: [...LOCAL_SUB_PATTERNS],
   recurse: true,
+  min_size_mb: 200,
+  has_sub_tokens: [] as string[],
+  no_sub_tokens: ["c"],
 };
-const STANDALONE_C_RE = /(?<![A-Za-z0-9])c(?![A-Za-z0-9])/i;
+// 文件名 token 切分：连续字母数字段（- 空格 _ . [ ] 等分隔均切开）；整词相等匹配
+// 天然排除粘番号（SSIS-123C）、CD 集数（CD1/1CD）、词内词（Uncut/CUT）。
+const _NAME_TOKEN_RE = /[A-Za-z0-9]+/g;
+const _SCAN_TOKEN_RE = /^[a-z0-9]{1,16}$/;
+
+/** 文件名按 token 整词匹配标记列表（大小写不敏感）：按列表顺序返回首个命中小写标记；未命中 null。 */
+function scanTokensIn(name: string, tokens: string[]): string | null {
+  if (!name || !tokens.length) return null;
+  const parts = new Set((name.match(_NAME_TOKEN_RE) || []).map((x) => x.toLowerCase()));
+  for (const tok of tokens) {
+    const t = String(tok).toLowerCase();
+    if (t && parts.has(t)) return t;
+  }
+  return null;
+}
 
 type DesktopScanOptions = {
   min_size_mb: number;
-  naming_c: "has_sub" | "no_sub" | "off";
+  has_sub_tokens: string[];
+  no_sub_tokens: string[];
   video_exts: string[];
   subtitle_patterns: string[];
   recurse: boolean;
@@ -598,14 +615,26 @@ function desktopScanPath(): string {
 
 function safeScanOptions(raw: unknown, cfg?: Partial<DesktopScanOptions>): DesktopScanOptions {
   const o = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const number = Number(o.min_size_mb ?? cfg?.min_size_mb ?? 200);
-  const naming = String(o.naming_c ?? cfg?.naming_c ?? "no_sub");
+  const number = Number(o.min_size_mb ?? cfg?.min_size_mb ?? DESKTOP_SCAN_DEFAULTS.min_size_mb);
+  // token 列表：显式 [] = 关该方向；两键都缺且带旧版持久化任务的 naming_c 时按老语义映射
+  const tokList = (v: unknown): string[] | null =>
+    Array.isArray(v) && v.every((x) => typeof x === "string")
+      ? [...new Set(v.map((x) => String(x).toLowerCase()))] : null;
+  let hasSub: string[] | null = tokList(o.has_sub_tokens);
+  let noSub: string[] | null = tokList(o.no_sub_tokens);
+  if (hasSub === null && noSub === null && typeof o.naming_c === "string") {
+    const naming = String(o.naming_c);
+    hasSub = naming === "has_sub" ? ["c"] : [];
+    noSub = naming === "no_sub" ? ["c"] : [];
+  }
+  if (hasSub === null) hasSub = tokList(cfg?.has_sub_tokens);
+  if (noSub === null) noSub = tokList(cfg?.no_sub_tokens);
   const exts = Array.isArray(o.video_exts) ? o.video_exts : cfg?.video_exts;
   const pats = Array.isArray(o.subtitle_patterns) ? o.subtitle_patterns : cfg?.subtitle_patterns;
   return {
-    min_size_mb: Number.isFinite(number) && number >= 0 ? number : 200,
-    naming_c: naming === "has_sub" || naming === "off" ? naming : "no_sub",
-    video_exts: [...new Set((exts || DESKTOP_SCAN_DEFAULTS.video_exts).map(String).map((x) => x.toLowerCase().replace(/^\./, "")).filter(Boolean))],
+    min_size_mb: Number.isFinite(number) && number >= 0 ? number : DESKTOP_SCAN_DEFAULTS.min_size_mb,
+    has_sub_tokens: hasSub || DESKTOP_SCAN_DEFAULTS.has_sub_tokens,
+    no_sub_tokens: noSub || DESKTOP_SCAN_DEFAULTS.no_sub_tokens,    video_exts: [...new Set((exts || DESKTOP_SCAN_DEFAULTS.video_exts).map(String).map((x) => x.toLowerCase().replace(/^\./, "")).filter(Boolean))],
     subtitle_patterns: [...new Set((pats || DESKTOP_SCAN_DEFAULTS.subtitle_patterns).map(String).map((x) => x.toLowerCase().startsWith(".") ? x.toLowerCase() : "." + x.toLowerCase()).filter(Boolean))],
     recurse: o.recurse == null ? (cfg?.recurse ?? true) : Boolean(o.recurse),
   };
@@ -679,20 +708,17 @@ function loadDesktopScanTasks(): void {
   }
 }
 
-async function loadDesktopScanConfig(entry: EngineEntry, requested: ScanOpts): Promise<DesktopScanOptions> {
-  const headers: Record<string, string> = {};
-  if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
-  const r = await httpJson<any>(entry.url + "/config", { headers, timeoutMs: 15000 });
-  if (r.status !== 200) throw configError(r.status, r.data);
-  const items = Array.isArray(r.data?.items) ? r.data.items : [];
-  const cfg: Partial<DesktopScanOptions> = {};
-  for (const item of items) {
-    if (!item || typeof item.path !== "string") continue;
-    if (item.path === "scan.video_exts" && Array.isArray(item.value)) cfg.video_exts = item.value.map(String);
-    if (item.path === "scan.subtitle_patterns" && Array.isArray(item.value)) cfg.subtitle_patterns = item.value.map(String);
-    if (item.path === "scan.recurse") cfg.recurse = Boolean(item.value);
-  }
-  return safeScanOptions(requested, cfg);
+function clientScanCfg(): Partial<DesktopScanOptions> {
+  // 扫描规则统一来自本机 client config（「客户端设置 · 扫描规则」组）；服务离线也可扫
+  const c = clientCfgLoad();
+  const out: Partial<DesktopScanOptions> = {};
+  if (Array.isArray(c.scan_video_exts)) out.video_exts = c.scan_video_exts;
+  if (Array.isArray(c.scan_subtitle_patterns)) out.subtitle_patterns = c.scan_subtitle_patterns;
+  if (typeof c.scan_recurse === "boolean") out.recurse = c.scan_recurse;
+  if (typeof c.scan_min_size_mb === "number") out.min_size_mb = c.scan_min_size_mb;
+  if (Array.isArray(c.scan_has_sub_tokens)) out.has_sub_tokens = c.scan_has_sub_tokens;
+  if (Array.isArray(c.scan_no_sub_tokens)) out.no_sub_tokens = c.scan_no_sub_tokens;
+  return out;
 }
 
 function desktopScanItem(filePath: string, name: string, size: number, options: DesktopScanOptions, subtitleNames: Set<string>): ScanItem {
@@ -700,9 +726,11 @@ function desktopScanItem(filePath: string, name: string, size: number, options: 
   const subtitle = options.subtitle_patterns
     .map((suffix) => stem + suffix)
     .find((candidate) => subtitleNames.has(candidate)) || null;
-  const hasC = options.naming_c !== "off" && STANDALONE_C_RE.test(name);
-  const named = options.naming_c === "has_sub" && hasC;
-  const noSub = options.naming_c === "no_sub" && hasC;
+  let namedTok = scanTokensIn(name, options.has_sub_tokens);
+  const noSubTok = scanTokensIn(name, options.no_sub_tokens);
+  if (namedTok !== null && noSubTok !== null) namedTok = null; // 双列表同时命中 → 无字幕优先（保守）
+  const named = namedTok !== null;
+  const noSub = noSubTok !== null;
   return {
     path: filePath, name, size,
     has_subtitle: Boolean(subtitle) || named,
@@ -711,6 +739,7 @@ function desktopScanItem(filePath: string, name: string, size: number, options: 
     embedded_checked: false, embedded_langs: [], probe_failed: false,
     too_small: options.min_size_mb > 0 && size < options.min_size_mb * 1048576,
     name_sub: named, name_no_sub: noSub,
+    name_sub_token: namedTok, name_no_sub_token: noSubTok,
   };
 }
 
@@ -731,8 +760,7 @@ async function runDesktopScan(task: DesktopScanRecord): Promise<void> {
   };
   try {
     await waitDesktopScanControl(task);
-    const entry = engineByName(task.engine);
-    const options = await loadDesktopScanConfig(entry, task.options);
+    const options = safeScanOptions(task.options, clientScanCfg());
     task.options = options;
     task.status = task.pauseRequested ? "paused" : "running";
     task.updated = Date.now();
@@ -774,7 +802,8 @@ async function runDesktopScan(task: DesktopScanRecord): Promise<void> {
     items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
     const result: ScanResult = {
       path: root, items, truncated, mapped: false,
-      min_size_mb: options.min_size_mb, naming_c: options.naming_c,
+      min_size_mb: options.min_size_mb,
+      has_sub_tokens: options.has_sub_tokens, no_sub_tokens: options.no_sub_tokens,
       embedded_checked: false, probe_errors: [],
     };
     task.result = result;
@@ -1316,11 +1345,64 @@ function registerIpc(): void {
             if (v < lo || v > hi) return { ok: false, error: `${k} 需在 ${lo} ~ ${hi} 之间` };
             return { ok: true, v };
           };
-          const rEw = checkInt(c.extract_workers, "extract_workers", CLIENT_CFG_LIMITS.extract_workers);
-          if (!rEw.ok) return { ok: false, error: rEw.error };
-          const rQc = checkInt(c.queue_cap, "queue_cap", CLIENT_CFG_LIMITS.queue_cap);
-          if (!rQc.ok) return { ok: false, error: rQc.error };
-          clientCfgSave({ extract_workers: rEw.v, queue_cap: rQc.v });
+          // 部分合并：只校验出现的键（并发卡只发 ew/qc；扫描规则卡只发 scan_*），缺键保留现值
+          const next: ClientCfgFile = { ...clientCfgLoad() };
+          const normList = (v: unknown): string[] | null => {
+            let arr: unknown = v;
+            if (typeof arr === "string") arr = arr.split(",");
+            if (!Array.isArray(arr) || arr.length > 200 || !arr.every((x) => typeof x === "string")) return null;
+            return [...new Set(arr.map((x) => String(x).trim().toLowerCase()).filter(Boolean))];
+          };
+          if (c.extract_workers !== undefined) {
+            const r = checkInt(c.extract_workers, "extract_workers", CLIENT_CFG_LIMITS.extract_workers);
+            if (!r.ok) return { ok: false, error: r.error };
+            next.extract_workers = r.v;
+          }
+          if (c.queue_cap !== undefined) {
+            const r = checkInt(c.queue_cap, "queue_cap", CLIENT_CFG_LIMITS.queue_cap);
+            if (!r.ok) return { ok: false, error: r.error };
+            next.queue_cap = r.v;
+          }
+          if (c.scan_video_exts !== undefined) {
+            const v = normList(c.scan_video_exts);
+            if (v === null || v.length === 0 || !v.every((x) => /^[a-z0-9]{1,8}$/.test(x))) {
+              return { ok: false, error: "scan_video_exts 需要 1~8 位字母数字扩展名（逗号分隔可）" };
+            }
+            next.scan_video_exts = v;
+          }
+          if (c.scan_subtitle_patterns !== undefined) {
+            const v = normList(c.scan_subtitle_patterns);
+            if (v === null || v.length === 0 || !v.every((x) => /^\.[a-z0-9]{1,16}(\.[a-z0-9]{1,8})?$/.test(x))) {
+              return { ok: false, error: "scan_subtitle_patterns 需要 .srt / .zh.srt 形态（逗号分隔可）" };
+            }
+            next.scan_subtitle_patterns = v;
+          }
+          if (c.scan_has_sub_tokens !== undefined) {
+            const v = normList(c.scan_has_sub_tokens);
+            if (v === null || !v.every((x) => _SCAN_TOKEN_RE.test(x))) {
+              return { ok: false, error: "scan_has_sub_tokens 需要 1~16 位字母数字标记（逗号分隔可，空=关）" };
+            }
+            next.scan_has_sub_tokens = v;
+          }
+          if (c.scan_no_sub_tokens !== undefined) {
+            const v = normList(c.scan_no_sub_tokens);
+            if (v === null || !v.every((x) => _SCAN_TOKEN_RE.test(x))) {
+              return { ok: false, error: "scan_no_sub_tokens 需要 1~16 位字母数字标记（逗号分隔可，空=关）" };
+            }
+            next.scan_no_sub_tokens = v;
+          }
+          if (c.scan_recurse !== undefined) {
+            if (typeof c.scan_recurse !== "boolean") return { ok: false, error: "scan_recurse 需要布尔值" };
+            next.scan_recurse = c.scan_recurse;
+          }
+          if (c.scan_min_size_mb !== undefined) {
+            const v = c.scan_min_size_mb;
+            if (typeof v === "boolean" || typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+              return { ok: false, error: "scan_min_size_mb 需要 >=0 的有限数字" };
+            }
+            next.scan_min_size_mb = v;
+          }
+          clientCfgSave(next);
           return { ok: true };
         }
         case "getReadiness": {
@@ -1352,14 +1434,14 @@ function registerIpc(): void {
           return { ok: true, data: r.data };
         }
         case "startScanTask": {
-          const requested: ScanOpts = (() => { try { return JSON.parse(String(a2 || "{}")); } catch { return {}; } })();
+          const requested: unknown = (() => { try { return JSON.parse(String(a2 || "{}")); } catch { return {}; } })();
           const id = crypto.randomUUID();
           const rawPath = String(a1 || "").trim();
           const task: DesktopScanRecord = {
             id, engine: String(a0 || ""), path: rawPath ? path.resolve(rawPath) : rawPath,
             resolved_path: null, mapped: false, status: "queued", scanned: 0, found: 0,
             result: null, error: null, created: Date.now(), updated: Date.now(), finished: null,
-            options: safeScanOptions(requested), pauseRequested: false, cancelRequested: false,
+            options: safeScanOptions(requested, clientScanCfg()), pauseRequested: false, cancelRequested: false,
           };
           try {
             if (!task.path || !fs.statSync(task.path).isDirectory()) {
@@ -2162,10 +2244,20 @@ function registerUpdateIpc(): void {
 //   - 桌面管线消费并发值/热重载在 S4 线，本线只做 IPC + 持久化
 // ---------------------------------------------------------------------------
 
-interface ClientCfgFile { extract_workers: number; queue_cap: number; }
+interface ClientCfgFile {
+  extract_workers: number;
+  queue_cap: number;
+  // ---- 扫描规则（扁平 scan_* 键，与 web client_config.json 同形；10-08 归位） ----
+  scan_video_exts?: string[];
+  scan_subtitle_patterns?: string[];
+  scan_recurse?: boolean;
+  scan_min_size_mb?: number;
+  scan_has_sub_tokens?: string[];
+  scan_no_sub_tokens?: string[];
+}
 const CLIENT_CFG_FILE = "client-config.json";
 const CLIENT_CFG_DEFAULTS: ClientCfgFile = { extract_workers: 2, queue_cap: 4 };
-const CLIENT_CFG_LIMITS: Record<keyof ClientCfgFile, [number, number]> = {
+const CLIENT_CFG_LIMITS: Record<"extract_workers" | "queue_cap", [number, number]> = {
   extract_workers: [1, 8],
   queue_cap: [1, 16],
 };
@@ -2178,10 +2270,22 @@ function clientCfgClamp(v: unknown, lo: number, hi: number, dflt: number): numbe
 function clientCfgLoad(): ClientCfgFile {
   try {
     const raw = JSON.parse(fs.readFileSync(clientCfgPath, "utf-8")) as Partial<ClientCfgFile>;
-    return {
+    const out: ClientCfgFile = {
       extract_workers: clientCfgClamp(raw.extract_workers, CLIENT_CFG_LIMITS.extract_workers[0], CLIENT_CFG_LIMITS.extract_workers[1], CLIENT_CFG_DEFAULTS.extract_workers),
       queue_cap: clientCfgClamp(raw.queue_cap, CLIENT_CFG_LIMITS.queue_cap[0], CLIENT_CFG_LIMITS.queue_cap[1], CLIENT_CFG_DEFAULTS.queue_cap),
     };
+    // 扫描规则 type-guard 透传（脏值丢弃）；值域校验在 putClientConfig 侧
+    const strList = (v: unknown): v is string[] =>
+      Array.isArray(v) && v.length <= 200 && v.every((x) => typeof x === "string");
+    if (strList(raw.scan_video_exts)) out.scan_video_exts = raw.scan_video_exts;
+    if (strList(raw.scan_subtitle_patterns)) out.scan_subtitle_patterns = raw.scan_subtitle_patterns;
+    if (strList(raw.scan_has_sub_tokens)) out.scan_has_sub_tokens = raw.scan_has_sub_tokens;
+    if (strList(raw.scan_no_sub_tokens)) out.scan_no_sub_tokens = raw.scan_no_sub_tokens;
+    if (typeof raw.scan_recurse === "boolean") out.scan_recurse = raw.scan_recurse;
+    if (typeof raw.scan_min_size_mb === "number" && Number.isFinite(raw.scan_min_size_mb) && raw.scan_min_size_mb >= 0) {
+      out.scan_min_size_mb = raw.scan_min_size_mb;
+    }
+    return out;
   } catch {
     return { ...CLIENT_CFG_DEFAULTS }; // 无文件/损坏：默认值起步
   }

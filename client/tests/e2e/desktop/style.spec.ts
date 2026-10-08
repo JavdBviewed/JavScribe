@@ -230,7 +230,11 @@ test("筛选 × 分页：25 条已完成 → 默认 10/页 3 页 → 切档 20 �
 
 test("扫描全流程：3 项（1 有字幕）→ 全选 → 入队 3 项 → 看板 3 行", async ({ page }) => {
   await goView(page, "dispatch");
-  await page.locator("#scan-minsize").fill("0");
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → IPC 写 client config 置 0（每用例独立 userData，无需还原）
+  await page.evaluate(async () => {
+    const r = await (window as any).javDesktop.call("putClientConfig", [JSON.stringify({ scan_min_size_mb: 0 })]);
+    if (!r.ok) throw new Error(r.error || "putClientConfig 失败");
+  });
   // 所选含 1 个外部 srt 文件 → 提交前弹「已检测到字幕」confirm，接受继续
   page.on("dialog", (d) => d.accept());
   await page.selectOption("#engine-select", "mock");

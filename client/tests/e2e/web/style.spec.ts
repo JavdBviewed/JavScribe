@@ -13,6 +13,10 @@ const fx = (n: string) => path.join(FIXTURES, n);
 const SCAN_DIR = makeScanDir();
 
 let req: APIRequestContext;
+test.afterEach(async () => {
+  // 扫描规则 minsize 在共享 client_config.json（跨套件持久）：统一还原默认 200
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 200 } }).catch(() => {});
+});
 test.beforeEach(async ({ page, request }) => {
   req = request;
   await mockReset(request);
@@ -128,11 +132,8 @@ test("设置弹窗：配置表单（tab 布局：总览 + 设置组两列）", a
 });
 
 test("扫描结果表（字幕标记行）", async ({ page }) => {
-  // 「忽略小于」默认 200MB 会多一个「过小」标签 → 置 0 保持基线语义
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload();
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 「忽略小于」默认 200MB 会多一个「过小」标签 → 服务端即时置 0 保持基线语义（afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   await page.locator("#scan-path").fill(SCAN_DIR);
   await page.click("#scan-go");
   await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });

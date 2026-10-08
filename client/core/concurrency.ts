@@ -42,6 +42,17 @@ export function normalizeClientConfig(raw: unknown): ClientConfig {
     queue_cap: cc(o.queue_cap, 1, 16, CLIENT_CFG_DEFAULTS.queue_cap),
   };
   if (typeof o.pipeline_paused === "boolean") out.pipeline_paused = o.pipeline_paused;
+  // 扫描规则（扁平 scan_* 键）：type-guard 透传，脏值丢弃（保存前的值域校验在服务端/IPC 侧）
+  const strList = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.length <= 200 && v.every((x) => typeof x === "string");
+  if (strList(o.scan_video_exts)) out.scan_video_exts = o.scan_video_exts;
+  if (strList(o.scan_subtitle_patterns)) out.scan_subtitle_patterns = o.scan_subtitle_patterns;
+  if (strList(o.scan_has_sub_tokens)) out.scan_has_sub_tokens = o.scan_has_sub_tokens;
+  if (strList(o.scan_no_sub_tokens)) out.scan_no_sub_tokens = o.scan_no_sub_tokens;
+  if (typeof o.scan_recurse === "boolean") out.scan_recurse = o.scan_recurse;
+  if (typeof o.scan_min_size_mb === "number" && Number.isFinite(o.scan_min_size_mb) && o.scan_min_size_mb >= 0) {
+    out.scan_min_size_mb = o.scan_min_size_mb;
+  }
   return out;
 }
 

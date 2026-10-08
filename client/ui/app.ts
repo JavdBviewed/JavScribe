@@ -33,8 +33,6 @@ interface AppState {
   scanPageSize: number;      // 扫描列表每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
   scanTask: ScanTaskSnapshot | null; // 后台扫描任务（web 形态刷新后可恢复）
-  scanMinSizeMb: number;     // 「忽略小于」阈值（MB，localStorage 持久化）
-  scanNamingC: string;       // 文件名独立 C 语义：has_sub / no_sub / off
   page: number;              // 任务分页：当前页（0 起）
   pageSize: number;          // 任务分页：每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   _jobs: JobRow[];           // 最近一次 /api/jobs 结果（翻页/筛选即时重渲染，不等网络）
@@ -83,18 +81,6 @@ const state: AppState = {
   scanPageSize: readPageSize("javweb_scan_pagesize"),
   lastScan: null,
   scanTask: null,
-  scanMinSizeMb: (() => {
-    // 注意 Number(null) === 0：新浏览器（无持久化值）必须落到默认 200，
-    // 否则阈值静默变 0，过小/坏文件会被默认勾选并提交（QA 5.5b 暴露）
-    const raw = localStorage.getItem("javweb_scan_minsize");
-    if (raw == null || raw.trim() === "") return 200;
-    const v = Number(raw);
-    return Number.isFinite(v) && v >= 0 ? v : 200;
-  })(),
-  scanNamingC: (() => {
-    const v = localStorage.getItem("javweb_scan_namingc");
-    return v === "has_sub" || v === "no_sub" || v === "off" ? v : "no_sub";
-  })(),
   page: 0,
   pageSize: readPageSize("javweb_jobs_pagesize"),
   _jobs: [],
@@ -949,7 +935,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<span class="wb-tag${j.writeback.startsWith("failed") ? " wb-err" : ""}" title="${esc(j.writeback)}">${esc(j.writeback.startsWith("failed") ? "回写失败" : (WB_TAG[j.writeback] || j.writeback))}</span>`
       : "";
     // 本地扫描任务：提交前检测到的字幕状态（制作图「已有字幕」提示）
-    const SUB_SRC: Record<string, string> = { external: "外部 srt", embedded: "内嵌轨", named: "C 版（名）" };
+    const SUB_SRC: Record<string, string> = { external: "外部 srt", embedded: "内嵌轨", named: "标记（名）" };
     const ss = j.sub_status && SUB_SRC[j.sub_status]
       ? `<span class="wb-tag sub-exist" title="提交前检测到${SUB_SRC[j.sub_status]}，经确认继续生成">已有字幕</span>`
       : "";
@@ -3300,24 +3286,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
-  // ---------- 服务端目录扫描 ----------
-  // 扫描规则控件在 Web 与 Desktop 形态保持一致；两端都只把规则传给各自的本机扫描器。
-  const scanMinSize = $("scan-minsize") as HTMLInputElement;
-  const scanNamingC = $("scan-namingc") as HTMLSelectElement;
-  $("scan-minsize-wrap").hidden = false;
-  $("scan-namingc-wrap").hidden = false;
-  scanMinSize.value = String(state.scanMinSizeMb);
-  scanNamingC.value = state.scanNamingC;
-  scanMinSize.onchange = () => {
-    const v = Number(scanMinSize.value);
-    state.scanMinSizeMb = Number.isFinite(v) && v >= 0 ? v : 0;
-    scanMinSize.value = String(state.scanMinSizeMb);
-    localStorage.setItem("javweb_scan_minsize", String(state.scanMinSizeMb));
-  };
-  scanNamingC.onchange = () => {
-    state.scanNamingC = scanNamingC.value;
-    localStorage.setItem("javweb_scan_namingc", state.scanNamingC);
-  };
+  // ---------- 本机目录扫描 ----------
+  // 扫描规则统一在「客户端设置 · 扫描规则」维护（本机 client config 落盘）；面板不再放规则控件。
   let scanPollTimer: number | null = null;
   const stopScanPoll = () => { if (scanPollTimer != null) { window.clearInterval(scanPollTimer); scanPollTimer = null; } };
   const scanStatusLabel: Record<string, string> = {
@@ -3441,13 +3411,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     scanSubmit.disabled = true;
     try {
       if (t.startScanTask && t.getScanTask) {
-        const task = await t.startScanTask(engine, path, { min_size_mb: state.scanMinSizeMb, naming_c: state.scanNamingC });
+        const task = await t.startScanTask(engine, path);
         state.scanTask = task;
         localStorage.setItem("javweb_scan_task_id", task.id);
         renderScanTaskStatus(task);
         beginScanPolling(task.id);
       } else {
-        const d = await t.scan(engine, path, { min_size_mb: state.scanMinSizeMb, naming_c: state.scanNamingC });
+        const d = await t.scan(engine, path);
         applyScanResult(d);
       }
     } catch (err) {
@@ -3472,7 +3442,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     if (!items.length) {
       $("scan-table").innerHTML =
-        '<div class="muted small">没有找到符合条件的视频文件。可到「服务设置 · 扫描规则」调整扩展名'
+        '<div class="muted small">没有找到符合条件的视频文件。可到「客户端设置 · 扫描规则」调整扩展名'
       + (platform.kind === "web" ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」" : "") + "）</div>";
       renderScanPager(0);
     } else {
@@ -3489,11 +3459,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const subCell = i.subtitle_status === "external"
               ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span><button type="button" class="srt-pv" data-srt="${esc(i.subtitle ? siblingOf(i.path, i.subtitle) : "")}" title="预览字幕内容">预览</button>`
               : i.subtitle_status === "named"
-              ? `<span class="tag subtag" title="文件名含独立 C，按规则视为已压字幕（可在「文件名独立 C」改判）">C 版（名）</span>`
+              ? `<span class="tag subtag" title="文件名含标记 ${esc(i.name_sub_token || "")}，按规则视为已压字幕（可在「客户端设置 · 扫描规则」改判）">标记（名）</span>`
               : i.subtitle_status === "embedded"
               ? `<span class="tag subtag warn" title="普通扫描不会读取视频内容；如需确认内嵌字幕，请单独发起检查">内嵌字幕（需单独检查）</span>`
               : i.name_no_sub
-              ? `<span class="tag subtag ok" title="文件名含独立 C，按规则视为无字幕版">无字幕（名）</span>`
+              ? `<span class="tag subtag ok" title="文件名含标记 ${esc(i.name_no_sub_token || "")}，按规则视为无字幕版（可在「客户端设置 · 扫描规则」改判）">无字幕（名）</span>`
               : '<span class="muted" title="普通扫描不会读取视频内容">未检查</span>';
             return `
             <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
@@ -3597,7 +3567,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const parts = [
         cnt("external") ? `外部 srt ${cnt("external")}` : "",
         cnt("embedded") ? `内嵌轨 ${cnt("embedded")}` : "",
-        cnt("named") ? `C 版（名） ${cnt("named")}` : "",
+        cnt("named") ? `标记（名） ${cnt("named")}` : "",
       ].filter(Boolean).join("、");
       const ok = window.confirm(
         `所选 ${subItems.length} 个文件已检测到字幕（${parts}）。\n`
@@ -3994,6 +3964,45 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ws = ccWatchCtl ? ccWatchCtl.state() : null;
     }
     if (seq !== ccViewSeq) return; // 视图已切走，丢弃过期渲染
+    // 扫描规则卡取值：client config 已有 scan_* 键则直接展示；无则一次性静默预填（不落盘）
+    // —— 旧扫描面板 localStorage（用完删 key）→ 第一个可响应引擎 /config scan.* → 内置默认
+    const SCAN_KEYS = ["scan_video_exts", "scan_subtitle_patterns", "scan_recurse",
+      "scan_min_size_mb", "scan_has_sub_tokens", "scan_no_sub_tokens"] as const;
+    const hasScan = !!cc && SCAN_KEYS.some((k) => k in cc);
+    let scanVals = { exts: "", pats: "", recurse: true, min: 200, hasTok: "", noTok: "c" };
+    if (cc && hasScan) {
+      scanVals = {
+        exts: (cc.scan_video_exts || []).join(","),
+        pats: (cc.scan_subtitle_patterns || []).join(","),
+        recurse: cc.scan_recurse ?? true,
+        min: cc.scan_min_size_mb ?? 200,
+        hasTok: (cc.scan_has_sub_tokens || []).join(","),
+        noTok: (cc.scan_no_sub_tokens || []).join(","),
+      };
+    } else {
+      const rawMin = localStorage.getItem("javweb_scan_minsize");
+      localStorage.removeItem("javweb_scan_minsize");
+      const v = rawMin != null && rawMin.trim() !== "" ? Number(rawMin) : NaN;
+      scanVals.min = Number.isFinite(v) && v >= 0 ? v : 200;
+      const nc = localStorage.getItem("javweb_scan_namingc");
+      localStorage.removeItem("javweb_scan_namingc");
+      if (nc === "has_sub") { scanVals.hasTok = "c"; scanVals.noTok = ""; }
+      else if (nc === "no_sub") { scanVals.hasTok = ""; scanVals.noTok = "c"; }
+      else if (nc === "off") { scanVals.hasTok = ""; scanVals.noTok = ""; }
+      for (const e of state.engines) {
+        try {
+          const items = await t.getConfig(e.name);
+          const val = (p: string) => (items.find((x) => x.path === p) || {}).value;
+          const ve = val("scan.video_exts"), sp = val("scan.subtitle_patterns"), rc = val("scan.recurse");
+          if (Array.isArray(ve) && ve.length) scanVals.exts = ve.map(String).join(",");
+          if (Array.isArray(sp) && sp.length) scanVals.pats = sp.map(String).join(",");
+          if (typeof rc === "boolean") scanVals.recurse = rc;
+          break;
+        } catch { /* 试下一个引擎 */ }
+      }
+      if (!scanVals.exts) scanVals.exts = VIDEO_EXTS.join(",");
+      if (!scanVals.pats) scanVals.pats = LOCAL_SUB_PATTERNS.join(",");
+    }
     let html = '<div class="cc-cards">';
     if (cc) {
       html += `
@@ -4020,6 +4029,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="set-note err"><div class="set-note-title">无法读取客户端并发设置</div>${esc(ccErr || "接口不可用")}</div>
     </section>`;
     }
+    html += `
+    <section class="cfg-sec cc-card" data-sec="ccfg-scan">
+      <h4 class="cfg-sec-title">扫描规则<span class="cfg-sec-desc">本机目录扫描（${platform.kind === "desktop" ? "本机" : "工作台部署机"}）文件判定 · 对之后的扫描生效</span></h4>
+      <div class="cfg-sec-body">
+        <div class="cfg-row ccfg-row" data-base="${esc(scanVals.exts)}">
+          <span class="cfg-lab">视频扩展名${helpIcon("参与本机目录扫描的扩展名（无点、逗号分隔）。默认 " + VIDEO_EXTS.join(",") + "。")}</span>
+          <input id="cc-scan-exts" class="mono" type="text" value="${esc(scanVals.exts)}" spellcheck="false" autocomplete="off"></div>
+        <div class="cfg-row ccfg-row" data-base="${esc(scanVals.pats)}">
+          <span class="cfg-lab">已有字幕判定${helpIcon("影片同目录存在同名 + 该后缀的字幕文件即判为「已有字幕」。带点后缀、逗号分隔。默认 " + LOCAL_SUB_PATTERNS.join(",") + "。")}</span>
+          <input id="cc-scan-pats" class="mono" type="text" value="${esc(scanVals.pats)}" spellcheck="false" autocomplete="off"></div>
+        <div class="cfg-row ccfg-row" data-base="${scanVals.recurse ? "1" : "0"}">
+          <label class="chk-row"><input type="checkbox" id="cc-scan-recurse"${scanVals.recurse ? " checked" : ""}><span>进入子目录</span></label></div>
+        <div class="cfg-row ccfg-row" data-base="${scanVals.min}">
+          <span class="cfg-lab">忽略小于（MB）${helpIcon("低于该大小的文件仍会列出但不默认选中（可显式勾选提交）。0 = 不按大小过滤。默认 200。")}</span>
+          <input id="cc-scan-minsize" type="number" min="0" step="10" value="${scanVals.min}" spellcheck="false" autocomplete="off"></div>
+        <div class="cfg-row ccfg-row" data-base="${esc(scanVals.hasTok)}">
+          <span class="cfg-lab">疑似已压字幕标记${helpIcon("文件名 token（按 - _ . 空格等分隔）整词命中即视为已压字幕版，命中才默认不选。逗号分隔，如 c、chs；大小写不敏感。空 = 不识别。")}</span>
+          <input id="cc-scan-has-tokens" class="mono" type="text" placeholder="空 = 不识别" value="${esc(scanVals.hasTok)}" spellcheck="false" autocomplete="off"></div>
+        <div class="cfg-row ccfg-row" data-base="${esc(scanVals.noTok)}">
+          <span class="cfg-lab">疑似无字幕标记${helpIcon("文件名 token 整词命中即显示「无字幕（名）」信息标（只提示、不拦截）。逗号分隔，如 c；大小写不敏感。默认 c。空 = 不识别。")}</span>
+          <input id="cc-scan-no-tokens" class="mono" type="text" placeholder="空 = 不识别" value="${esc(scanVals.noTok)}" spellcheck="false" autocomplete="off"></div>
+      </div>
+      <div class="ccfg-foot">
+        <span class="cfg-foot-note">只保存在客户端本机；双列表同时命中时无字幕优先</span>
+        <span id="cc-scan-dirty" class="muted small">无改动</span>
+        <span class="cfg-foot-actions"><button type="button" id="cc-scan-save" class="btn" hidden>保存扫描规则</button></span>
+      </div>
+    </section>`;
     if (platform.kind === "desktop") {
       html += `
     <section class="cfg-sec cc-card" data-sec="ccfg-desktop-update">
@@ -4052,7 +4089,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     body.innerHTML = html;
     // 并发卡：改动追踪 + 独立保存（原弹窗卡片语义原样迁移）
     if (cc) {
-      const rows = Array.from(body.querySelectorAll<HTMLElement>(".ccfg-row"));
+      const rows = Array.from(body.querySelectorAll<HTMLElement>(".cc-card[data-sec=ccfg-concurrency] .ccfg-row"));
       const ccDirty = (): void => {
         let n = 0;
         for (const row of rows) {
@@ -4086,6 +4123,56 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           toast("客户端设置已保存（立即生效，无需重启）", "ok");
           for (const row of rows) row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
           ccDirty();
+        } catch (e) {
+          toast((e as Error).message, "err");
+        }
+      };
+    }
+    // 扫描规则卡：独立 dirty 追踪 + 独立保存（只发 6 个 scan_* 键；两端后端均为部分合并）
+    const scanRows = Array.from(body.querySelectorAll<HTMLElement>(".cc-card[data-sec=ccfg-scan] .ccfg-row"));
+    if (scanRows.length) {
+      const sCtl = (id: string) => $(id) as HTMLInputElement;
+      const sRowVal = (row: HTMLElement) => {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        return ctl.type === "checkbox" ? String(ctl.checked) : ctl.value;
+      };
+      const ccScanDirty = (): void => {
+        let n = 0;
+        for (const row of scanRows) {
+          const changed = sRowVal(row) !== (row.dataset.base ?? "");
+          row.classList.toggle("dirty", changed);
+          if (changed) n++;
+        }
+        const d = $("cc-scan-dirty");
+        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        const b = $("cc-scan-save");
+        if (b) b.hidden = n === 0;
+      };
+      for (const row of scanRows) {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        ctl.addEventListener("input", ccScanDirty);
+        ctl.addEventListener("change", ccScanDirty);
+      }
+      const scanSave = $("cc-scan-save") as HTMLButtonElement | null;
+      if (scanSave) scanSave.onclick = async () => {
+        const min = Number(sCtl("cc-scan-minsize").value);
+        if (!Number.isFinite(min) || min < 0) { toast("忽略小于需要 >=0 的有限数字", "err"); return; }
+        const norm = (s: string) => s.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+        const payload = {
+          scan_video_exts: norm(sCtl("cc-scan-exts").value),
+          scan_subtitle_patterns: norm(sCtl("cc-scan-pats").value),
+          scan_recurse: sCtl("cc-scan-recurse").checked,
+          scan_min_size_mb: min,
+          scan_has_sub_tokens: norm(sCtl("cc-scan-has-tokens").value),
+          scan_no_sub_tokens: norm(sCtl("cc-scan-no-tokens").value),
+        };
+        try {
+          await t.putClientConfig!(payload as ClientConfig);
+          // 保存成功才落本端内存（scan_* 由 normalizeClientConfig type-guard 透传）
+          state.ccfg = normalizeClientConfig({ ...(state.ccfg || {}), ...payload });
+          toast("扫描规则已保存（对之后的扫描生效）", "ok");
+          for (const row of scanRows) row.dataset.base = sRowVal(row);
+          ccScanDirty();
         } catch (e) {
           toast((e as Error).message, "err");
         }

@@ -233,10 +233,10 @@ export const webTransport: Transport = {
 
   getUpload: (id) => jget<UploadStatus>("/api/uploads/" + id),
 
-  startScanTask: async (name, path, opts) => {
+  startScanTask: async (name, path) => {
     const r = await fetch("/api/scan/local/tasks", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ engine: name, path, ...(opts || {}) }),
+      body: JSON.stringify({ engine: name, path }),
     });
     if (!r.ok) { let msg = String(r.status); try { msg = ((await r.json()) as { detail?: string }).detail || msg; } catch {} throw new TransportError(msg); }
     return (await r.json()) as ScanTaskSnapshot;
@@ -248,14 +248,9 @@ export const webTransport: Transport = {
   async cancelScanTask(id) { return scanTaskAction(id, "cancel"); },
 
   // 扫描目录 = 工作台部署所在机器（客户端本机），非服务端机器
-  scan: (name, path, opts) => {
-    let q = `/api/scan/local?engine=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`;
-    if (opts) {
-      if (opts.min_size_mb != null) q += `&min_size_mb=${encodeURIComponent(String(opts.min_size_mb))}`;
-      if (opts.naming_c) q += `&naming_c=${encodeURIComponent(opts.naming_c)}`;
-    }
-    return jgetOrDetail<ScanResult>(q);
-  },
+  // 扫描规则统一来自本机 client config（/api/client-config「扫描规则」组），不再走请求参数/引擎 /config
+  scan: (name, path) =>
+    jgetOrDetail<ScanResult>(`/api/scan/local?engine=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`),
 
   // 目录浏览 = 客户端部署机文件系统（「浏览」按钮；只列目录，不读内容）
   fsBrowse: (p) => jgetOrDetail<FsBrowseResult>(`/api/fs/browse?path=${encodeURIComponent(p)}`),

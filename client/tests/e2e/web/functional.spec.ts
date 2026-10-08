@@ -6,8 +6,9 @@ import {
   resetPipelinePause, mockSpeed, goTab, waitForEngineOnline, waitForEngineKey,
 } from "../helpers";
 import path from "node:path";
+import os from "node:os";
 import http from "node:http";
-import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 
 const fx = (n: string) => path.join(FIXTURES, n);
 const jh = { "Content-Type": "application/json" };
@@ -18,6 +19,17 @@ const WEB_VERSION =
 
 // 本地扫描夹具（工作台本机临时目录，3 项：2 无字幕 + 1 外部 srt）
 const SCAN_DIR = makeScanDir();
+
+// 扫描规则 6 键 = 内置默认：共享数据目录 client_config.json 跨套件持久，
+// 用例经 UI 保存/API 写入后须 finally 还原到此态（行为等价内置默认）
+const SCAN_RULES_DEFAULTS = {
+  scan_video_exts: "mp4,mkv,avi,mov,webm,flv,wmv,ts,m2ts,mpg,mpeg",
+  scan_subtitle_patterns: ".zh.srt,.srt",
+  scan_recurse: true,
+  scan_min_size_mb: 200,
+  scan_has_sub_tokens: "",
+  scan_no_sub_tokens: "c",
+};
 
 let req: APIRequestContext;
 test.beforeEach(async ({ request }) => {
@@ -217,7 +229,7 @@ test("config：服务端未设 Key → 400（web 映射 403）；Key 不符 → 
 
 test("scan：本地扫描目录三项（1 个有字幕）；Windows 路径 400；不存在 400", async () => {
   const r = await req.get(
-    `${WEB_URL}/api/scan/local?engine=mock&path=${encodeURIComponent(SCAN_DIR)}&min_size_mb=0`,
+    `${WEB_URL}/api/scan/local?engine=mock&path=${encodeURIComponent(SCAN_DIR)}`,
   );
   expect(r.status()).toBe(200);
   const d = await r.json();
@@ -234,6 +246,47 @@ test("scan：本地扫描目录三项（1 个有字幕）；Windows 路径 400�
   const rn = await req.get(`${WEB_URL}/api/scan/local?engine=mock&path=/nope`);
   expect(rn.status()).toBe(400);
   expect((await rn.json()).detail).toContain("路径不存在");
+});
+
+test("scan：文件名标记规则——默认独立 C → 无字幕（名）→ 客户端设置改已压字幕标记 → 重扫标记（名）", async ({ page }) => {
+  const dir = path.join(os.tmpdir(), `javweb-scan-token-${process.pid}-${Date.now()}`);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(fx("video-a.mp4"), path.join(dir, "ABF-330-C.mp4"));
+  // 扫描规则现存共享数据目录 client_config.json（跨套件持久）：先还原内置默认，保证用例独立
+  await req.put(`${WEB_URL}/api/client-config`, { data: SCAN_RULES_DEFAULTS, headers: jh });
+  try {
+    await page.goto("/");
+    await waitForEngineOnline(page);
+    await waitForEngineKey(page, "mock");
+    // 默认 no_sub_tokens=["c"]：文件名独立 C（不粘番号）→「无字幕（名）」信息标（只提示、不拦截）
+    await page.locator("#scan-path").fill(dir);
+    await page.click("#scan-go");
+    await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".scan-name")).toHaveCount(1);
+    const noTag = page.locator(".subtag", { hasText: "无字幕（名）" });
+    await expect(noTag).toHaveCount(1);
+    await expect(noTag).toHaveAttribute("title", /标记 c/);
+    // 客户端设置：疑似已压字幕标记 = c，清空疑似无字幕标记
+    await goTab(page, "ccfg");
+    await expect(page.locator("#cc-scan-has-tokens")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#cc-scan-exts")).toHaveValue(/mp4/, { timeout: 10_000 }); // 等引擎 /config 异步预填完成
+    await page.locator("#cc-scan-has-tokens").fill("c");
+    await page.locator("#cc-scan-no-tokens").fill("");
+    await page.locator("#cc-scan-save").click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "扫描规则已保存（对之后的扫描生效）" })).toBeVisible({ timeout: 10_000 });
+    // 重扫：C 改命中已压字幕 →「标记（名）」，默认不选
+    await goTab(page, "dispatch");
+    await page.click("#scan-go");
+    await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".subtag", { hasText: "标记（名）" })).toHaveCount(1);
+    await expect(page.locator(".subtag", { hasText: "无字幕（名）" })).toHaveCount(0);
+    await expect(page.locator("#scan-count")).toContainText("已选 0 / 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    // UI 保存整卡 6 键落盘 → 还原内置默认
+    await req.put(`${WEB_URL}/api/client-config`, { data: SCAN_RULES_DEFAULTS, headers: jh });
+  }
 });
 
 test("scan/submit：本机扫描提交 → 200 两条本地任务 → 派发到 mock；空 files → 400", async () => {

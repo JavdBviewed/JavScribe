@@ -49,8 +49,26 @@ CLIENT_CONFIG_DEFAULTS = {"extract_workers": ENV_EXTRACT_CONCURRENCY, "queue_cap
 CLIENT_CONFIG_LIMITS = {"extract_workers": (1, 8), "queue_cap": (1, 16)}
 
 
+def _client_config_put_scan_keys(cfg: dict, src: dict) -> None:
+    """客户端设置里的扫描规则（扁平 scan_* 键）：type-guard 透传，脏值丢弃（回落内置默认）。"""
+    def _str_list(v) -> bool:
+        return isinstance(v, list) and len(v) <= 200 and all(isinstance(x, str) for x in v)
+
+    for key in ("scan_video_exts", "scan_subtitle_patterns",
+                "scan_has_sub_tokens", "scan_no_sub_tokens"):
+        if _str_list(src.get(key)):
+            cfg[key] = src[key]
+    if isinstance(src.get("scan_recurse"), bool):
+        cfg["scan_recurse"] = src["scan_recurse"]
+    v = src.get("scan_min_size_mb")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        v = float(v)
+        if v >= 0 and v != float("inf"):
+            cfg["scan_min_size_mb"] = v
+
+
 def _load_client_config(path: Path) -> dict:
-    """读客户端并发设置；文件缺失/损坏回落默认（值按预置封顶 clamp）。"""
+    """读客户端设置（并发 + 扫描规则）；文件缺失/损坏回落默认（值按预置封顶 clamp）。"""
     cfg = dict(CLIENT_CONFIG_DEFAULTS)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -64,6 +82,7 @@ def _load_client_config(path: Path) -> dict:
         v = raw.get("pipeline_paused")
         if isinstance(v, bool):
             cfg["pipeline_paused"] = v
+        _client_config_put_scan_keys(cfg, raw)
     return cfg
 
 
@@ -293,7 +312,6 @@ class ScanTask:
     updated: float = field(default_factory=time.time)
     finished: float | None = None
     cfg: dict = field(default_factory=dict, repr=False, compare=False)
-    from_engine: bool = False
     _pause: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _running: bool = field(default=False, repr=False, compare=False)
@@ -394,7 +412,8 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             with _scan_tasks_lock:
                 payload = {"tasks": [{**t.to_dict(), "scan_options": {
                     "min_size_mb": localscan._scan_cfg(t.cfg)["min_size_mb"],
-                    "naming_c": localscan._scan_cfg(t.cfg)["naming_c"],
+                    "has_sub_tokens": localscan._scan_cfg(t.cfg)["has_sub_tokens"],
+                    "no_sub_tokens": localscan._scan_cfg(t.cfg)["no_sub_tokens"],
                 }} for t in _scan_tasks.values()]}
             tmp = _scan_state_path.with_name(_scan_state_path.name + ".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -422,11 +441,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                     found=int(e.get("found") or 0), result=e.get("result"),
                     error=e.get("error"), created=float(e.get("created") or time.time()),
                     updated=float(e.get("updated") or time.time()),
-                    cfg=localscan.cfg_from_items([
-                        {"path": "scan.min_size_mb", "value": (e.get("scan_options") or {}).get("min_size_mb", 200)},
-                        {"path": "scan.naming_c", "value": (e.get("scan_options") or {}).get("naming_c", "no_sub")},
-                    ]),
-                    from_engine=False,
+                    cfg=_scan_cfg_from_options(e.get("scan_options") or {}),
                     finished=float(e["finished"]) if e.get("finished") is not None else None,
                 )
             except (TypeError, ValueError):
@@ -445,7 +460,6 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     async def _run_scan_task(task: ScanTask) -> None:
         cfg = task.cfg
-        from_engine = task.from_engine
         task._running = True
         task.status = "running"
         task.error = None
@@ -471,10 +485,12 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 task.status = "canceled"
                 task.result = None
             else:
+                _sc = localscan._scan_cfg(cfg)
                 task.result = {**result, "mapped": task.mapped,
-                               "rules": "engine" if from_engine else "defaults",
-                               "min_size_mb": localscan._scan_cfg(cfg)["min_size_mb"],
-                               "naming_c": localscan._scan_cfg(cfg)["naming_c"]}
+                               "rules": _scan_rules_source(),
+                               "min_size_mb": _sc["min_size_mb"],
+                               "has_sub_tokens": _sc["has_sub_tokens"],
+                               "no_sub_tokens": _sc["no_sub_tokens"]}
                 task.found = len(result.get("items") or [])
                 task.status = "done"
         except localscan.ScanCanceled:
@@ -490,13 +506,11 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 task.finished = task.updated
             _save_scan_tasks_state()
 
-    def _start_scan_task(task: ScanTask, cfg: dict | None = None, from_engine: bool | None = None) -> None:
+    def _start_scan_task(task: ScanTask, cfg: dict | None = None) -> None:
         if task._running:
             return
         if cfg is not None:
             task.cfg = copy.deepcopy(cfg)
-        if from_engine is not None:
-            task.from_engine = from_engine
         task._cancel.clear()
         task._pause.clear()
         task.status = "queued"
@@ -620,6 +634,33 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
 
     # 客户端并发设置（设置弹窗「客户端（本机工作台）」卡片可调，立即生效）：
     # 提取并发闸 + 在途封顶门，替代原固定 Semaphore（部署期只能 env 配）
+    _CLIENT_SCAN_KEYS = {"scan_video_exts": "video_exts", "scan_subtitle_patterns": "subtitle_patterns",
+                         "scan_recurse": "recurse", "scan_min_size_mb": "min_size_mb",
+                         "scan_has_sub_tokens": "has_sub_tokens", "scan_no_sub_tokens": "no_sub_tokens"}
+
+    def _client_scan_cfg() -> dict:
+        """扫描规则统一来自本机 client config（「客户端设置 · 扫描规则」组）；缺键=内置默认。"""
+        cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
+        for flat_key, scan_key in _CLIENT_SCAN_KEYS.items():
+            if flat_key in _client_cfg:
+                cfg["scan"][scan_key] = _client_cfg[flat_key]
+        return cfg
+
+    def _scan_rules_source() -> str:
+        """扫描规则来源标注（UI 不消费，留档用）：client / defaults（client config 是否带 scan_* 键）。"""
+        return "client" if any(k in _client_cfg for k in _CLIENT_SCAN_KEYS) else "defaults"
+
+    def _scan_cfg_from_options(opts: dict) -> dict:
+        """历史任务快照 scan_options → 扫描 cfg（新键直通；老 naming_c 走 localscan 映射）。"""
+        items = [{"path": "scan.min_size_mb",
+                  "value": opts.get("min_size_mb", localscan.DEFAULT_SCAN_CFG["scan"]["min_size_mb"])}]
+        for key in ("has_sub_tokens", "no_sub_tokens"):
+            if key in opts:
+                items.append({"path": f"scan.{key}", "value": opts[key]})
+        if "has_sub_tokens" not in opts and "no_sub_tokens" not in opts and "naming_c" in opts:
+            items.append({"path": "scan.naming_c", "value": opts["naming_c"]})
+        return localscan.cfg_from_items(items)
+
     _client_cfg_path = Path(data_dir) / CLIENT_CONFIG_NAME
     _client_cfg = _load_client_config(_client_cfg_path)
     _local_limiter = _Limiter(_client_cfg["extract_workers"])
@@ -1012,6 +1053,34 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 else:
                     _gate.set_limit(v)
                 changed = True
+        # 扫描规则（10-08 归位客户端设置）：扁平 scan_* 键，归一化复用 localscan（400 文案=ScanError 原文）
+        for flat_key, norm in (
+            ("scan_video_exts", lambda v: localscan.normalize_video_exts(v)),
+            ("scan_subtitle_patterns", lambda v: localscan.normalize_subtitle_patterns(v)),
+            ("scan_has_sub_tokens", lambda v: localscan.normalize_scan_tokens(v, "has_sub_tokens")),
+            ("scan_no_sub_tokens", lambda v: localscan.normalize_scan_tokens(v, "no_sub_tokens")),
+        ):
+            if flat_key not in body:
+                continue
+            try:
+                _client_cfg[flat_key] = norm(body[flat_key])
+            except localscan.ScanError as ex:
+                raise HTTPException(400, str(ex))
+            changed = True
+        if "scan_recurse" in body:
+            if not isinstance(body["scan_recurse"], bool):
+                raise HTTPException(400, "scan_recurse 需要布尔值")
+            _client_cfg["scan_recurse"] = body["scan_recurse"]
+            changed = True
+        if "scan_min_size_mb" in body:
+            v = body["scan_min_size_mb"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise HTTPException(400, "scan_min_size_mb 需要 >=0 的有限数字")
+            v = float(v)
+            if v < 0 or v == float("inf"):
+                raise HTTPException(400, "scan_min_size_mb 需要 >=0 的有限数字")
+            _client_cfg["scan_min_size_mb"] = v
+            changed = True
         if changed:
             _save_client_config()
         return {"ok": True, "config": dict(_client_cfg)}
@@ -1853,19 +1922,6 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     # 架构约定：服务端不做文件交互；「扫描目录」= 客户端（本机）路径。
     # 完成后字幕由工作台自动写回本机影片旁（_local_writeback_tick）。
 
-    async def _engine_scan_cfg(name: str) -> tuple[dict, bool]:
-        """取引擎侧扫描规则（与「服务设置」同源）；不可达时退回内置默认。"""
-        entry = store.get(name)
-        assert entry is not None
-        eng = JavScribeEngine(name, entry["url"], entry.get("api_key", ""))
-        try:
-            c = await eng.config()
-            return localscan.cfg_from_items(c.get("items") or []), True
-        except httpx.HTTPError:
-            return copy.deepcopy(localscan.DEFAULT_SCAN_CFG), False
-        finally:
-            await eng.close()
-
     @app.get("/api/fs/read-srt")
     async def api_fs_read_srt(path: str) -> dict:
         """字幕预览：读客户端部署机上的字幕文件内容（前端预览弹窗用）。
@@ -1904,32 +1960,18 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         engine = str(body.get("engine") or "")
         path = str(body.get("path") or "").strip()
         resolve_engine(engine)
-        cfg, from_engine = await _engine_scan_cfg(pick_engine() if engine == AUTO else engine)
-        min_size_mb = body.get("min_size_mb")
-        naming_c = body.get("naming_c")
-        if min_size_mb is not None:
-            try:
-                min_size_mb = float(min_size_mb)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
-            if min_size_mb < 0 or min_size_mb == float("inf"):
-                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
-            cfg.setdefault("scan", {})["min_size_mb"] = min_size_mb
-        if naming_c is not None:
-            if naming_c not in localscan.NAMING_C_MODES:
-                raise HTTPException(400, f"naming_c 需要 {' / '.join(localscan.NAMING_C_MODES)} 之一")
-            cfg.setdefault("scan", {})["naming_c"] = naming_c
+        # 扫描规则统一来自本机 client config（「客户端设置 · 扫描规则」组）
+        cfg = _client_scan_cfg()
         try:
             root, mapped = localscan.resolve_scan_root(path)
         except localscan.ScanError as ex:
             raise HTTPException(400, str(ex))
         task = ScanTask(id=uuid.uuid4().hex[:12], engine=engine, requested_path=path,
-                        resolved_path=str(root), mapped=mapped, cfg=copy.deepcopy(cfg),
-                        from_engine=from_engine)
+                        resolved_path=str(root), mapped=mapped, cfg=copy.deepcopy(cfg))
         with _scan_tasks_lock:
             _scan_tasks[task.id] = task
         _save_scan_tasks_state()
-        _start_scan_task(task, cfg, from_engine)
+        _start_scan_task(task, cfg)
         return _scan_snapshot(task)
 
     @app.get("/api/scan/local/tasks")
@@ -1990,25 +2032,10 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         return _scan_snapshot(task)
 
     @app.get("/api/scan/local")
-    async def api_local_scan(
-        engine: str,
-        path: str,
-        min_size_mb: float | None = None,
-        naming_c: str | None = None,
-    ) -> dict:
+    async def api_local_scan(engine: str, path: str) -> dict:
         resolve_engine(engine)
-        # auto：扫描规则取自当前负载最轻的服务（规则各服务一致时等价于任选）
-        cfg, from_engine = await _engine_scan_cfg(pick_engine() if engine == AUTO else engine)
-        # 客户端侧文件属性规则覆盖（扫描面板设置；非法值拒绝而非静默回退）
-        if min_size_mb is not None:
-            if not (min_size_mb >= 0) or min_size_mb == float("inf"):
-                raise HTTPException(400, "min_size_mb 需要 >=0 的有限数字")
-            cfg.setdefault("scan", {})["min_size_mb"] = min_size_mb
-        if naming_c is not None:
-            if naming_c not in localscan.NAMING_C_MODES:
-                raise HTTPException(
-                    400, f"naming_c 需要 {' / '.join(localscan.NAMING_C_MODES)} 之一")
-            cfg.setdefault("scan", {})["naming_c"] = naming_c
+        # 扫描规则统一来自本机 client config（「客户端设置 · 扫描规则」组）
+        cfg = _client_scan_cfg()
         try:
             root, mapped = localscan.resolve_scan_root(path)
         except localscan.ScanError as ex:
@@ -2019,9 +2046,10 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             raise HTTPException(500, f"扫描失败: {ex}")
         _sc = localscan._scan_cfg(cfg)
         result["mapped"] = mapped
-        result["rules"] = "engine" if from_engine else "defaults"
+        result["rules"] = _scan_rules_source()
         result["min_size_mb"] = _sc["min_size_mb"]
-        result["naming_c"] = _sc["naming_c"]
+        result["has_sub_tokens"] = _sc["has_sub_tokens"]
+        result["no_sub_tokens"] = _sc["no_sub_tokens"]
         return result
 
     @app.post("/api/scan/local/submit")
@@ -2033,11 +2061,10 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         resolve_engine(name)
         if not isinstance(files, list) or not files:
             raise HTTPException(400, "files 需要非空数组（绝对路径列表）")
-        # auto：扩展名/字幕判定规则取自当前负载最轻的服务；任务行保留 auto，
-        # 实际服务在各自派发时刻按负载解析
-        cfg, _from_engine = await _engine_scan_cfg(pick_engine() if name == AUTO else name)
+        # 扩展名判定规则同扫描：本机 client config（「客户端设置 · 扫描规则」组）；
+        # 任务行保留 auto，实际服务在各自派发时刻按负载解析
         try:
-            paths = localscan.validate_submit_files(files, cfg)
+            paths = localscan.validate_submit_files(files, _client_scan_cfg())
         except localscan.ScanError as ex:
             raise HTTPException(400, str(ex))
         # 提交前检测到的字幕状态（{path: external/embedded/named}）：只做展示提示，

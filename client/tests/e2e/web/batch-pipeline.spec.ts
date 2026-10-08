@@ -90,15 +90,14 @@ test.beforeEach(async ({ page, request }) => {
 // pipeline_paused 持久化在共享 web 数据目录：用例中途失败也要复位，防拖死后续本机管线用例
 test.afterEach(async () => {
   await resetPipelinePause(req);
+  // 扫描规则 minsize 在共享 client_config.json（跨套件持久）：统一还原默认 200
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 200 } }).catch(() => {});
 });
 
 test("a) 扫 5 视频 → 1 主任务（5 子任务）→ 全完成 → 主任务完成+总耗时", async ({ page }) => {
   const dir = makeBatchScanDir("javweb-batch-scan-a", 5);
-  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 置 0（页面加载时读入，须 reload）
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload();
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 「忽略小于」默认 200MB 会把夹具小文件判成过小未选 → 服务端即时置 0（afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   page.on("dialog", (d) => d.accept());
   await page.locator("#scan-path").fill(dir);
   await page.click("#scan-go");
@@ -131,10 +130,8 @@ test("a) 扫 5 视频 → 1 主任务（5 子任务）→ 全完成 → 主任�
 
 test("b) 运行中暂停主任务：在跑跑完、其余停在排队；继续后恢复开跑", async ({ page }) => {
   const dir = makeBatchScanDir("javweb-batch-scan-b", 5);
-  await page.evaluate(() => localStorage.setItem("javweb_scan_minsize", "0"));
-  await page.reload();
-  await waitForEngineOnline(page);
-  await waitForEngineKey(page, "mock");
+  // 服务端即时置 0（afterEach 还原 200）
+  await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   page.on("dialog", (d) => d.accept());
   await page.locator("#scan-path").fill(dir);
   await page.click("#scan-go");
