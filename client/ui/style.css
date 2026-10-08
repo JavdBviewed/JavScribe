@@ -691,6 +691,17 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 .p-paused { color: var(--pause); background: var(--pause-soft); border-color: transparent; }
 .p-paused i { animation: none; opacity: 0.65; }
 /* 已挂起行：整行降饱和提示（不遮数据） */
+/* 主任务（batch）行：组头；子行复用 .job-row */
+.job-batch-row { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.job-batch-row:hover { background: color-mix(in srgb, var(--accent-soft) 75%, transparent); }
+.job-batch-row.running { box-shadow: inset 3px 0 0 var(--accent); }
+.job-batch-row.paused { opacity: 0.78; }
+.job-batch-row .batch-caret {
+  background: none; border: none; cursor: pointer; color: var(--muted);
+  font-size: 11px; padding: 2px 0; line-height: 1;
+}
+.job-batch-row .batch-caret:hover { color: var(--accent); }
+.job-batch-row .batch-sub-n { color: var(--muted); }
 .job-row.paused { opacity: 0.78; }
 .prog { display: flex; align-items: center; gap: 8px; }
 .bar {

@@ -5,7 +5,7 @@ import {
   TransportError, type PauseAllResult, type Transport, type UploadDispatch, type UploadProgress,
 } from "../core/transport";
 import type {
-  BulkResult, ConfigItem, Engine, Health, JobRow, FsBrowseResult, MetricsResponse,
+  BatchOpResult, BatchRecord, BulkResult, ConfigItem, Engine, Health, JobRow, FsBrowseResult, MetricsResponse,
   ReadinessPayload, ScanResult, ScanTaskSnapshot, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
@@ -109,6 +109,12 @@ export const webTransport: Transport = {
 
   listJobs: () => jget<JobRow[]>("/api/jobs"),
 
+  // 主任务（batch）操作：无 body；本机任务立即生效 + fan-out 各在线服务（旧版服务 404 → 该引擎 unsupported）
+  batchOp: (action, batchId) =>
+    jpost<BatchOpResult>(`/api/batch/${encodeURIComponent(batchId)}/${action}`),
+  // 主任务记录列表（created 降序；完成/过期主任务对账用）
+  listBatches: () => jget<BatchRecord[]>("/api/batches"),
+
   listJobsSummary: () => jget<import("../core/types").JobSummary>("/api/jobs/summary"),
 
   getClientConfig: () =>
@@ -201,19 +207,27 @@ export const webTransport: Transport = {
       { values },
     ),
 
-  async uploadFile(file, engine, onProgress) {
+  async uploadFile(file, engine, onProgress, batch) {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("engine", engine);
+    if (batch) {
+      fd.append("batch_id", batch.id);
+      fd.append("batch_label", batch.label || "");
+    }
     return xhrUpload("/api/upload", fd, onProgress);
   },
 
-  async uploadAudio(file, engine, audio, onProgress) {
+  async uploadAudio(file, engine, audio, onProgress, batch) {
     const fd = new FormData();
     fd.append("audio", audio, file.name.replace(/\.[^.]+$/, "") + ".opus");
     fd.append("engine", engine);
     fd.append("name", file.name);
     fd.append("size_mb", String(Math.round(file.size / 1048576)));
+    if (batch) {
+      fd.append("batch_id", batch.id);
+      fd.append("batch_label", batch.label || "");
+    }
     return xhrUpload("/api/upload-audio", fd, onProgress);
   },
 
@@ -248,7 +262,7 @@ export const webTransport: Transport = {
   // 字幕预览：只放行字幕扩展名（服务端校验），内容返回给前端弹窗解析
   readSrt: (p) => jgetOrDetail<SrtReadResult>(`/api/fs/read-srt?path=${encodeURIComponent(p)}`),
 
-  async submitScan(name: string, files: string[], subStatus?: Record<string, string>) {
+  async submitScan(name: string, files: string[], subStatus?: Record<string, string>, batch?: { id: string; label?: string }) {
     let r: Response;
     try {
       r = await fetch(`/api/scan/local/submit`, {
@@ -258,6 +272,7 @@ export const webTransport: Transport = {
           engine: name,
           files,
           ...(subStatus && Object.keys(subStatus).length ? { sub_status: subStatus } : {}),
+          ...(batch ? { batch_id: batch.id, batch_label: batch.label || "" } : {}),
         }),
       });
     } catch (_e) {

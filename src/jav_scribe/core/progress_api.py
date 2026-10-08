@@ -446,6 +446,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "device": e.cfg.get("infer", {}).get("device", "auto"),
                     "stats": e.stats(),  # 累计终态统计（老客户端忽略新字段）
                     "paused": e.paused,  # 队列暂停（老客户端忽略新字段）
+                    "batch_paused": e.batch_paused_ids,  # batch 暂停标记（老客户端忽略新字段）
                     "jobs": [j.to_dict() for j in e.jobs],
                 },
             )
@@ -516,7 +517,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parts[0] == "jobs":
             if len(parts) == 1:
-                self._send(200, [j.to_dict() for j in self.engine.jobs])
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                batch_id = (q.get("batch_id") or [None])[0]
+                jobs = self.engine.jobs
+                if batch_id is not None:
+                    jobs = [j for j in jobs if j.batch_id == batch_id]
+                self._send(200, [j.to_dict() for j in jobs])
                 return
             job = self.engine.job_by_id(parts[1])
             if job is None:
@@ -548,8 +554,12 @@ class _Handler(BaseHTTPRequestHandler):
             except scanlib.ScanError as ex:
                 self._send(400, {"ok": False, "error": str(ex)})
                 return
+            # 可选 batch 字段：客户端扫描生成主任务（老客户端不带 → None 不套壳）
+            batch_id = body.get("batch_id") or None
+            batch_label = body.get("batch_label") or None
             job = self.engine.submit(
-                files, source_kind="local", label=f"文件夹扫描 · {len(files)} 项"
+                files, source_kind="local", label=f"文件夹扫描 · {len(files)} 项",
+                batch_id=batch_id, batch_label=batch_label,
             )
             self._send(201, {"ok": True, "job_id": job.id, "files": len(files)})
             return
@@ -593,6 +603,18 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, {"ok": True, "job_id": parts[1], "status": status})
             return
+        if len(parts) == 4 and parts[0] == "jobs" and parts[1] == "batch" and parts[3] in ("pause", "resume", "cancel"):
+            # 批次（主任务）级操作：与 /jobs 操作同敏感级（无鉴权、仅内网）。
+            # 该 serve 未持有该 batch 任务也照记标记（后续派发/重启仍生效）→ 恒 200。
+            bid = parts[2]
+            if parts[3] == "cancel":
+                self._send(200, {"ok": True, "batch_id": bid, **self.engine.batch_cancel(bid)})
+            else:
+                changed = self.engine.batch_pause(bid) if parts[3] == "pause" else self.engine.batch_resume(bid)
+                self._send(200, {"ok": True, "batch_id": bid, "changed": changed,
+                                 "paused": bid in self.engine.batch_paused_ids})
+            return
+
         if len(parts) == 2 and parts[0] == "upload" and parts[1] == "submit":
             # 先问后传命中路径：无 body，直接以已缓存音轨建任务
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
@@ -609,7 +631,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(409, {"ok": False, "error": "not-cached"})
                 return
             source_name = urllib.parse.unquote(self.headers.get("X-Source-Name") or "") or (q.get("source") or ["remote"])[0]
-            job = self.engine.submit_remote_files([p], source_name=source_name)
+            batch_id = (q.get("batch_id") or [None])[0]
+            batch_label = (q.get("batch_label") or [None])[0]
+            job = self.engine.submit_remote_files([p], source_name=source_name,
+                                                  batch_id=batch_id, batch_label=batch_label)
             self._send(
                 201,
                 {"ok": True, "job_id": job.id, "file": p.name, "sha1": sha1, "cached": True},
@@ -672,6 +697,8 @@ class _Handler(BaseHTTPRequestHandler):
             urllib.parse.unquote(self.headers.get("X-Source-Name") or "")
             or (q.get("source") or ["remote"])[0]
         )
+        batch_id = (q.get("batch_id") or [None])[0]
+        batch_label = (q.get("batch_label") or [None])[0]
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
         # 流式落盘边算 sha1（不整包驻留内存）；内容寻址存储，同内容去重复用。
         # 点前缀临时文件：崩溃残留也会被 retention 清理（ext 命中 CACHE_EXTS）。
@@ -710,7 +737,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": f"落盘失败: {ex}"})
                 return
         self.metrics.add_upload_bytes(final.stat().st_size)
-        job = self.engine.submit_remote_files([final], source_name=source_name)
+        job = self.engine.submit_remote_files([final], source_name=source_name,
+                                              batch_id=batch_id, batch_label=batch_label)
         self._send(
             201,
             {"ok": True, "job_id": job.id, "file": final.name, "sha1": hexd},

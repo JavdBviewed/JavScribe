@@ -486,7 +486,8 @@ def test_local_submit_pipeline_and_writeback() -> None:
     captured: dict = {}
     orig_upload, orig_result = JavScribeEngine.upload_audio, JavScribeEngine.result
 
-    async def fake_upload_audio(self, audio: bytes, source_name: str) -> dict:
+    async def fake_upload_audio(self, audio: bytes, source_name: str,
+                           batch_id: str | None = None, batch_label: str | None = None) -> dict:
         captured.setdefault("audio", []).append((source_name, audio))
         return {"job_id": "job-ls-1", "cached": False}
 

@@ -27,6 +27,7 @@ class EngineInfo:
     updated_at: float = field(default_factory=time.time)
     stats: dict | None = None  # serve 累计终态统计（v0.2.2+；老 serve 无此字段=None）
     paused: bool = False  # serve 队列暂停（v0.2.3+；老 serve 恒 False）
+    batch_paused: list[str] = field(default_factory=list)  # 暂停中的主任务(batch) id 列表（serve 侧 batch 端点；老 serve 无此字段=空）
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +42,7 @@ class EngineInfo:
             "updated_at": self.updated_at,
             "stats": self.stats,
             "paused": self.paused,
+            "batch_paused": self.batch_paused,
         }
 
 
@@ -83,3 +85,15 @@ class EngineAdapter(ABC):
     async def resume_job(self, job_id: str) -> dict:
         """恢复服务单个挂起任务。默认不支持。"""
         return {"ok": False, "error": "resume not supported"}
+
+    async def batch_pause(self, batch_id: str) -> dict:
+        """暂停主任务(batch)：排队冻结，运行中跑完。默认不支持。"""
+        return {"ok": False, "error": "batch-pause not supported"}
+
+    async def batch_resume(self, batch_id: str) -> dict:
+        """继续主任务(batch)。默认不支持。"""
+        return {"ok": False, "error": "batch-resume not supported"}
+
+    async def batch_cancel(self, batch_id: str) -> dict:
+        """取消主任务(batch)：未开始文件置 CANCELED，运行中不动。默认不支持。"""
+        return {"ok": False, "error": "batch-cancel not supported"}

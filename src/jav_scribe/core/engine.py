@@ -63,6 +63,7 @@ JOBS_HISTORY_NAME = "jobs.json"
 JOBS_HISTORY_MAX = 500  # 磁盘上限（内存表仍为 200，save 时一并修剪）
 STATS_NAME = "stats.json"  # 累计终态统计（独立于 200 内存窗，看板统计单一真源）
 PAUSE_NAME = "pause.json"  # 队列暂停状态（{"paused": bool}，重启恢复）
+BATCH_PAUSE_NAME = "batch-pause.json"  # 批次（主任务）暂停态（{"paused": [batch_id, ...]}，重启恢复）
 
 
 def job_from_dict(d: dict) -> "Job | None":
@@ -96,6 +97,8 @@ def job_from_dict(d: dict) -> "Job | None":
             label=str(d.get("label", "") or ""),
             cancel_requested=bool(d.get("cancel_requested", False)),
             paused=bool(d.get("paused", False)),
+            batch_id=d.get("batch_id"),  # 旧 jobs.json 条目无此字段 → None（天然兼容）
+            batch_label=d.get("batch_label"),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -151,6 +154,11 @@ class Engine:
         self._paused = False
         self._pause_path = Path(data_dir) / PAUSE_NAME if data_dir else None
         self._load_pause_state()
+        # 批次（主任务）级暂停：冻结该 batch 排队子任务（Job 级优雅暂停）；与队列暂停独立可叠加。
+        # 状态持久化重启不丢；标记不剪枝——重启后该 batch 在途 Job 不在内存，标记仍须生效（验收 e）。
+        self._batch_paused: set[str] = set()
+        self._batch_pause_path = Path(data_dir) / BATCH_PAUSE_NAME if data_dir else None
+        self._load_batch_pause_state()
         self._live_thread = threading.Thread(target=self._live_loop, daemon=True)
         self._live_thread.start()
 
@@ -234,8 +242,11 @@ class Engine:
         source_kind: str = "local",
         label: str = "",
         run_in_thread: bool = True,
+        batch_id: str | None = None,
+        batch_label: str | None = None,
     ) -> Job:
-        job = Job(id=new_job_id(), files=[Task(path=f) for f in files], source_kind=source_kind, label=label)
+        job = Job(id=new_job_id(), files=[Task(path=f) for f in files], source_kind=source_kind, label=label,
+                  batch_id=batch_id, batch_label=batch_label)
         self.jobs.append(job)
         if len(self.jobs) > 200:
             self.jobs.pop(0)
@@ -252,8 +263,10 @@ class Engine:
         return job
 
 
-    def submit_remote_files(self, files: list[Path], source_name: str) -> Job:
-        return self.submit(files, source_kind="remote", label=source_name)
+    def submit_remote_files(self, files: list[Path], source_name: str,
+                             batch_id: str | None = None, batch_label: str | None = None) -> Job:
+        return self.submit(files, source_kind="remote", label=source_name,
+                           batch_id=batch_id, batch_label=batch_label)
 
     def retry_job(self, job_id: str) -> "Job | None":
         """重试：SKIPPED 文件（删旧字幕/放行内嵌判定）+ ERROR 文件重新入队。
@@ -409,6 +422,103 @@ class Engine:
         self._drain_pending()
         return "resumed"
 
+    # ------------------------------------------------------------------
+    # 批次（主任务）级暂停 / 继续 / 取消（S2：Job 级优雅暂停）
+    # ------------------------------------------------------------------
+    def _load_batch_pause_state(self) -> None:
+        if self._batch_pause_path is None or not self._batch_pause_path.exists():
+            return
+        try:
+            raw = json.loads(self._batch_pause_path.read_text(encoding="utf-8"))
+            for v in raw.get("paused", []):
+                if isinstance(v, str) and v:
+                    self._batch_paused.add(v)
+            if self._batch_paused:
+                self.log(f"[engine] 已恢复 {len(self._batch_paused)} 个 batch 暂停态（重启前已暂停）")
+        except (OSError, ValueError, TypeError) as e:
+            self.log(f"[engine] batch 暂停状态读取失败（忽略）: {e}")
+
+    def _save_batch_pause(self) -> None:
+        if self._batch_pause_path is None:
+            return
+        try:
+            tmp = self._batch_pause_path.with_name(self._batch_pause_path.name + ".tmp")
+            tmp.write_text(json.dumps({"paused": sorted(self._batch_paused)}, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, self._batch_pause_path)
+        except OSError as e:
+            self.log(f"[engine] batch 暂停状态写入失败（忽略）: {e}")
+
+    @property
+    def batch_paused_ids(self) -> list[str]:
+        return sorted(self._batch_paused)
+
+    def _job_frozen(self, job: "Job") -> bool:
+        """Job 级冻结判定：单任务挂起或其所属 batch 暂停（须在 _sched_lock 内调用）。"""
+        return job.paused or (job.batch_id is not None and job.batch_id in self._batch_paused)
+
+    def batch_pause(self, batch_id: str) -> bool:
+        """暂停主任务：在跑子任务跑完、排队子任务不开跑。返回是否从非暂停切换为暂停。
+
+        判定与置位都在 _sched_lock 内原子完成：与 _pipeline 的开跑提交（committed 位）
+        互斥，杜绝「暂停成功但任务刚好开跑」的冻结丢失窗口。
+        """
+        with self._sched_lock:
+            if batch_id in self._batch_paused:
+                return False
+            self._batch_paused.add(batch_id)
+        self._save_batch_pause()
+        self.log(f"[engine] 主任务 {batch_id} 已暂停（在跑子任务继续跑完）")
+        return True
+
+    def batch_resume(self, batch_id: str) -> bool:
+        """继续主任务：解冻该 batch 排队子任务并补派。返回是否从暂停切换为继续。"""
+        with self._sched_lock:
+            if batch_id not in self._batch_paused:
+                return False
+            self._batch_paused.discard(batch_id)
+        self._save_batch_pause()
+        self.log(f"[engine] 主任务 {batch_id} 已继续")
+        self._drain_pending()
+        return True
+
+    def batch_cancel(self, batch_id: str) -> dict:
+        """取消主任务：batch 内未开始子任务的 PENDING 文件 → CANCELED（主任务已取消）。
+
+        在跑子任务不动：不置 cancel_requested、不做协作中止（PRD 钉死语义）。
+        取消同时清该 batch 暂停标记。返回 {"canceled_jobs": n, "canceled_files": m}。
+        """
+        now = time.time()
+        canceled_jobs = 0
+        canceled_files = 0
+        with self._sched_lock:
+            for job in self.jobs:
+                if job.batch_id != batch_id or job.done:
+                    continue
+                if job in self._pending_jobs:
+                    self._pending_jobs.remove(job)
+                touched = 0
+                for t in job.files:
+                    if t.status == TaskStatus.PENDING:
+                        t.status = TaskStatus.CANCELED
+                        t.message = "主任务已取消"
+                        t.finished = now
+                        t.eta_s = None
+                        touched += 1
+                if touched:
+                    canceled_files += touched
+                if job.done:
+                    job.finished = job.finished or now
+                    self._count_terminals([job])
+                    canceled_jobs += 1
+            self._batch_paused.discard(batch_id)
+        self._save_jobs()
+        self._save_batch_pause()
+        if canceled_jobs or canceled_files:
+            self.log(f"[engine] 主任务 {batch_id} 已取消：{canceled_jobs} 个子任务、{canceled_files} 个文件（在跑的不受影响）")
+        self._drain_pending()
+        return {"canceled_jobs": canceled_jobs, "canceled_files": canceled_files}
+
     def _restore_job_history(self) -> None:
         if self._jobs_path is None or not self._jobs_path.exists():
             return
@@ -521,11 +631,11 @@ class Engine:
     # Job execution
     # ------------------------------------------------------------------
     def _run_job(self, job: Job) -> None:
-        if job.paused:
-            # 交接窗口：drain 弹出后、开跑前被挂起 → 回到队首，不占推理资源
+        if job.paused or (job.batch_id is not None and job.batch_id in self._batch_paused):
+            # 交接窗口：drain 弹出后、开跑前被挂起 / batch 被暂停 → 回到队首，不占推理资源
             with self._sched_lock:
                 self._pending_jobs.insert(0, job)
-            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前）")
+            self.log(f"[engine] 任务 {job.id} 已冻结（开跑前）")
             self._release_slot()
             return
         if job.cancel_requested:
@@ -569,9 +679,11 @@ class Engine:
                 job = None
                 while self._pending_jobs:
                     cand = self._pending_jobs.pop(0)
-                    if cand.paused:
-                        if all(j.paused for j in self._pending_jobs):
-                            # 全被挂起：放回去，等 resume
+                    if cand.done:
+                        continue  # 队列里已收尾的 Job（取消等路径）：直接丢弃不派发
+                    if self._job_frozen(cand):
+                        if all(self._job_frozen(j) for j in self._pending_jobs):
+                            # 全被冻结（挂起/batch 暂停）：放回去，等 resume
                             self._pending_jobs.insert(0, cand)
                             return
                         self._pending_jobs.append(cand)  # 移尾，找下一个
@@ -663,6 +775,7 @@ class Engine:
                     and cand is not job
                     and cand.source_kind == job.source_kind
                     and not cand.paused
+                    and not (cand.batch_id is not None and cand.batch_id in self._batch_paused)
                     and not cand.cancel_requested
                     and not cand.committed
                     and any(t.status == TaskStatus.PENDING for t in cand.files)
@@ -695,7 +808,7 @@ class Engine:
         # 开跑门：与 pause_job 同一把锁，commit / requeue 二选一，零竞态窗口。
         # 若挂起发生在 drain 派发之后、此处提交之前 → 回到队首重排，不占资源。
         with self._sched_lock:
-            if job.paused:
+            if job.paused or (job.batch_id is not None and job.batch_id in self._batch_paused):
                 self._pending_jobs.insert(0, job)
                 job.committed = False
                 requeue = True
@@ -703,7 +816,7 @@ class Engine:
                 job.committed = True
                 requeue = False
         if requeue:
-            self.log(f"[engine] 任务 {job.id} 已挂起（开跑前，重新排队）")
+            self.log(f"[engine] 任务 {job.id} 已冻结（开跑前，重新排队）")
             self._release_slot()
             return
         lang = self.cfg.get("subtitle", {}).get("lang_tag", DEFAULT_LANG_TAG)

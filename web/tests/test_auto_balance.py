@@ -36,7 +36,8 @@ def _make(td: str, loads: dict[str, int], online: dict[str, bool] | None = None)
 
 
 def _fake(captured: list):
-    async def fake_upload_audio(self, audio_bytes: bytes, name: str) -> dict:
+    async def fake_upload_audio(self, audio_bytes: bytes, name: str,
+                           batch_id: str | None = None, batch_label: str | None = None) -> dict:
         captured.append({"engine": self.name, "name": name})
         return {"job_id": f"job-{self.name}-{len(captured)}", "cached": False}
     return fake_upload_audio

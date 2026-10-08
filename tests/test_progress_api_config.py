@@ -53,6 +53,7 @@ class FakeEngine:
         self.cfg = cfg
         self.jobs: list = []
         self.paused = False
+        self.batch_paused_ids: list = []
 
     def log(self, _msg: str) -> None:
         pass
@@ -69,8 +70,10 @@ class FakeEngine:
     def result_srt_bytes(self, _job):
         return None
 
-    def submit_remote_files(self, _files, source_name=None):
+    def submit_remote_files(self, _files, source_name=None,
+                            batch_id=None, batch_label=None):
         self.last_source_name = source_name
+        self.last_batch = (batch_id, batch_label)
         return _FakeJob()
 
 

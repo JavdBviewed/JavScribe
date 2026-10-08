@@ -9,7 +9,7 @@
 
 import { TransportError, type ScanOpts, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  ClientConfig, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
+  BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -180,6 +180,12 @@ export const desktopTransport: Transport = {
   cancelScanTask: (id: string) => call<ScanTaskSnapshot>("cancelScanTask", id),
   // 字幕预览：desktop 形态字幕文件在本机，走 IPC 直读（main 侧校验扩展名/大小）
   readSrt: (p) => desktop.readSrt(p),
-  submitScan: (name, files, _sub) =>
-    call<{ files: number; jobId: string }>("submitScan", name, JSON.stringify(files)),
+  // batch 参数以 JSON 串透传 main（call 通道全字符串参）
+  submitScan: (name, files, _sub, batch) =>
+    call<{ files: number; jobId: string }>("submitScan", name, JSON.stringify(files),
+      batch ? JSON.stringify(batch) : ""),
+  // 主任务操作：main 直连所有已登记服务 fan-out（单服务失败不 throw，逐条返回）
+  batchOp: (action, batchId) => call<BatchOpResult>("batchOp", action, batchId),
+  // 主任务记录列表（main 进程 batches.json，created 降序）
+  listBatches: () => call<BatchRecord[]>("listBatches"),
 };

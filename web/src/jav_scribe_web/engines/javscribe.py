@@ -8,6 +8,10 @@ Protocol (JavScribe repo, progress_api.py):
   GET  /cache/check?sha1=&size=&ext= -> {ok, cached, size?}     (新版服务；旧版 404)
   POST /upload/submit?sha1=&ext=   -> 201 {ok, job_id, file, cached}（命中免传字节；未命中 409）
   POST /jobs/<id>/retry          -> 201 {ok, job_id}  (re-queue SKIPPED files, force regenerate)
+  POST /jobs/batch/<id>/pause    -> {ok, batch_id}            (主任务暂停；旧版服务 404)
+  POST /jobs/batch/<id>/resume   -> {ok, batch_id}
+  POST /jobs/batch/<id>/cancel   -> {ok, batch_id, canceled_jobs, canceled_files}
+  上传端点（PUT /upload、POST /upload/submit）另收可选 query batch_id/batch_label。
   GET  /jobs/<id>/result           -> SRT bytes
   GET  /ready                      -> {ok, ready, version, items[]}（0.2.6+；旧版 404）
   GET  /config                     -> {ok, profile, items[]}      (X-Api-Key)
@@ -66,6 +70,7 @@ class JavScribeEngine(EngineAdapter):
             "version": str(d.get("version") or ""),
             "stats": d.get("stats"),
             "paused": bool(d.get("paused", False)),
+            "batch_paused": list(d.get("batch_paused") or []),  # batch 暂停集合透传（老 serve 无此键 -> 空，兼容）
         }
 
     async def jobs(self) -> list[dict]:
@@ -94,7 +99,13 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
-    async def upload_audio(self, audio: bytes, source_name: str) -> dict:
+    async def upload_audio(
+        self,
+        audio: bytes,
+        source_name: str,
+        batch_id: str | None = None,
+        batch_label: str | None = None,
+    ) -> dict:
         """转发 opus：先问后传（服务端内容寻址缓存）。
 
         命中 → POST /upload/submit 免传字节建任务；
@@ -111,7 +122,9 @@ class JavScribeEngine(EngineAdapter):
             if ck.status_code == 200 and ck.json().get("cached") is True:
                 sub = await client.post(
                     f"{self.url}/upload/submit",
-                    params={"sha1": sha1, "ext": "opus"},
+                    # 命中路径同样带主任务归属（serve 恒收；旧版服务忽略未知 query，None 值 httpx 自动省略）
+                    params={"sha1": sha1, "ext": "opus",
+                            "batch_id": batch_id, "batch_label": batch_label},
                     headers={"X-Source-Name": quote(source_name, safe=""),}
                 )
                 if sub.status_code == 201:
@@ -122,7 +135,7 @@ class JavScribeEngine(EngineAdapter):
             pass  # 预检网络异常不阻断，落回常规上传由 PUT 报真实错误
         r = await client.put(
             f"{self.url}/upload",
-            params={"ext": "opus", "sha1": sha1},
+            params={"ext": "opus", "sha1": sha1, "batch_id": batch_id, "batch_label": batch_label},
             content=audio,
             headers={"X-Source-Name": quote(source_name, safe=""), "Content-Type": "application/octet-stream"},
         )
@@ -176,6 +189,26 @@ class JavScribeEngine(EngineAdapter):
     async def resume_job(self, job_id: str) -> dict:
         """恢复单个挂起任务。"""
         r = await self._get_client().post(f"{self.url}/jobs/{job_id}/resume")
+        r.raise_for_status()
+        return r.json()
+
+    async def batch_pause(self, batch_id: str) -> dict:
+        """暂停主任务(batch)：排队冻结、运行中跑完（serve 侧记标记）。
+        旧版服务无此端点 → 404，原样抛出 HTTPStatusError。"""
+        r = await self._get_client().post(f"{self.url}/jobs/batch/{batch_id}/pause")
+        r.raise_for_status()
+        return r.json()
+
+    async def batch_resume(self, batch_id: str) -> dict:
+        """继续主任务(batch)。旧版服务 404 原样抛出。"""
+        r = await self._get_client().post(f"{self.url}/jobs/batch/{batch_id}/resume")
+        r.raise_for_status()
+        return r.json()
+
+    async def batch_cancel(self, batch_id: str) -> dict:
+        """取消主任务(batch)：未开始文件 → CANCELED，运行中不动。
+        旧版服务 404 原样抛出。"""
+        r = await self._get_client().post(f"{self.url}/jobs/batch/{batch_id}/cancel")
         r.raise_for_status()
         return r.json()
 

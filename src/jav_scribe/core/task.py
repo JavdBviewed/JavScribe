@@ -92,6 +92,8 @@ class Job:
     cancel_requested: bool = False  # 用户取消：排队任务立即收尾，运行任务由各检查点协作中止
     paused: bool = False  # 用户挂起：仅排队任务可挂起，恢复后重新排队
     committed: bool = False  # 运行时：已越过开跑门（pause 与 commit 同锁互斥的权威位）
+    batch_id: str | None = None  # 主任务（batch）归属：扫描/文件夹上传时客户端生成（None=单文件不套壳）
+    batch_label: str | None = None  # 主任务展示标签（客户端生成，如公共父目录名）
 
     @property
     def done(self) -> bool:
@@ -124,6 +126,8 @@ class Job:
             "canceled": sum(1 for t in self.files if t.status == TaskStatus.CANCELED),
             "cancel_requested": self.cancel_requested,
             "paused": self.paused,
+            "batch_id": self.batch_id,
+            "batch_label": self.batch_label,
             "state": "running" if not self.done else "finished",
         }
         cur = self.current()

@@ -49,11 +49,14 @@ BASE_CFG = {
 
 
 class FakeJob:
-    def __init__(self, id: str, files: list, source_kind: str, label: str) -> None:
+    def __init__(self, id: str, files: list, source_kind: str, label: str,
+                 batch_id: str | None = None, batch_label: str | None = None) -> None:
         self.id = id
         self.files = files
         self.source_kind = source_kind
         self.label = label
+        self.batch_id = batch_id
+        self.batch_label = batch_label
 
 
 class FakeEngine:
@@ -75,8 +78,10 @@ class FakeEngine:
     def result_srt_bytes(self, _job):
         return None
 
-    def submit(self, files, source_kind="local", label="", run_in_thread=True):
-        job = FakeJob(f"job{len(self.jobs) + 1}", list(files), source_kind, label)
+    def submit(self, files, source_kind="local", label="", run_in_thread=True,
+               batch_id=None, batch_label=None):
+        job = FakeJob(f"job{len(self.jobs) + 1}", list(files), source_kind, label,
+                      batch_id, batch_label)
         self.jobs.append(job)
         return job
 

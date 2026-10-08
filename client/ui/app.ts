@@ -4,7 +4,7 @@
 
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
-import type { BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
+import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
@@ -43,6 +43,9 @@ interface AppState {
   selected: Set<string>;                     // 勾选的任务行 key（批量操作）
   _filteredKeys: string[];                   // 当前筛选下的全部行 key（表头全选/半选态）
   _metrics: Record<string, MetricsResponse>; // 引擎名 -> 监控快照（卡片迷你趋势图）
+  _batches: BatchRecord[];          // 最近一次主任务（batch）记录（t.listBatches；过期主任务对账兜底行）
+  _batchCollapsed: Set<string>;     // 收起的主任务 batch_id（默认展开；内存态，刷新重置）
+  _entryCount: number;              // 筛选后顶层条目数（分页口径：batch 组按 1 条计）
   latestServe: ServeRelease | null;   // 最新服务端 Release（服务端无界面，新版本提示落在卡片角标）
   extractMode: "auto" | "local" | "server";
   ccfg: ClientConfig | null;    // S4：客户端并发设置（热重载：refresh 读回 + 本端保存即时应用）
@@ -100,6 +103,9 @@ const state: AppState = {
   selected: new Set(),
   _filteredKeys: [],
   _metrics: {},
+  _batches: [],
+  _batchCollapsed: new Set(),
+  _entryCount: 0,
   latestServe: null,
   extractMode: savedExtract === "auto" || savedExtract === "local" || savedExtract === "server"
     ? savedExtract
@@ -342,11 +348,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   async function refresh() {
     try {
-      const [health, engines, jobs, summary, ccRaw] = await Promise.all([
+      const [health, engines, jobs, summary, ccRaw, batches] = await Promise.all([
         t.getHealth(), t.listEngines(), t.listJobs(),
         t.listJobsSummary ? t.listJobsSummary().catch(() => null) : Promise.resolve(null),
         // S4：客户端并发设置读回（多端/他端保存后 ≤5s 热生效；失败保留上一值）
         t.getClientConfig ? t.getClientConfig().catch(() => null) : Promise.resolve(null),
+        // S2：工作台 batch 记录读回（主任务视图）
+        t.listBatches ? t.listBatches().catch(() => null) : Promise.resolve(null),
       ]);
       const allOnline = health.online === health.engines && health.engines > 0;
       $("health").textContent = `v${health.version} · 服务 ${health.online}/${health.engines} 在线`;
@@ -366,6 +374,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           pumpDispatch();         // 在途封顶变更 → 立即重判排队项
         }
       }
+      state._batches = batches || [];
       renderJobs(jobs);
       if (platform.kind === "web" && typeof t.engineMetrics === "function") {
         for (const e of engines) {
@@ -1021,6 +1030,91 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (elEl && elEl.textContent !== elapsed) elEl.textContent = elapsed;
   }
 
+  // ---------- 主任务（batch）：聚合状态 / 行渲染 ----------
+  const BATCH_TERMINAL = new Set(["done", "skipped", "error", "canceled"]);
+
+  function genBatchId(): string {
+    return "b-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function batchLabelForScan(): string {
+    const p = state.scanResolvedPath || (state.lastScan?.path || "");
+    if (p) {
+      const segs = p.split(/[\\/]+/).filter(Boolean);
+      if (segs.length) return segs[segs.length - 1];
+    }
+    return "扫描目录";
+  }
+
+  function batchLabelForFolder(): string {
+    const f0 = (state.folderFiles || [])[0]?.file;
+    if (!f0) return "文件夹";
+    const lp = (f0 as FolderFile)._localPath;
+    if (lp) {
+      const segs = lp.split(/[\\/]+/).filter(Boolean);
+      if (segs.length > 1) return segs[segs.length - 2];
+      return "文件夹";
+    }
+    const rel = f0.webkitRelativePath || "";
+    if (rel.includes("/")) return rel.split("/")[0];
+    return "文件夹";
+  }
+
+  function batchAgg(children: JobRow[]): { status: string; label: string; pct: number } {
+    let status = "done";
+    let label = "";
+    if (children.length) {
+      // 优先级 paused > running：本机冻结行走既有口径 status="running"（phase=queued），
+      // running 在前会让冻结 batch 的主行卡在「运行中」，永远到不了「已暂停」（「继续」按钮不可达）
+      if (children.some((j) => j.status === "paused" || j.paused === true || j.batch_paused === true)) status = "paused";
+      else if (children.some((j) => j.status === "running")) status = "running";
+      else if (children.every((j) => BATCH_TERMINAL.has(j.status))) {
+        if (children.some((j) => j.status === "error" || j.status === "canceled")) {
+          status = "error";
+          label = "完成（部分失败）";
+        }
+      } else {
+        status = "pending";
+      }
+    }
+    const pct = children.length
+      ? Math.round((children.reduce((s2, j) => s2 + (j.progress || 0), 0) / children.length) * 100)
+      : 100;
+    return { status, label, pct };
+  }
+
+  function batchRowHtml(
+    g: { bid: string; children: JobRow[]; stale?: { created?: number | null; finished?: number | null } },
+    label: string,
+    agg: { status: string; label: string; pct: number },
+    created: number | null,
+    finished: number | null,
+    elapsed: string,
+    collapsed: boolean,
+    ops: string,
+  ): string {
+    const timeTitle = (created ? `开始 ${fmtJobDateTime(created)}` : "")
+      + (finished ? ` · 完成 ${fmtJobDateTime(finished)}` : "");
+    return `
+      <button type="button" class="batch-caret" data-bid="${esc(g.bid)}" title="${collapsed ? "展开子任务" : "收起子任务"}">${collapsed ? "&#9656;" : "&#9662;"}</button>
+      <div class="job-cell mono batch-sub-n">${g.children.length} 子任务</div>
+      <div class="job-name"><div class="fn">${esc(label)}</div>${g.stale ? '<div class="sub">子任务已过期（记录保留）</div>' : ""}</div>
+      <div><span class="pill p-${esc(agg.status)}"><i></i>${esc(agg.label || STATUS_ZH[agg.status] || agg.status)}</span></div>
+      <div class="prog"><div class="bar${agg.status === "running" ? " live" : ""}"><div style="width:${agg.pct}%"></div></div><span class="pct mono">${agg.pct}%</span></div>
+      <div class="job-cell mono cell-pos cell-bt"${timeTitle ? ` title="${esc(timeTitle)}"` : ""}>${created ? (fmtJobDateTime(created).split(" ")[1] || "—") : "—"}</div>
+      <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
+      <div class="job-actions">${ops}</div>`;
+  }
+
+  function patchBatchRow(row: JobRowEl, pct: number, elapsed: string): void {
+    const bar = row.querySelector(".bar > div") as HTMLDivElement | null;
+    if (bar) bar.style.width = pct + "%";
+    const pctEl = row.querySelector(".pct");
+    if (pctEl && pctEl.textContent !== pct + "%") pctEl.textContent = pct + "%";
+    const elEl = row.querySelector(".cell-elapsed");
+    if (elEl && elEl.textContent !== elapsed) elEl.textContent = elapsed;
+  }
+
   function renderJobs(rows: JobRow[]) {
     // 统计与筛选合一（renderFilterBar）：终态计数走 serve 累计 summary（200 内存窗
     // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
@@ -1042,10 +1136,45 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const filtered = visibleRows(rows);
     state._filteredKeys = filtered.map(jobKey);
 
-    // 分页：只渲染当前页；stats/空态仍基于全量 filtered。页码越界自动收回（任务完成会收缩列表）。
-    const pages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+    // 顶层条目：普通行 + 主任务（batch）组（组位置=首个子行出现处；组按 1 条计页）。
+    // 顶部统计/筛选计数仍按子行（口径不翻倍）；勾选/批量操作仍只在子行。
+    interface BatchGroup {
+      bid: string; label: string; children: JobRow[];
+      stale?: { created?: number | null; finished?: number | null };
+    }
+    type Entry = { kind: "row"; row: JobRow } | { kind: "batch"; g: BatchGroup };
+    const batchGroups = new Map<string, BatchGroup>();
+    const entries: Entry[] = [];
+    for (const j of filtered) {
+      const bid = j.batch_id;
+      if (!bid) { entries.push({ kind: "row", row: j }); continue; }
+      let g = batchGroups.get(bid);
+      if (!g) {
+        g = { bid, label: j.batch_label || "", children: [] };
+        batchGroups.set(bid, g);
+        entries.push({ kind: "batch", g });
+      }
+      if (j.batch_label && !g.label) g.label = j.batch_label;
+      g.children.push(j);
+    }
+    // 对账兜底：本地记录在、但子行已全部过期（serve 200 窗挤出 / 重启后刷新）→
+    // 渲染一条完成态主任务行（无子行）；筛选非全量时不展示，避免误导
+    if (state.filter === "all" && state.source === "all") {
+      const liveBids = new Set(rows.map((r) => r.batch_id).filter(Boolean) as string[]);
+      for (const rec of state._batches) {
+        if (!rec || !rec.batch_id || liveBids.has(rec.batch_id)) continue;
+        entries.push({ kind: "batch", g: {
+          bid: rec.batch_id, label: rec.label || rec.batch_id, children: [],
+          stale: { created: rec.created ?? null, finished: rec.finished ?? null },
+        } });
+      }
+    }
+    state._entryCount = entries.length;
+
+    // 分页：只渲染当前页（按顶层条目计；组=1）。页码越界自动收回（任务完成会收缩列表）。
+    const pages = Math.max(1, Math.ceil(entries.length / state.pageSize));
     if (state.page >= pages) state.page = pages - 1;
-    const pageRows = filtered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
+    const pageEntries = entries.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
 
     const list = jobList;
     $("jobs-empty").hidden = filtered.length > 0;
@@ -1054,9 +1183,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rowMap = new Map<string, JobRowEl>();
     for (const r of Array.from(list.children)) rowMap.set((r as HTMLElement).dataset.jkey ?? "", r as JobRowEl);
     const wanted = new Set<string>();
-    for (const j of pageRows) {
+    const flatKeys: string[] = [];
+
+    // 普通行（无 batch_id）与 batch 子行共用同一渲染路径：复用 jobRowData，逐像素不变
+    const renderRowEl = (j: JobRow): void => {
       const key = jobKey(j);
       wanted.add(key);
+      flatKeys.push(key);
       const d = jobRowData(j, now);
       let row = rowMap.get(key);
       if (!row) {
@@ -1079,13 +1212,68 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           + (j.paused || j.status === "paused" ? " paused" : "");
       }
       patchJobRow(row, d.pct, d.eta, d.pos, d.elapsed);
+    };
+
+    for (const en of pageEntries) {
+      if (en.kind === "row") { renderRowEl(en.row); continue; }
+      const g = en.g;
+      const gkey = "batch:" + g.bid;
+      wanted.add(gkey);
+      flatKeys.push(gkey);
+      const agg = batchAgg(g.children);
+      const allTerminal = g.children.length === 0
+        || g.children.every((j) => BATCH_TERMINAL.has(j.status));
+      const created = g.children.length
+        ? (Math.min(...g.children.map((j) => j.created || 0)) || null)
+        : (g.stale?.created ?? null);
+      const finished = g.children.length
+        ? (Math.max(...g.children.map((j) => j.finished || 0)) || null)
+        : (g.stale?.finished ?? null);
+      // 总耗时：全终态 = max(finished) - min(created)；在途 = now - min(created)
+      const elapsed = created != null
+        ? fmtDuration(Math.max(0, (allTerminal ? (finished || now) : now) - created))
+        : "—";
+      const collapsed = state._batchCollapsed.has(g.bid);
+      const hasFailed = g.children.some((j) => j.status === "error" || j.status === "canceled");
+      const canOp = typeof t.batchOp === "function" && !g.stale;
+      const ops = [
+        canOp && agg.status !== "paused" && !allTerminal
+          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="pause" title="暂停主任务：运行中的子任务跑完，排队中冻结">&#9208; 暂停</button>` : "",
+        canOp && agg.status === "paused"
+          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="resume" title="继续主任务：解除排队冻结，恢复开跑">&#9654; 继续</button>` : "",
+        canOp && hasFailed
+          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="retry" title="重试本主任务中失败的子任务">&#8635; 重试失败</button>` : "",
+        canOp && !allTerminal
+          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="cancel" title="取消主任务：未开始子任务全部取消，运行中不受影响">&#10006; 取消</button>` : "",
+      ].join("");
+      const label = g.label || g.bid;
+      const core = [gkey, label, g.children.length, agg.status, collapsed, allTerminal, created, finished, hasFailed, canOp, ops].join("\u0001");
+      let el = rowMap.get(gkey);
+      if (!el) {
+        const div = document.createElement("div");
+        div.dataset.jkey = gkey;
+        el = div as JobRowEl;
+        el._core = core;
+        el.innerHTML = batchRowHtml(g, label, agg, created, finished, elapsed, collapsed, ops);
+        list.appendChild(el);
+        rowMap.set(gkey, el);
+      } else if (el._core !== core) {
+        el._core = core;
+        el.innerHTML = batchRowHtml(g, label, agg, created, finished, elapsed, collapsed, ops);
+      }
+      el.className = "job-grid job-batch-row"
+        + (agg.status === "running" ? " running" : "")
+        + (agg.status === "paused" ? " paused" : "");
+      patchBatchRow(el, agg.pct, elapsed);
+      // 子行：展开时渲染（复用普通行路径）；收起时不在 wanted → 统一 remove
+      if (!collapsed) for (const j of g.children) renderRowEl(j);
     }
     for (const [k, r] of rowMap) if (!wanted.has(k)) r.remove();
-    const order = Array.from(list.children).map((r) => (r as HTMLElement).dataset.jkey).join("\u0001");
-    if (order !== pageRows.map(jobKey).join("\u0001")) {
-      for (const j of pageRows) list.appendChild(rowMap.get(jobKey(j))!);
+    const order = Array.from(list.children).map((r) => (r as HTMLElement).dataset.jkey ?? "").join("\u0001");
+    if (order !== flatKeys.join("\u0001")) {
+      for (const k of flatKeys) { const el2 = rowMap.get(k); if (el2) list.appendChild(el2); }
     }
-    renderPager(filtered.length);
+    renderPager(entries.length);
     renderBulkBar();
     renderSelAll();
   }
@@ -1241,7 +1429,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   jobPager.onclick = (ev) => {
     const target = ev.target as HTMLElement;
-    const pages = Math.max(1, Math.ceil(visibleRows(state._jobs).length / state.pageSize));
+    const pages = Math.max(1, Math.ceil(state._entryCount / state.pageSize));
     if (target.closest("#pg-prev") && state.page > 0) {
       state.page--; renderJobs(state._jobs);
     } else if (target.closest("#pg-next") && state.page < pages - 1) {
@@ -1250,6 +1438,62 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   jobList.onclick = async (ev) => {
+    // 主任务（batch）行：展开/收起（默认展开；内存态，刷新重置）
+    const bc = (ev.target as HTMLElement).closest<HTMLElement>(".batch-caret");
+    if (bc && bc.dataset.bid) {
+      const bid = bc.dataset.bid;
+      if (state._batchCollapsed.has(bid)) state._batchCollapsed.delete(bid);
+      else state._batchCollapsed.add(bid);
+      renderJobs(state._jobs);
+      return;
+    }
+    // 主任务（batch）行操作：暂停/继续/取消/重试失败子任务（fan-out 逐引擎提示，不阻塞）
+    const bo = (ev.target as HTMLElement).closest(".batch-op") as HTMLButtonElement | null;
+    if (bo && !bo.disabled && t.batchOp) {
+      const bid = bo.dataset.bid || "";
+      const act = bo.dataset.bact || "";
+      const btn = bo as HTMLButtonElement;
+      const labelOf = (x: string) => x === "pause" ? "暂停" : x === "resume" ? "继续" : x === "cancel" ? "取消" : "重试";
+      if (act === "cancel") {
+        const ok = window.confirm(
+          `确认取消主任务？\n\n· 未开始的子任务全部取消\n· 运行中的子任务不受影响（与单任务取消语义一致）`,
+        );
+        if (!ok) return;
+      }
+      btn.disabled = true;
+      try {
+        if (act === "retry") {
+          // 重试失败子任务：serve 行→retryJob；本机行（task_id）→rerunLocal
+          const failed = (state._jobs || []).filter(
+            (j) => j.batch_id === bid && (j.status === "error" || j.status === "canceled"));
+          if (!failed.length) { toast("该主任务没有可重试的失败子任务", "err"); return; }
+          let n = 0;
+          for (const j of failed) {
+            try {
+              if (j.job_id) await t.retryJob(j.engine, j.job_id);
+              else if (j.task_id && t.rerunLocal) await t.rerunLocal(j.task_id);
+              else continue;
+              n++;
+            } catch (_e2) { /* 单个失败继续：结果在任务行可见 */ }
+          }
+          toast(n ? `已重新提交 ${n} 个失败子任务` : "重试失败（子任务已过期或不可重试）", n ? "ok" : "err");
+        } else {
+          const d = await t.batchOp(act as "pause" | "resume" | "cancel", bid);
+          const bad = (d.engines || []).filter((e) => !e.ok);
+          const badTxt = bad.map((e) => `${e.engine}：${e.unsupported ? "版本过旧不支持" : (e.error || "失败")}`).join("；");
+          const localTxt = act === "cancel"
+            ? `，本机取消 ${d.local?.canceled ?? 0} 个未开始任务`
+            : act === "pause" ? "，本机排队已冻结" : "，本机已放行";
+          if (bad.length) toast(`主任务${labelOf(act)}${localTxt}；${badTxt}`, "err");
+          else toast(`主任务${labelOf(act)}完成${localTxt}`, "ok");
+        }
+      } catch (e) {
+        toast(`${labelOf(act)}失败：${(e as Error).message}`, "err");
+      }
+      btn.disabled = false;
+      refresh();
+      return;
+    }
     // 本机管线任务 重试/继续（重提取音轨并重提交）
     const rl = (ev.target as HTMLElement).closest(".rerun-local") as HTMLButtonElement | null;
     if (rl && !rl.disabled && t.rerunLocal) {
@@ -2196,9 +2440,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   /** 带记账派发：链启动 +1 / 链结算 -1；提交成功带 job_id 进 pending（等行接管） */
-  function dispatchTracked(f: File, engine: string, labelPrefix?: string): Promise<DispatchOutcome> {
+  function dispatchTracked(f: File, engine: string, labelPrefix?: string, batch?: { id: string; label?: string }): Promise<DispatchOutcome> {
     chainInFlight.set(engine, (chainInFlight.get(engine) || 0) + 1);
-    return dispatchOne(f, engine, labelPrefix).then(
+    return dispatchOne(f, engine, labelPrefix, batch).then(
       (d) => {
         chainInFlight.set(engine, (chainInFlight.get(engine) || 0) - 1);
         if (d[0]) {
@@ -2277,6 +2521,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function startBatch(engine: string) {
     const queue = (state.folderFiles || []).filter((v) => !v.hasSub).map((v) => v.file);
     singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
+    // 主任务（batch）：同一文件夹提交共享 batch_id（单文件上传不套壳）
+    const batch = { id: genBatchId(), label: batchLabelForFolder() };
     state.busy = true;
     updateGo();
     localStorage.setItem("javweb_engine", engine);
@@ -2308,7 +2554,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         void (async () => {
           let ok = false;
           let d: UploadStatus | { error: string } = { error: "" };
-          try { [ok, d] = await dispatchTracked(file, engine, prefix); } catch (_e) { ok = false; }
+          try { [ok, d] = await dispatchTracked(file, engine, prefix, batch); } catch (_e) { ok = false; }
           if (ok) {
             okN++;
             const up = d as UploadStatus;
@@ -2374,13 +2620,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     });
   }
 
-  function uploadAudioBlob(f: File, engine: string, blob: Blob, prefix: string) {
+  function uploadAudioBlob(f: File, engine: string, blob: Blob, prefix: string, batch?: { id: string; label?: string }) {
     return new Promise<[boolean, UploadStatus]>((resolve) => {
       t.uploadAudio(f, engine, blob, (loaded, total, pct) => {
         setStep("step-extract", "active", "2",
           `${prefix}上传音频 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`);
         setFill(pct + "%");
-      }).then((d) => {
+      }, batch).then((d) => {
         if (d.ok) {
           setStep("step-extract", "done", "\u2713",
             d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}音频 ${d.sizeMb} MB 已接收`);
@@ -2397,14 +2643,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // 整片上传（原路径）：视频 → 本服务 → 服务端提取 → 转发
-  function serverUpload(f: File, engine: string, labelPrefix?: string) {
+  function serverUpload(f: File, engine: string, labelPrefix?: string, batch?: { id: string; label?: string }) {
     const prefix = labelPrefix || "";
     return new Promise<DispatchOutcome>((resolve) => {
       t.uploadFile(f, engine, (loaded, total, pct) => {
         setStep("step-upload", "active", "1",
           `${prefix}${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`);
         setFill(pct + "%");
-      }).then((d) => {
+      }, batch).then((d) => {
         if (d.ok) {
           setStep("step-upload", "done", "\u2713",
             d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}${d.sizeMb} MB 已接收`);
@@ -2421,7 +2667,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // 统一入口：按提取模式走 本地提音轨→传音频 或 整片上传
-  function dispatchOne(f: File, engine: string, labelPrefix?: string): Promise<DispatchOutcome> {
+  function dispatchOne(f: File, engine: string, labelPrefix?: string, batch?: { id: string; label?: string }): Promise<DispatchOutcome> {
     const prefix = labelPrefix || "";
     const mode = effectiveMode(f);
     const Jav = jav();
@@ -2443,7 +2689,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             }
             toast(`本地提取失败，改用整片上传（${msg}）`, "err");
             labelPipeline("server");
-            return serverUpload(f, engine, prefix);
+            return serverUpload(f, engine, prefix, batch);
           }
           if (!r || "skipped" in r) {
             if (state.extractMode === "local") {
@@ -2452,18 +2698,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               return [false, { error: msg }];
             }
             labelPipeline("server");
-            return serverUpload(f, engine, prefix);
+            return serverUpload(f, engine, prefix, batch);
           }
           setStep("step-upload", "done", "\u2713",
             `${prefix}本地提取完成 · 音频 ${mb(r.size)} MB`);
           line1.classList.add("on");
           setStep("step-extract", "active", "2", prefix + "准备上传音频…");
           setFill("0", true);
-          return uploadAudioBlob(f, engine, r, prefix);
+          return uploadAudioBlob(f, engine, r, prefix, batch);
         });
     }
     labelPipeline("server");
-    return serverUpload(f, engine, prefix);
+    return serverUpload(f, engine, prefix, batch);
   }
 
   function showStatus(text: string, cls: "ok" | "err" | "" = "") {
@@ -3326,7 +3572,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     for (const i of subItems) subStatus[i.path] = i.subtitle_status || "embedded";
     scanSubmit.disabled = true;
     try {
-      const d = await t.submitScan(engine, files, subStatus);
+      // 主任务（batch）：扫描提交恒生成（label=扫描目录名）
+      const batch = { id: genBatchId(), label: batchLabelForScan() };
+      const d = await t.submitScan(engine, files, subStatus, batch);
       if (d.skipped && d.skipped.length) {
         const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
         toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");

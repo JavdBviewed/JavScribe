@@ -44,9 +44,11 @@ class FakeEngine:
     def result_srt_bytes(self, _job):
         return None
 
-    def submit_remote_files(self, files, source_name=None):
+    def submit_remote_files(self, files, source_name=None,
+                            batch_id=None, batch_label=None):
         self._seq += 1
-        job = SimpleNamespace(id=f"20260910-{self._seq:06d}", files=files, label=source_name)
+        job = SimpleNamespace(id=f"20260910-{self._seq:06d}", files=files, label=source_name,
+                              batch_id=batch_id, batch_label=batch_label)
         self.jobs.append(job)
         return job
 

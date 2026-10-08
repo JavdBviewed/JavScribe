@@ -351,7 +351,11 @@ async function tryServerCache(
   ext: string,
   sourceName: string,
   onProgress: (loaded: number, total: number) => void,
+  batch?: { id: string; label?: string } | null,
 ): Promise<UploadDispatchResult | null> {
+  const batchQ = batch
+    ? `&batch_id=${encodeURIComponent(batch.id)}&batch_label=${encodeURIComponent(batch.label || "")}`
+    : "";
   try {
     const ck = await httpJson<{ ok?: boolean; cached?: boolean }>(
       `${base}/cache/check?sha1=${sha1}&size=${sizeBytes}&ext=${encodeURIComponent(ext)}`,
@@ -360,7 +364,7 @@ async function tryServerCache(
     if (ck.status !== 200 || ck.data?.cached !== true) return null; // 404=旧版服务，直接回退
     onProgress(sizeBytes, sizeBytes); // 命中：直接推满进度（无需传字节）
     const sub = await httpJson<{ job_id?: string; file?: string }>(
-      `${base}/upload/submit?sha1=${sha1}&ext=${encodeURIComponent(ext)}`,
+      `${base}/upload/submit?sha1=${sha1}&ext=${encodeURIComponent(ext)}${batchQ}`,
       { method: "POST", headers: { "X-Source-Name": sourceName }, timeoutMs: 15000 },
     );
     if (sub.status === 201 && sub.data && typeof sub.data === "object") {
@@ -386,6 +390,7 @@ interface EngineInfo {
   device: string | null;
   jobs_running: number;
   error: string | null;
+  batch_paused: string[];
   _details: any[];
 }
 interface Snapshot { engines: EngineInfo[]; at: number; }
@@ -422,6 +427,9 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       version: String(h.data.version || ""),
       device: String(h.data.device || ""),
       jobs_running: details.filter((j) => j && j.state === "running").length,
+      batch_paused: Array.isArray(h.data.batch_paused)
+        ? h.data.batch_paused.filter((x: unknown): x is string => typeof x === "string")
+        : [],
       error: null,
       _details: details,
     };
@@ -435,6 +443,7 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       version: prev?.version ?? null,
       device: prev?.device ?? null,
       jobs_running: 0,
+      batch_paused: prev?.batch_paused ?? [],
       error: String((e as Error)?.message || e).slice(0, 200),
       _details: prev?._details ?? [],
     };
@@ -446,6 +455,7 @@ function refresh(): Promise<Snapshot> {
   if (!inFlight) {
     inFlight = (async () => {
       const engines = await Promise.all(store.all().map(refreshOne));
+      batchesReconcile(engines); // 主任务完成对账（batches.json；快照成功才判）
       return { engines, at: Date.now() };
     })();
     inFlight.then(
@@ -473,6 +483,10 @@ function jobRows(infos: EngineInfo[]): any[] {
         created: job?.created ?? null,
         finished: job?.finished ?? null,
         source_kind: job?.source_kind ?? null,
+        // 主任务（batch）归属：serve 持久化字段，旧 serve 无字段 → null（单文件行为不变）
+        batch_id: job?.batch_id ?? null,
+        batch_label: job?.batch_label ?? null,
+        batch_paused: !!(job?.batch_id) && info.batch_paused.includes(String(job.batch_id)),
       };
       const files = job?.files;
       if (!files || !files.length) {
@@ -1409,15 +1423,55 @@ function registerIpc(): void {
           if (!Array.isArray(files) || !files.length) {
             return { ok: false, error: "files 需要非空数组（绝对路径列表）" };
           }
+          // batch 参数（JSON 串；空串=单文件/旧客户端 → 行为不变）
+          let batch: { id: string; label?: string } | null = null;
+          if (a2) {
+            try {
+              const p = JSON.parse(String(a2)) as { id?: unknown; label?: unknown };
+              if (p && typeof p.id === "string" && p.id) {
+                batch = { id: p.id, label: typeof p.label === "string" ? p.label : "" };
+              }
+            } catch { /* 畸形 batch 参数按无 batch 处理，不阻断提交 */ }
+          }
           const r = await httpJson<any>(entry.url + "/scan/submit", {
             method: "POST",
             headers,
-            body: JSON.stringify({ files }),
+            body: JSON.stringify({
+              files,
+              ...(batch ? { batch_id: batch.id, batch_label: batch.label || "" } : {}),
+            }),
             timeoutMs: 30000,
           });
           if (r.status !== 201) throw configError(r.status, r.data);
           const d = r.data as { job_id?: string; files?: number };
+          if (batch && d?.job_id) batchUpsert(batch.id, batch.label || "", entry.name, String(d.job_id));
           return { ok: true, data: { files: Number(d?.files || 0), jobId: String(d?.job_id || "") } };
+        }
+        // 主任务（batch）操作：fan-out 所有已登记服务（serve 只按 batch_id 记暂停态；
+        // 旧版 serve 无此端点 → 404 → 该引擎 unsupported，不 throw 不阻塞整体）
+        case "batchOp": {
+          const action = String(a0 || "");
+          const bid = String(a1 || "");
+          if (!["pause", "resume", "cancel"].includes(action) || !bid) {
+            return { ok: false, error: "batchOp 参数错误（action/batch_id）" };
+          }
+          return { ok: true, data: await batchOpAll(action, bid) };
+        }
+        // 主任务记录列表（batches.json，created 降序）
+        case "listBatches": {
+          const recs = Object.keys(batches)
+            .map((id) => {
+              const r = batches[id];
+              return {
+                batch_id: id,
+                label: r.label || id,
+                created: r.created ?? null,
+                finished: r.finished ?? null,
+                services: r.services || {},
+              };
+            })
+            .sort((a, b) => (b.created || 0) - (a.created || 0));
+          return { ok: true, data: recs };
         }
         default:
           return { ok: false, error: "unknown method: " + args?.method };
@@ -1444,10 +1498,13 @@ function registerIpc(): void {
   });
 
   // 音频上传（opus 字节流 → serve /upload?ext=opus，无 key）
-  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array }) => {
+  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
     let opusDir: string | null = null;
     try {
       const entry = engineByName(String(args.engine || ""));
+      const batch = args.batchId
+        ? { id: args.batchId, label: args.batchLabel || "" }
+        : null;
       let body: Buffer | NodeJS.ReadableStream;
       let totalBytes: number;
       let sha1 = "";
@@ -1466,23 +1523,30 @@ function registerIpc(): void {
       } else {
         return { ok: false, error: "缺少音频载荷" };
       }
-      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务
+      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务（batch 随 /upload/submit 透传）
       const hit = await tryServerCache(
         entry.url, sha1, totalBytes, "opus", String(args.name || "remote"),
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
+        batch,
       );
       if (hit) {
         if (!Buffer.isBuffer(body)) (body as unknown as { destroy?: () => void }).destroy?.(); // 命中免传，释放未读的文件流
+        if (hit.job_id && batch) batchUpsert(batch.id, batch.label || "", entry.name, hit.job_id);
         return hit;
       }
+      const batchQ = batch
+        ? `&batch_id=${encodeURIComponent(batch.id)}&batch_label=${encodeURIComponent(batch.label || "")}`
+        : "";
       const r = await httpPutBytes(
-        entry.url + `/upload?ext=opus&sha1=${sha1}`,
+        entry.url + `/upload?ext=opus&sha1=${sha1}` + batchQ,
         totalBytes,
         body,
         { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
-      return uploadAccept(r.status, r.data);
+      const res = uploadAccept(r.status, r.data);
+      if (batch && res.ok && res.job_id) batchUpsert(batch.id, batch.label || "", entry.name, res.job_id);
+      return res;
     } catch (e) {
       const err = e as Error & { network?: boolean };
       return { ok: false, error: err.message || String(e), network: !!err.network };
@@ -1500,10 +1564,13 @@ function registerIpc(): void {
   });
 
   // 整片直传（用户显式选「整片直传字幕服务」时的逃生通道；受服务端 MAX_UPLOAD_MB 限制）
-  ipcMain.handle("upload-file", async (_ev, args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array }) => {
+  ipcMain.handle("upload-file", async (_ev, args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
     let tmpDir: string | null = null;
     try {
       const entry = engineByName(String(args.engine || ""));
+      const batch = args.batchId
+        ? { id: args.batchId, label: args.batchLabel || "" }
+        : null;
       let filePath = args.localPath;
       if (!filePath) {
         if (!args.data || !args.data.length) return { ok: false, error: "空文件" };
@@ -1515,20 +1582,29 @@ function registerIpc(): void {
       if (totalBytes <= 0) return { ok: false, error: "空文件" };
       const ext = String(args.ext || "mp4");
       const sha1 = await sha1File(filePath);
-      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务
+      // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务（batch 随 /upload/submit 透传）
       const hit = await tryServerCache(
         entry.url, sha1, totalBytes, ext, String(args.name || "remote"),
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
+        batch,
       );
-      if (hit) return hit;
+      if (hit) {
+        if (hit.job_id && batch) batchUpsert(batch.id, batch.label || "", entry.name, hit.job_id);
+        return hit;
+      }
+      const batchQ = batch
+        ? `&batch_id=${encodeURIComponent(batch.id)}&batch_label=${encodeURIComponent(batch.label || "")}`
+        : "";
       const r = await httpPutBytes(
-        entry.url + `/upload?ext=${encodeURIComponent(ext)}&sha1=${sha1}`,
+        entry.url + `/upload?ext=${encodeURIComponent(ext)}&sha1=${sha1}` + batchQ,
         totalBytes,
         fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
         { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
-      return uploadAccept(r.status, r.data);
+      const res = uploadAccept(r.status, r.data);
+      if (batch && res.ok && res.job_id) batchUpsert(batch.id, batch.label || "", entry.name, res.job_id);
+      return res;
     } catch (e) {
       const err = e as Error & { network?: boolean };
       return { ok: false, error: err.message || String(e), network: !!err.network };
@@ -2364,6 +2440,164 @@ function watchApplySettings(next: WatchSettings): void {
 }
 
 // ---------------------------------------------------------------------------
+// 主任务（batch）记录：客户端维度任务组 —— batches.json（userData，与 settings.json/watch.json 分文件）
+//   结构 {batch_id: {label, created, finished, services: {engine: [job_id]}}}
+//   - 生成：扫描提交 / 文件夹上传派发成功时登记（单文件上传不落记录）；label=扫描目录名/文件夹名
+//   - serve 只按 batch_id 记其持有子任务的暂停态；batch 暂停/继续/取消由客户端发起 fan-out（batchOp）
+//   - 完成对账：refresh() 快照成功后，记录各 job 均 finished 或已不在在线引擎快照
+//     （200 窗过期/serve 重启 → 视为完成，与工作台口径一致）→ finished；离线引擎不判
+//   - cap 200：先最旧 finished（按 finished 时间），再最旧 created
+// ---------------------------------------------------------------------------
+
+const BATCH_FILE = "batches.json";
+const BATCH_CAP = 200;
+
+interface BatchRec {
+  label?: string | null;
+  created?: number | null;
+  finished?: number | null;
+  services?: Record<string, string[]>;
+}
+
+let batches: Record<string, BatchRec> = {};
+let batchesPath = "";
+
+function batchesLoad(): void {
+  try {
+    const raw = JSON.parse(fs.readFileSync(batchesPath, "utf-8")) as Record<string, unknown>;
+    const out: Record<string, BatchRec> = {};
+    for (const [bid, v] of Object.entries(raw || {})) {
+      if (!bid || typeof v !== "object" || v === null) continue;
+      const rec = v as Partial<BatchRec>;
+      out[bid] = {
+        label: typeof rec.label === "string" ? rec.label : null,
+        created: typeof rec.created === "number" && isFinite(rec.created) ? rec.created : null,
+        finished: typeof rec.finished === "number" && isFinite(rec.finished) ? rec.finished : null,
+        services: rec.services && typeof rec.services === "object"
+          ? Object.fromEntries(Object.entries(rec.services).filter(
+              (e): e is [string, string[]] => Array.isArray(e[1])))
+          : {},
+      };
+    }
+    batches = out;
+  } catch {
+    /* 无记录 / 损坏：重新起步 */
+  }
+}
+
+function batchesSave(): void {
+  try {
+    fs.mkdirSync(path.dirname(batchesPath), { recursive: true });
+    fs.writeFileSync(batchesPath, JSON.stringify(batches, null, 1));
+  } catch (e) {
+    console.error("[batch] 记录写入失败:", (e as Error).message);
+  }
+}
+
+/** 派发登记：扫描提交成功 / 上传 201 受理 → services[engine] += job_id；label 仅空补 */
+function batchUpsert(id: string, label: string, service: string, jobId: string): void {
+  if (!id || !jobId) return;
+  let rec = batches[id];
+  if (!rec) {
+    rec = { label: label || null, created: Date.now() / 1000, finished: null, services: {} };
+    batches[id] = rec;
+  } else if (label && !rec.label) {
+    rec.label = label;
+  }
+  if (service) {
+    const arr = rec.services?.[service] || [];
+    if (!arr.includes(jobId)) arr.push(jobId);
+    if (!rec.services) rec.services = {};
+    rec.services[service] = arr;
+  }
+  batchCap();
+  batchesSave();
+}
+
+/** cap 200：先最旧 finished（按 finished 时间），再最旧 created（与工作台口径一致） */
+function batchCap(): void {
+  if (Object.keys(batches).length <= BATCH_CAP) return;
+  const ids = Object.keys(batches);
+  let over = ids.length - BATCH_CAP;
+  const finished = ids
+    .filter((id) => batches[id].finished)
+    .sort((a, b) => (batches[a].finished || 0) - (batches[b].finished || 0));
+  for (const id of finished) {
+    if (over <= 0) break;
+    delete batches[id];
+    over--;
+  }
+  if (over > 0) {
+    const rest = ids
+      .filter((id) => batches[id])
+      .sort((a, b) => (batches[a].created || 0) - (batches[b].created || 0));
+    for (const id of rest) {
+      if (over <= 0) break;
+      delete batches[id];
+      over--;
+    }
+  }
+}
+
+/** 完成对账（refresh() 快照成功后调用）：记录 services 各 job 均 finished 或
+ *  不在在线引擎快照（200 窗过期/serve 重启 → 视为完成）→ finished。
+ *  离线引擎不判（无法区分过期与离线）；服务侧未登记的记录（上传在途）不判。 */
+function batchesReconcile(engines: EngineInfo[]): void {
+  if (!batchesPath) return;
+  let changed = false;
+  for (const id of Object.keys(batches)) {
+    const rec = batches[id];
+    if (rec.finished) continue;
+    const jobs: Array<{ service: string; jobId: string }> = [];
+    for (const [svc, list] of Object.entries(rec.services || {})) {
+      for (const j of list || []) jobs.push({ service: svc, jobId: j });
+    }
+    if (!jobs.length) continue;
+    let allDone = true;
+    for (const { service, jobId } of jobs) {
+      const info = engines.find((e) => e.name === service);
+      if (!info || !info.online) { allDone = false; break; }
+      const d = info._details.find((x) => x && String(x.id) === jobId);
+      if (d && d.state !== "finished") { allDone = false; break; }
+    }
+    if (allDone) {
+      rec.finished = Date.now() / 1000;
+      changed = true;
+    }
+  }
+  if (changed) {
+    batchCap();
+    batchesSave();
+  }
+}
+
+/** batch 操作 fan-out：对全部已登记服务发 /jobs/batch/<id>/<action>。
+ *  旧版 serve 404 → 该引擎 unsupported；网络错误 → 逐条 error；不 throw。
+ *  local 恒空对象（desktop 无本机管线冻结，UI 容忍）。 */
+async function batchOpAll(action: string, bid: string): Promise<unknown> {
+  const engines: Array<{ engine: string; ok: boolean; unsupported?: boolean; error?: string }> = [];
+  for (const entry of store.all()) {
+    const headers: Record<string, string> = {};
+    if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
+    try {
+      const r = await httpJson<any>(
+        `${entry.url}/jobs/batch/${encodeURIComponent(bid)}/${action}`,
+        { method: "POST", headers, timeoutMs: 5000 },
+      );
+      if (r.status === 200) engines.push({ engine: entry.name, ok: true });
+      else if (r.status === 404) {
+        engines.push({ engine: entry.name, ok: false, unsupported: true, error: "服务版本过旧，不支持主任务操作" });
+      } else {
+        engines.push({ engine: entry.name, ok: false, error: "HTTP " + r.status });
+      }
+    } catch (e) {
+      engines.push({ engine: entry.name, ok: false, error: (e as Error).message || String(e) });
+    }
+  }
+  return { ok: true, batch_id: bid, action, engines, local: {} };
+}
+
+// ---------------------------------------------------------------------------
 // 本地服务端集成（仅 desktop 形态）：客户端同目录的服务程序自动拉起
 //   - 检测：打包态 → exe 同目录找 JavScribeServe.exe (win) / jav-scribe-serve (linux)；
 //     dev/测试态 → env JAVSCRIBE_LOCAL_SERVE_CMD 覆盖为可执行文件路径
@@ -2591,6 +2825,8 @@ app.whenReady().then(() => {
   clientCfgPath = path.join(app.getPath("userData"), CLIENT_CFG_FILE);
   watchStorePath = path.join(app.getPath("userData"), WATCH_FILE);
   watchLoad();
+  batchesPath = path.join(app.getPath("userData"), BATCH_FILE);
+  batchesLoad();
   void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）

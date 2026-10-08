@@ -66,6 +66,7 @@ const state = {
   apiKeyMode: "ok",     // ok | no-key
   paused: false,
   queuePaused: false,   // 用户面队列暂停（/jobs/pause|resume，与 serve 0.2.3 一致；mock 无队列，冻结全部在途）
+  batchPaused: new Set(), // 主任务（batch）暂停标记（/jobs/batch/<id>/pause|resume|cancel；按 batch 冻结晋升，在跑不受影响）
   uploadDelayMs: 0,    // 测试控速：PUT /upload 收到全部字节后延迟应答（桌面端「上传中」帧基线用）
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
@@ -158,7 +159,7 @@ function makeTask(path, opts = {}) {
     eta_s: opts.eta_s ?? null,
   };
 }
-function jobOf(files, { source_kind = "remote", label = "", id } = {}) {
+function jobOf(files, { source_kind = "remote", label = "", id, batch_id = null, batch_label = null } = {}) {
   const j = {
     id: id || newId(),
     created: Date.now() / 1000,
@@ -167,6 +168,7 @@ function jobOf(files, { source_kind = "remote", label = "", id } = {}) {
     label,
     files,
     paused: false,
+    batch_id, batch_label,
   };
   state.jobs.set(j.id, j);
   return j;
@@ -194,6 +196,8 @@ function jobToDict(j, detail = false) {
     failed: j.files.filter((t) => t.status === "error").length,
     state: j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status)) ? "finished" : "running",
     paused: j.paused,
+    batch_id: j.batch_id ?? null,
+    batch_label: j.batch_label ?? null,
   };
   const cur = j.files.find((t) => t.status === "running");
   if (cur) d.current = { ...cur };
@@ -206,11 +210,15 @@ function srtFor(name) {
 
 // ---- 推进 running 任务 ----
 setInterval(() => {
-  if (state.paused || state.queuePaused) return;
+  if (state.paused) return;
   for (const j of state.jobs.values()) {
     if (j.paused) continue;
+    // 主任务（batch）串行：单 job 至多 1 个文件 running，每 tick 晋升 1 个 pending（复刻 serve 单文件串行处理）；
+    // batch 暂停/队列暂停 → 不晋升新文件（在跑跑完才真正停；队列暂停=mock 冻结全部在途，既有口径）
+    const batchFrozen = !!(j.batch_id && state.batchPaused.has(j.batch_id));
     for (const t of j.files) {
       if (t.status !== "running") continue;
+      if (state.queuePaused) continue;
       t.progress = Math.min(1, t.progress + state.step);
       t.position_s = Math.round(t.duration_s * t.progress);
       t.position = fmtTs(t.position_s);
@@ -218,7 +226,21 @@ setInterval(() => {
       t.eta_s = Math.round((1 - t.progress) * 100 * 10) / 10;
       if (t.progress >= 1) taskDone(t, `/mock/out/${t.name.replace(/\.[^.]+$/, "")}.zh.srt`);
     }
-    if (j.files.every((t) => t.status !== "running")) {
+    if (j.batch_id && !j.files.some((t) => t.status === "running")
+        && !state.queuePaused && !batchFrozen) {
+      const nxt = j.files.find((t) => t.status === "pending");
+      if (nxt) {
+        nxt.status = "running";
+        nxt.phase = "subtitling";
+        nxt.message = "已入队";
+        nxt.phase_detail = "模型加载中";
+      }
+    }
+    // batch job：全文件终态才置 finished（全 pending 未开跑/冻结中不算完成）；非 batch 保持旧口径
+    const allTerminal = j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status));
+    if (j.batch_id) {
+      if (allTerminal && j.finished == null) j.finished = Date.now() / 1000;
+    } else if (j.files.every((t) => t.status !== "running")) {
       j.finished = Date.now() / 1000;
     }
   }
@@ -257,7 +279,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; return send(200, { ok: true }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -361,7 +383,7 @@ const server = http.createServer((req, res) => {
           else if (f.status === "error" || f.status === "canceled") stats.failed++;
         }
       }
-      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, batch_paused: [...state.batchPaused], jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
     }
     if (parts[0] === "ready") {
       const LABELS = {
@@ -411,7 +433,11 @@ const server = http.createServer((req, res) => {
       return send(200, metricsSnapshot());
     }
     if (parts[0] === "jobs") {
-      if (parts.length === 1) return send(200, [...state.jobs.values()].map((j) => jobToDict(j)));
+      if (parts.length === 1) {
+        const bq = url.searchParams.get("batch_id");
+        const jobs = bq ? [...state.jobs.values()].filter((j) => j.batch_id === bq) : [...state.jobs.values()];
+        return send(200, jobs.map((j) => jobToDict(j)));
+      }
       const j = state.jobs.get(parts[1]);
       if (!j) return sendErr(404, "job not found");
       if (parts[2] === "result" || parts[2] === "result.srt") {
@@ -453,8 +479,11 @@ const server = http.createServer((req, res) => {
         if (declared && declared !== actual) return sendErr(400, "sha1 不匹配");
         state.cache.set(actual, { size: buf.length, ext });
         state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex"), sha1: actual, ext });
-        const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
-        const j = jobOf([t], { source_kind: "remote", label: source });
+        // 主任务（batch）：query 带 batch → job 归属该主任务，文件 pending 起步（tick 串行晋升；非 batch 保持创建即 running）
+        const bId = url.searchParams.get("batch_id") || null;
+        const bLabel = url.searchParams.get("batch_label") || null;
+        const t = makeTask(`/mock/out/${source}`, { status: bId ? "pending" : "running", message: bId ? "排队中" : "已收到" });
+        const j = jobOf([t], { source_kind: "remote", label: source, batch_id: bId, batch_label: bLabel });
         return send(201, { ok: true, job_id: j.id, file: source, sha1: actual });
       };
       return state.uploadDelayMs > 0
@@ -472,8 +501,10 @@ const server = http.createServer((req, res) => {
     const ent = state.cache.get(sha1);
     if (!ent || ent.ext !== ext) return send(409, { ok: false, error: "not-cached" });
     const source = req.headers["x-source-name"] || "remote";
-    const t = makeTask(`/mock/out/${source}`, { status: "running", message: "已收到" });
-    const j = jobOf([t], { source_kind: "remote", label: source });
+    const bId = url.searchParams.get("batch_id") || null;
+    const bLabel = url.searchParams.get("batch_label") || null;
+    const t = makeTask(`/mock/out/${source}`, { status: bId ? "pending" : "running", message: bId ? "排队中" : "已收到" });
+    const j = jobOf([t], { source_kind: "remote", label: source, batch_id: bId, batch_label: bLabel });
     return send(201, { ok: true, job_id: j.id, file: source, cached: true });
   }
 
@@ -518,7 +549,10 @@ const server = http.createServer((req, res) => {
       for (const f of files) {
         if (typeof f !== "string" || !f.startsWith("/")) return sendErr(400, `非法路径: ${f}`);
       }
-      const j = jobOf(files.map((p) => makeTask(p, { status: "running", message: "已入队" })), { source_kind: "local", label: `文件夹扫描 · ${files.length} 项` });
+      // 主任务（batch）：body 带 batch → 单 job 多文件 pending 起步（tick 每 job 晋升 1 个，串行；非 batch 保持旧口径）
+      const batchId = body.batch_id || null;
+      const batchLabel = body.batch_label || null;
+      const j = jobOf(files.map((p) => makeTask(p, { status: batchId ? "pending" : "running", message: batchId ? "排队中" : "已入队" })), { source_kind: "local", label: `文件夹扫描 · ${files.length} 项`, batch_id: batchId, batch_label: batchLabel });
       return send(201, { ok: true, job_id: j.id, files: files.length });
     });
     return;
@@ -547,6 +581,44 @@ const server = http.createServer((req, res) => {
     if (!j.paused) return sendErr(409, "任务未在挂起状态");
     j.paused = false;
     return send(200, { ok: true, job_id: parts[1], status: "resumed" });
+  }
+
+  // ---- POST /jobs/batch/<id>/pause|resume|cancel（主任务；恒 200：该 serve 未持有该 batch 也照记标记，与 serve 一致）----
+  if (req.method === "POST" && parts.length === 4 && parts[0] === "jobs" && parts[1] === "batch"
+      && (parts[3] === "pause" || parts[3] === "resume" || parts[3] === "cancel")) {
+    const bid = decodeURIComponent(parts[2]);
+    if (parts[3] === "pause") {
+      const changed = !state.batchPaused.has(bid);
+      state.batchPaused.add(bid);
+      return send(200, { ok: true, batch_id: bid, changed, paused: true });
+    }
+    if (parts[3] === "resume") {
+      const changed = state.batchPaused.has(bid);
+      state.batchPaused.delete(bid);
+      return send(200, { ok: true, batch_id: bid, changed, paused: false });
+    }
+    // cancel：batch 内 PENDING 文件 → CANCELED（在跑不动，复刻 serve batch_cancel）；同时清暂停标记
+    let canceledJobs = 0, canceledFiles = 0;
+    for (const j of state.jobs.values()) {
+      if (j.batch_id !== bid) continue;
+      let touched = 0;
+      for (const t of j.files) {
+        if (t.status === "pending") {
+          t.status = "canceled";
+          t.message = "主任务已取消";
+          t.finished = Date.now() / 1000;
+          t.eta_s = null;
+          touched++;
+        }
+      }
+      if (touched) { canceledFiles += touched; }
+      if (j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status))) {
+        if (touched) canceledJobs += 1; // 对齐 serve：仅本次取消致 job 终态才计 canceled_jobs
+        if (j.finished == null) j.finished = Date.now() / 1000;
+      }
+    }
+    state.batchPaused.delete(bid);
+    return send(200, { ok: true, batch_id: bid, canceled_jobs: canceledJobs, canceled_files: canceledFiles });
   }
 
   // ---- POST /jobs/<id>/retry ----

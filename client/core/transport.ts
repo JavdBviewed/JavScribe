@@ -6,7 +6,7 @@
 // （服务端 detail 优先，否则 "HTTP <status>" / "网络错误"）；e.network === true 表示网络层失败。
 
 import type {
-  ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, UpdateInfo, UploadStatus,
+  BatchOpResult, BatchRecord, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, UpdateInfo, UploadStatus,
 } from "./types";
 
 export type UploadProgress = (loadedBytes: number, totalBytes: number, pct: number) => void;
@@ -83,6 +83,11 @@ export interface Transport {
   pauseJob?(engine: string, jobId: string): Promise<{ ok: boolean; job_id: string; status: string }>;
   /** 恢复单个挂起的服务任务；失败 throw(detail) */
   resumeJob?(engine: string, jobId: string): Promise<{ ok: boolean; job_id: string; status: string }>;
+  /** 主任务（batch）操作 暂停/继续/取消：本机任务立即生效 + fan-out 所有在线服务；
+   *  单服务失败（离线/旧版 404）不 throw，engines 逐条列出；未实现则 UI 隐藏主任务操作按钮 */
+  batchOp?(action: "pause" | "resume" | "cancel", batchId: string): Promise<BatchOpResult>;
+  /** 主任务（batch）记录列表（created 降序；客户端侧持久化，已完成/已过期主任务对账用） */
+  listBatches?(): Promise<BatchRecord[]>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
@@ -107,10 +112,10 @@ export interface Transport {
   /** 客户端（本机工作台）并发设置；web = /api/client-config，desktop = IPC（userData/client-config.json 独立落盘） */
   getClientConfig?(): Promise<import("./types").ClientConfig>;
   putClientConfig?(cfg: import("./types").ClientConfig): Promise<void>;
-  /** 整片上传（带进度）；受理成功返回 uploadId 进入轮询 */
-  uploadFile(file: File, engine: string, onProgress: UploadProgress): Promise<UploadDispatch>;
-  /** 音频（opus）上传（带进度） */
-  uploadAudio(file: File, engine: string, audio: Blob, onProgress: UploadProgress): Promise<UploadDispatch>;
+  /** 整片上传（带进度）；受理成功返回 uploadId 进入轮询。batch=主任务归属（扫描/文件夹提交生成；单文件不传） */
+  uploadFile(file: File, engine: string, onProgress: UploadProgress, batch?: { id: string; label?: string }): Promise<UploadDispatch>;
+  /** 音频（opus）上传（带进度）。batch=主任务归属（同上） */
+  uploadAudio(file: File, engine: string, audio: Blob, onProgress: UploadProgress, batch?: { id: string; label?: string }): Promise<UploadDispatch>;
   /** 上传任务阶段轮询（extracting → dispatching → done/error） */
   getUpload(id: string): Promise<UploadStatus>;
   /** 版本对比（GitHub 最新 Release vs 当前版本）；失败 throw(detail) */
@@ -126,7 +131,7 @@ export interface Transport {
   cancelScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
   /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw
    *  subStatus：{path: subtitle_status} 提交前检测到的字幕状态（制作图提示展示用） */
-  submitScan(name: string, files: string[], subStatus?: Record<string, string>): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
+  submitScan(name: string, files: string[], subStatus?: Record<string, string>, batch?: { id: string; label?: string }): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
   /** 目录浏览（web 形态：客户端部署机 /api/fs/browse；desktop 形态无此方法，走原生对话框） */
   fsBrowse?(path: string): Promise<import("./types").FsBrowseResult>;
   /** 字幕预览：读字幕文件内容（web：/api/fs/read-srt；desktop：IPC 读本机文件） */

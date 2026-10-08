@@ -101,6 +101,7 @@ class Poller:
                 has_key=bool(entry.get("api_key")),
                 stats=h.get("stats") if isinstance(h.get("stats"), dict) else None,
                 paused=bool(h.get("paused", False)),
+                batch_paused=list(h.get("batch_paused") or []),
             )
             self.jobs[name] = details
             # 临时诊断（flaky 复现用，定位后移除）

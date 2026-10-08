@@ -71,7 +71,9 @@ def test_health_jobs_detail() -> None:
             h = await e.health()
             # 旧 serve 无 stats 字段 → None（web 看板退回行计数）
             # paused：serve 0.2.3+ 队列暂停标志；老 serve 无此字段 → False
-            assert h == {"ok": True, "device": "cuda", "version": "0.1.0", "stats": None, "paused": False}
+            # batch_paused：S2 batch 暂停集合；老 serve 无此字段 → 空列表（兼容）
+            assert h == {"ok": True, "device": "cuda", "version": "0.1.0", "stats": None,
+                         "paused": False, "batch_paused": []}
             jobs = await e.jobs()
             assert jobs == [JOB_SUMMARY]
             d = await e.job_detail(JOB_SUMMARY["id"])
@@ -96,6 +98,22 @@ def test_health_exposes_stats() -> None:
         try:
             h = await e.health()
             assert h["stats"] == {"done": 3, "skipped": 1, "failed": 0}
+        finally:
+            await e.close()
+    asyncio.run(run())
+
+
+def test_health_exposes_batch_paused() -> None:
+    """S2 /health 携带 batch_paused 集合（web 行级 batch_paused 聚合的唯一来源）。"""
+    async def run():
+        e = JavScribeEngine("w", BASE)
+        e._client = _client(lambda r: httpx.Response(200, json={
+            "ok": True, "device": "cuda", "version": "0.2.8",
+            "batch_paused": ["b-1", "b-2"],
+        }))
+        try:
+            h = await e.health()
+            assert h["batch_paused"] == ["b-1", "b-2"]
         finally:
             await e.close()
     asyncio.run(run())
