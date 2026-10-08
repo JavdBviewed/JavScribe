@@ -7,20 +7,21 @@
 //   - 裸回调形式的 opts 被正确读取（web 一期怪癖：函数形式读不到 onProgress）
 import type { ExtractOpts, JavExtractAPI } from "../ui/extract";
 import type { JavDesktop } from "../core/desktop-bridge";
+import { CLIENT_CFG_DEFAULTS, createPool } from "../core/concurrency";
 
 const desktop: JavDesktop = (window as unknown as { javDesktop: JavDesktop }).javDesktop;
 
 const MAX_BYTES = Infinity;
-let queue: Promise<unknown> = Promise.resolve(); // 串行：main 侧 ffmpeg 单实例足够，避免并发 IO 抖动
+// S4：串行队列 → 可 resize 池（extract_workers 消费点）。与 web 不同：main 侧每次 IPC 起
+// 独立系统 ffmpeg（无共享实例），池上限 = N 路真并行；cacheStore 原子 rename 保证并发
+// 同文件安全（last-writer-wins）。skipped 分支不进池。
+const pool = createPool(() => CLIENT_CFG_DEFAULTS.extract_workers);
 
 function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: true }> {
   if (!f) return Promise.reject(new Error("没有文件"));
   if (f.size <= 0) return Promise.resolve({ skipped: true } as const);
   if (f.size > MAX_BYTES) return Promise.resolve({ skipped: true } as const);
   const onProgress = typeof opts === "function" ? opts : opts?.onProgress;
-  const prev = queue;
-  let release: () => void = () => {};
-  queue = new Promise<void>((r) => { release = r; });
   const run = async (): Promise<Blob> => {
     const localPath = (f as File & { _localPath?: string })._localPath || desktop.filePath(f);
     const res = localPath
@@ -33,13 +34,20 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
     (blob as { _javOpusPath?: string; _javOpusSize?: number })._javOpusSize = res.sizeBytes;
     return blob;
   };
-  return prev.then(run).finally(() => { release(); }) as Promise<Blob | { skipped: true }>;
+  return pool.run(run) as Promise<Blob | { skipped: true }>;
 }
 
 const api: JavExtractAPI = {
   extractAudio,
   MAX_BYTES,
   fits: (f) => !!f && f.size > 0 && f.size <= MAX_BYTES,
+  setExtractLimit: (read) => {
+    pool.setLimitReader(read);
+    pool.wake();
+  },
+  wakeExtract: () => {
+    pool.wake();
+  },
 };
 
 (window as { JavExtract?: JavExtractAPI }).JavExtract = api;
