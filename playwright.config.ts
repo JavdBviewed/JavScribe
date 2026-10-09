@@ -51,6 +51,9 @@ export default defineConfig({
         "JAV_WEB_PORT=8901 JAV_WEB_TLS_PORT=0 JAV_DATA_DIR=$D " +
         "JAV_ENGINES='mock=http://127.0.0.1:8301' JAV_POLL_INTERVAL_S=1 " +
         "JAV_UPDATE_CHECK=on JAV_UPDATE_GITHUB_BASE=http://127.0.0.1:8303 JAV_UPDATE_INTERVAL_S=3 " +
+        // 本机任务「服务侧丢失」判定与残留 error 行清理加速，对齐 e2e 时间预算
+        // （缺失 60s→3s；error 行 TTL 24h→15s < waitForJobsEmpty 30s 空表预算）
+        "JAV_LOCAL_WB_JOB_MISSING_S=3 JAV_UPLOAD_TTL_S=15 " +
         "uv run jav-scribe-web",
       url: "http://127.0.0.1:8901/api/health",
       reuseExistingServer: !process.env.CI,

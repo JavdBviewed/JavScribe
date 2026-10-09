@@ -584,6 +584,58 @@ def test_local_submit_pipeline_and_writeback() -> None:
         JavScribeEngine.result = orig_result  # type: ignore[method-assign]
 
 
+def test_local_job_gone_fails_and_releases_slot() -> None:
+    """服务任务脱离快照（serve 重启 / 200 窗挤出 / 服务删除）：
+    首次缺失宽限不判；连续缺失超窗 → 行判失败并释放在途槽
+    （回归：旧行为锚定派发时间，槽位最长锁 15 分钟，连锁卡死后续派发）。"""
+    import jav_scribe_web.api as api_mod
+
+    orig_upload = JavScribeEngine.upload_audio
+
+    async def fake_upload_audio(self, audio: bytes, source_name: str,
+                           batch_id: str | None = None, batch_label: str | None = None) -> dict:
+        return {"job_id": "job-gone-1", "cached": False}
+
+    JavScribeEngine.upload_audio = fake_upload_audio  # type: ignore[method-assign]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            vid = _make_video(td)
+            store, poller = _make_store_and_poller(td)
+            client = TestClient(build_app(store, poller))
+            with client:
+                r = client.post(
+                    "/api/scan/local/submit",
+                    json={"engine": "车间A", "files": [str(vid)]},
+                )
+                assert r.status_code == 200, r.text
+                uid = r.json()["upload_ids"][0]
+                d = _wait_upload(client, uid)
+                assert d["phase"] == "done" and d["job_id"] == "job-gone-1", d
+                gate = client.app.state.gate
+                assert gate.held_count() == 1  # 在途任务占着槽
+
+                # 模拟服务重启：任务表清空
+                poller.jobs["车间A"] = []
+                orig_missing = api_mod.LOCAL_WB_JOB_MISSING_S
+                api_mod.LOCAL_WB_JOB_MISSING_S = 0  # 压缩缺失窗：第二拍即判
+                try:
+                    asyncio.run(poller._on_jobs())  # 首次缺失：宽限，不判
+                    d = client.get(f"/api/uploads/{uid}").json()
+                    assert d["writeback"] is None and d["phase"] == "done", d
+                    assert gate.held_count() == 1
+                    asyncio.run(poller._on_jobs())  # 连续缺失超窗：判丢失
+                finally:
+                    api_mod.LOCAL_WB_JOB_MISSING_S = orig_missing
+
+                d = client.get(f"/api/uploads/{uid}").json()
+                assert d["writeback"] == "failed: 服务任务已过期", d
+                assert d["phase"] == "error", d
+                assert "重新提交" in (d["error"] or ""), d
+                assert gate.held_count() == 0  # 槽已释放
+    finally:
+        JavScribeEngine.upload_audio = orig_upload  # type: ignore[method-assign]
+
+
 if __name__ == "__main__":
     for _n, _f in sorted(
         (n, f) for n, f in list(globals().items())

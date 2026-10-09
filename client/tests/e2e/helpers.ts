@@ -63,6 +63,11 @@ export const mockConfigMode = (req: APIRequestContext, mode: string) => mockCont
  * 在 mockReset 后仍会在快照里滞留最多一个 tick（1s），页面先渲染就会拍到残留行。
  * 30s：web 侧 httpx 超时恰为 15s，单次请求挂起会顶满一个 tick；15s 超时与之同量级
  * 会偶发竞态（快照刚清完前一刻超时），30s 留出完整吸收窗口。
+ *
+ * 本机任务残留：前序用例派发的本地 job 被本用例 mockReset 清出快照后，按
+ * JAV_LOCAL_WB_JOB_MISSING_S（e2e 加速为 3s）判「服务任务已过期」error 行，
+ * 再按 JAV_UPLOAD_TTL_S（e2e 加速为 15s）自清——最迟 ~20s 内消失，落在 30s
+ * 预算内（生产值 60s/24h 不会在 e2e 时间尺度内自清，故由 playwright.config.ts 加速）。
  */
 export async function waitForJobsEmpty(req: APIRequestContext, timeoutMs = 30_000) {
   const t0 = Date.now();

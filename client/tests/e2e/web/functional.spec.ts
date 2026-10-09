@@ -115,6 +115,41 @@ test("upload-audio 全链路：只传 opus → 202 → done → srt 可下载", 
   expect(srt.headers()["content-disposition"]).toContain("test-a.zh.srt");
 });
 
+test("本机任务服务侧丢失（任务表清空）：行判失败 + 过期文案，error 行 TTL 后自清", async () => {
+  // 走本机扫描提交（本机管线：持在途槽 + 登记回写表，「连续缺失时钟」仅作用于该路径；
+  // 浏览器 upload-audio 不持槽、无本机回写目标，服务侧丢失不触发此判定，由既有全链路用例覆盖）
+  // 先冻结服务管线：job 建表后停在 running 永不完成，确保观察窗内服务侧不自然收尾
+  await mockPause(req);
+  const dir = makeScanDir(`wb-lost-${process.pid}`);
+  const submit = await req.post(`${WEB_URL}/api/scan/local/submit`, {
+    data: { engine: "mock", files: [`${dir}/AKDL-001.mp4`] },
+    headers: jh,
+  });
+  expect(submit.status()).toBe(200);
+  expect(((await submit.json()) as { files: number }).files).toBe(1);
+
+  // 派发落 mock（job 在服务任务表 → 快照出现服务行；本地行仅派发前渲染，job_id 为空）
+  await waitForJobRow(req, (r: any) => r.local && r.job_id && r.source_kind === "remote", 30_000);
+
+  // 服务侧任务表被清（等价 serve 重启 / 200 窗挤出 / 服务删除）：job 永久脱离快照
+  await mockReset(req);
+
+  // 缺失时钟（e2e 加速 60s→3s，见 playwright.config.ts）：行判失败 + 过期文案 + 释放在途槽
+  await expect
+    .poll(async () => {
+      const rows = (await (await req.get(`${WEB_URL}/api/jobs`)).json()) as any[];
+      return rows.find((r) => r.phase === "error" && /任务表过期/.test(r.message || ""));
+    }, { timeout: 20_000 })
+    .toBeTruthy();
+
+  // error 行 TTL 后自清（e2e 加速 24h→15s）：任务表回空，不污染后续用例的空表前置
+  await expect
+    .poll(async () => ((await (await req.get(`${WEB_URL}/api/jobs`)).json() as any[]).length), {
+      timeout: 30_000,
+    })
+    .toBe(0);
+});
+
 test("服务端音轨缓存：同 opus 二次派发命中（workbench→serve 免传字节）", async () => {
   const opus = readFileSync(fx("sine.opus"));
   const postAudio = async (name: string) => {

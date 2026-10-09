@@ -31,12 +31,16 @@ from .update_check import UpdateChecker
 STATIC_DIR = Path(__file__).parent / "static"
 _log = logging.getLogger("jav-scribe-web")
 UPLOAD_MAX_GB = float(os.environ.get("JAV_UPLOAD_MAX_GB", "10"))
-UPLOAD_TTL_S = 24 * 3600  # finished upload entries kept this long, then pruned
+UPLOAD_TTL_S = float(os.environ.get("JAV_UPLOAD_TTL_S", "86400"))  # finished upload entries kept this long, then pruned
+# e2e 用 JAV_UPLOAD_TTL_S 加速（残留 error 行快速自清，不污染后续用例的 30s 空表预算）
 LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放弃并标记 failed
 # 服务端任务表只留最近 200 条内存窗：本地在途任务远超此数时，早期任务会被挤出
-# 任务表，字幕回写永远等不到终态（行永久卡「进行中」）。派发完成超此时长仍
-# 查不到服务任务 → 判失败放行重新提交。
-LOCAL_WB_JOB_GONE_S = 15 * 60
+# 任务表，字幕回写永远等不到终态（行永久卡「进行中」）。
+# 服务任务连续脱离轮询快照超此时长 → 判丢失（被 200 窗挤出 / 服务重启丢失 /
+# 服务被删除），行判失败放行重新提交，并释放在途槽。
+# 时钟度量「连续缺失时长」而非锚定派发时间：轮询失败保留上次快照（仅成功才
+# 刷新），单次网络抖动不会误判；刚派发的 job 秒级进快照，60s 缺失窗留足余量。
+LOCAL_WB_JOB_MISSING_S = float(os.environ.get("JAV_LOCAL_WB_JOB_MISSING_S", "60"))  # e2e 用 env 加速
 
 # ---- 客户端并发设置（本机工作台专属，不进 serve /config 白名单） ----
 # extract_workers：本机同时跑 ffmpeg 提取音轨的数量（封顶 1..8）
@@ -349,6 +353,7 @@ class UploadTask:
     sub_status: str | None = None
     writeback: str | None = None  # None=不适用 / pending / ok / skipped_exists / skipped / failed:…
     wb_fails: int = 0  # 回写连续失败计数（内部，不外发）
+    wb_missing_since: float | None = None  # job 脱离快照起点（内部，不外发；重现即清）
     # 用户主动暂停（区别于重启中断的 paused）：恢复时前端据此展示「继续」
     task_paused: bool = False
     # 主任务（batch）归属：扫描/文件夹上传同一提交共享 batch_id；单文件上传不带（None=普通行）
@@ -665,6 +670,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     _client_cfg = _load_client_config(_client_cfg_path)
     _local_limiter = _Limiter(_client_cfg["extract_workers"])
     _gate = _Gate(_client_cfg["queue_cap"])
+    app.state.gate = _gate  # 测试/排障白盒：观测在途槽占用
     # 全局暂停闸：set()=未暂停。暂停时新任务停在闸前（不占槽、不提取），
     # 运行中任务跑完；重启后状态随 client_config.json 恢复
     _pause_evt = asyncio.Event()
@@ -2187,16 +2193,22 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             )
             if job is None:
                 # 服务任务表里查不到：要么刚派发还没进快照（秒级内出现），
-                # 要么已被 200 内存窗挤出 / 服务重启丢失。派发完成超
-                # LOCAL_WB_JOB_GONE_S 仍查不到 → 判失败放行重新提交
-                # （避免行永久卡「进行中」）。
-                if (task.finished or 0) and time.time() - task.finished > LOCAL_WB_JOB_GONE_S:
-                    task.phase = "error"
-                    task.error = "服务任务已从任务表过期（任务量大时被服务端任务窗口挤出或服务重启丢失），请重新提交"
-                    task.writeback = "failed: 服务任务已过期"
-                    _save_uploads_state()
-                    _wb_close(task)
+                # 要么已被 200 内存窗挤出 / 服务重启丢失 / 服务被删除。
+                # 连续缺失超 LOCAL_WB_JOB_MISSING_S → 判丢失：行判失败放行
+                # 重新提交，并释放在途槽（避免槽位长时间锁定、行卡「进行中」）。
+                if (task.finished or 0):
+                    now = time.time()
+                    if task.wb_missing_since is None:
+                        task.wb_missing_since = now  # 首次缺失：宽限一拍（job 可能未进快照）
+                    elif now - task.wb_missing_since > LOCAL_WB_JOB_MISSING_S:
+                        task.phase = "error"
+                        task.error = "服务任务已从任务表过期（任务量大时被服务端任务窗口挤出或服务重启丢失），请重新提交"
+                        task.writeback = "failed: 服务任务已过期"
+                        _save_uploads_state()
+                        _wb_close(task)
                 continue
+            if task.wb_missing_since is not None:
+                task.wb_missing_since = None  # job 重回快照（快照抖动）：缺失时钟清零
             files = job.get("files") or []
             fstatus = files[0].get("status") if files else None
             if job.get("state") != "finished":
