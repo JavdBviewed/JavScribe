@@ -98,9 +98,9 @@ test("重启（同 userData）：手选不跨重启保留 → 回落 pool 第一
   const second = await launch(dir);
   try {
     // v0.2.15（2aa89d9）起 renderSelect 不再回读 localStorage 记忆值：
-    // 现存选中（本次会话手选）> auto（工作台形态）> pool 第一项
+    // 现存选中（本次会话手选）> auto（≥2 台服务，两形态统一）> pool 第一项
     const v = await second.page.locator("#engine-select").evaluate((e) => (e as HTMLSelectElement).value);
-    expect(v).toBe("mock");
+    expect(v).toBe("auto");
   } finally {
     await second.app.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });

@@ -67,6 +67,9 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 MAX_UPLOAD_MB = 400
+# 扫描提交上限：客户端所选文件绝对路径 JSON 整体提交（5000 项 × Windows 长路径
+# ~1.3-1.5MB 会撞默认 1MB 上限 → 400 bad body size；16MB ≈ 10 倍余量）
+MAX_SCAN_SUBMIT_MB = 16
 
 # 上传流式块大小（避免整包读入内存；2.5h 影片 opus ~30-80MB）
 UPLOAD_CHUNK = 1024 * 1024
@@ -546,7 +549,7 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "scan" and parts[1] == "submit":
             if not self._check_api_key():
                 return
-            body = self._read_json_body()
+            body = self._read_json_body(max_bytes=MAX_SCAN_SUBMIT_MB * 1024 * 1024)
             if body is None:
                 return
             try:

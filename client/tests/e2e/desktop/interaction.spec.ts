@@ -188,6 +188,7 @@ test("localStorage 持久化：autosave + 提取模式 + 所选服务重启保�
     await expect(r.page.locator("#autosave")).toBeChecked();
     const extractVal = await r.page.locator("#extract-select").evaluate((e) => (e as HTMLSelectElement).value);
     expect(extractVal).toBe("server");
+    // 所选服务值不跨重启回读（09-25 纪律）；本夹具单引擎（mock）→ 回落 pool 第一项
     const engineVal = await r.page.locator("#engine-select").evaluate((e) => (e as HTMLSelectElement).value);
     expect(engineVal).toBe("mock");
   } finally {

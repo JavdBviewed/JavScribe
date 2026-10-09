@@ -855,14 +855,23 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         versions = [i.version for i in poller.engines.values() if i.version]
         return updater.snapshot(versions)
 
-    @app.get("/api/engines")
-    async def api_list_engines() -> list[dict]:
+    def engines_out() -> list[dict]:
         out = []
         for info in sorted(poller.engines.values(), key=lambda e: e.name):
             d = info.to_dict()
             d["enabled"] = (store.get(info.name) or {}).get("enabled", True)
             out.append(d)
         return out
+
+    @app.get("/api/engines")
+    async def api_list_engines() -> list[dict]:
+        return engines_out()
+
+    @app.post("/api/engines/refresh")
+    async def api_refresh_engines() -> list[dict]:
+        # 「刷新状态」按钮：手动触发一轮探测（绕过 poller 轮询间隔），返回同 GET 形状
+        await poller.tick()
+        return engines_out()
 
     @app.post("/api/engines", status_code=201)
     async def api_add_engine(body: dict) -> dict:

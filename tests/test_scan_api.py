@@ -278,6 +278,84 @@ def test_scan_submit() -> None:
 
 
 
+def test_scan_submit_large_body() -> None:
+    """/scan/submit body 上限 1MB → 16MB（Windows 长路径 5000 项 ~1.3-1.5MB 撞旧 1MB 上限）。
+
+    ① >1MB 的合法真实路径列表 → 201 受理（长目录分量造 ~1000 个真实小文件 ≈ 1.2MB）
+    ② >16MB 的垃圾路径 JSON → 400 bad body size（body 检查先于文件校验，无需真实存在）
+    """
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        # 长路径：4 级 255 字节目录名 + 1 级 100 字节，单条绝对路径 ~1.1KB
+        segs = [td]
+        for _ in range(4):
+            segs.append(segs[-1] / ("l" * 250 + str(len(segs))))
+        inner = segs[-1] / ("m" * 90)
+        inner.mkdir(parents=True)
+        n = 1000
+        for i in range(n):
+            (inner / (f"f{i:04d}_a" * 2 + ".mp4")).write_bytes(b"x")
+        files = sorted(str(p) for p in inner.glob("f*.mp4"))
+        assert len(files) == n, len(files)
+        payload = json.dumps({"files": files}).encode()
+        assert len(payload) > 1024 * 1024, len(payload)  # 确认已越过旧 1MB 上限
+        http, engine, _ = _start(td, cfg, None)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            req = urllib.request.Request(base + "/scan/submit", data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("X-Api-Key", "k1")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    code, body = resp.status, json.loads(resp.read().decode())
+            except urllib.error.HTTPError as ex:
+                code, body = ex.code, json.loads(ex.read().decode())
+            assert code == 201 and body["ok"] and body["files"] == n, (code, body)
+            assert len(engine.jobs) == 1
+            # >16MB 垃圾路径 → 400 bad body size（校验前拦截，文件无需存在）。
+            # 服务端按 Content-Length 头先拒体再关连接（HTTP/1.0），真实客户端（fetch）
+            # 并发读写不受影响；urllib 串行写全会 BrokenPipe，故裸 socket + 后台写线程模拟。
+            big = json.dumps({"files": ["/ghost/" + "x" * 390 + f"_{i:06d}.mp4" for i in range(42000)]}).encode()
+            assert len(big) > 16 * 1024 * 1024, len(big)
+            import socket
+            import threading
+            host, port = base.split("://", 1)[1].rsplit(":", 1)
+            sock = socket.create_connection((host, int(port)), timeout=20)
+            head = (f"POST /scan/submit HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+                    f"X-Api-Key: k1\r\nContent-Length: {len(big)}\r\nConnection: close\r\n\r\n").encode()
+
+            def _send_all() -> None:
+                try:
+                    sock.sendall(head + big)
+                except OSError:
+                    pass  # 服务端 400 后关连接，写失败符合预期
+
+            th = threading.Thread(target=_send_all, daemon=True)
+            th.start()
+            data = b""
+            try:
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            except OSError:
+                pass
+            finally:
+                sock.close()
+            th.join(timeout=20)
+            rhead, _, rbody = data.partition(b"\r\n\r\n")
+            code2 = int(rhead.split(b" ", 2)[1]) if rhead else 0
+            body2 = json.loads(rbody.decode("utf-8", "replace") or "{}")
+            assert code2 == 400 and str(body2.get("error", "")).startswith("bad body size"), (code2, body2)
+            assert len(engine.jobs) == 1  # 超限未入队
+            print("  test_scan_submit_large_body PASSED")
+        finally:
+            http.stop()
+
+
 def test_scan_host_root_mapping() -> None:
     """Containerized layout: host fs mounted RO under a prefix (JAVSCRIBE_HOST_ROOT).
 
@@ -338,6 +416,7 @@ def main() -> None:
     test_scan_path_errors()
     test_scan_rules_hot_update()
     test_scan_submit()
+    test_scan_submit_large_body()
     test_scan_host_root_mapping()
     print("ALL SCAN API TESTS PASSED")
 

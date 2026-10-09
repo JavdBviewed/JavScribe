@@ -56,8 +56,12 @@ export interface Transport {
   deleteEngine(name: string): Promise<void>;
   /** 登记/更新 API Key */
   putEngineKey(name: string, apiKey: string): Promise<void>;
-  /** 切换「参与自动负载均衡」（工作台 v0.2.11+；desktop 形态无此方法） */
+  /** 切换「参与自动负载均衡」：web 形态存工作台服务 store（v0.2.11+）；
+   *  desktop 形态本地持久化（main EngineStore），auto 由客户端在派发时刻解析 */
   setEngineEnabled?(name: string, enabled: boolean): Promise<void>;
+  /** 立即重新探测所有服务在线状态/版本/运行任务数（web 触发工作台 poller；desktop 绕过 3s 快照），
+   *  返回与 listEngines 同形状；未实现则 UI 不显示「刷新状态」按钮 */
+  refreshEngines?(): Promise<Engine[]>;
   /** 任务看板（poller 快照展平行） */
   listJobs(): Promise<JobRow[]>;
   /** 看板统计（web 工作台 /api/jobs/summary，serve 累计口径）；未实现则 UI 回退行计数 */

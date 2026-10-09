@@ -29,6 +29,8 @@
   --scanline: none;
   --shadow: 0 1px 2px rgba(32, 36, 42, 0.05), 0 8px 24px -12px rgba(32, 36, 42, 0.18);
   --shadow-lift: 0 2px 4px rgba(32, 36, 42, 0.06), 0 14px 30px -12px rgba(32, 36, 42, 0.25);
+  --scroll-thumb: rgba(32, 36, 42, 0.22);
+  --scroll-thumb-hover: rgba(32, 36, 42, 0.34);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -53,11 +55,27 @@
         transparent 1px, transparent 3px);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -14px rgba(0, 0, 0, 0.7);
     --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.5), 0 18px 36px -14px rgba(0, 0, 0, 0.8);
+    --scroll-thumb: rgba(255, 255, 255, 0.18);
+    --scroll-thumb-hover: rgba(255, 255, 255, 0.30);
   }
 }
 
 * { box-sizing: border-box; }
 html { scrollbar-gutter: stable; }
+/* 滚动条主题：Blink 下任意 ::-webkit-scrollbar 规则即把 overlay 切回经典布局——
+   样式稳定可见（exe 上下左右滚动条统一吃主题变量，正是要的效果） */
+* { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-thumb:active { background: var(--scroll-thumb-hover); }
 body {
   margin: 0;
   min-height: 100vh;
@@ -1769,6 +1787,27 @@ body.desktop main > section.view-on { display: block; }
   line-height: 1.6;
 }
 .scan-safety-note::before { content: "ⓘ"; color: var(--accent); margin-right: 6px; font-weight: 700; }
+/* 扫描结果分类 tab（pill 组，风格对齐 .pg-btn/.view-tab） */
+.scan-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+.scan-tab {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.scan-tab:hover { border-color: var(--accent); color: var(--accent); }
+.scan-tab.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .scan-head { align-items: flex-start; flex-wrap: wrap; gap: 6px 12px; }
 .scan-head .scan-title { font-weight: 700; }
 .scan-head > .muted { flex: 1; min-width: 260px; line-height: 1.6; }

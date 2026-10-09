@@ -56,7 +56,7 @@ function parseEnginesEnv(value: string): Array<[string, string]> {
   return out;
 }
 
-interface EngineEntry { name: string; url: string; api_key: string; }
+interface EngineEntry { name: string; url: string; api_key: string; /** 参与自动均衡（desktop 客户端侧持久化；缺省=参与） */ enabled?: boolean; }
 
 class EngineStore {
   private _path: string;
@@ -88,6 +88,7 @@ class EngineStore {
       const url = typeof e.url === "string" ? e.url : "";
       if (name && isUrl(url)) {
         this._upsert(name, normUrl(url), typeof e.api_key === "string" ? e.api_key : "");
+        if (typeof e.enabled === "boolean") this._engines.get(name)!.enabled = e.enabled;
       }
     }
   }
@@ -126,6 +127,14 @@ class EngineStore {
     const e = this._engines.get(name);
     if (!e) return null;
     e.api_key = (key || "").trim();
+    this._save();
+    return e;
+  }
+
+  setEnabled(name: string, enabled: boolean): EngineEntry | null {
+    const e = this._engines.get(name);
+    if (!e) return null;
+    e.enabled = !!enabled;
     this._save();
     return e;
   }
@@ -452,8 +461,16 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
   }
 }
 
-function refresh(): Promise<Snapshot> {
-  if (lastSnap && Date.now() - lastSnap.at < TTL_MS) return Promise.resolve(lastSnap);
+/** 对外引擎视图：去内部 _details；「参与均衡」状态由 store 合并（快照无此字段） */
+function publicEngines(s: Snapshot) {
+  return s.engines.map((e) => {
+    const { _details, ...pub } = e;
+    return { ...pub, enabled: store.get(e.name)?.enabled !== false };
+  });
+}
+
+function refresh(force = false): Promise<Snapshot> {
+  if (!force && lastSnap && Date.now() - lastSnap.at < TTL_MS) return Promise.resolve(lastSnap);
   if (!inFlight) {
     inFlight = (async () => {
       const engines = await Promise.all(store.all().map(refreshOne));
@@ -1203,11 +1220,7 @@ function registerIpc(): void {
         }
         case "listEngines": {
           const s = await refresh();
-          const list = s.engines.map((e) => {
-            const { _details, ...pub } = e;
-            return pub;
-          });
-          return { ok: true, data: list };
+          return { ok: true, data: publicEngines(s) };
         }
         case "openedExternal": {
           // e2e：读 setWindowOpenHandler 实际交给系统浏览器的 URL（需 env JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1）
@@ -1236,6 +1249,16 @@ function registerIpc(): void {
           if (!e) return { ok: false, error: "服务不存在" };
           lastSnap = null;
           return { ok: true };
+        }
+        case "setEngineEnabled": {
+          const e = store.setEnabled(String(a0 || ""), a1 === "true");
+          if (!e) return { ok: false, error: "服务不存在" };
+          return { ok: true };
+        }
+        case "refreshEngines": {
+          // 手动重探测所有服务在线状态/版本/运行任务数：绕过 3s TTL 单飞快照
+          const s = await refresh(true);
+          return { ok: true, data: publicEngines(s) };
         }
         case "getResultData": {
           const entry = engineByName(String(a0));
@@ -1482,20 +1505,30 @@ function registerIpc(): void {
               }
             } catch { /* 畸形 batch 参数按无 batch 处理，不阻断提交 */ }
           }
+          const payload = JSON.stringify({
+            files,
+            ...(batch ? { batch_id: batch.id, batch_label: batch.label || "" } : {}),
+          });
+          // body 预检：serve 0.2.8+ /scan/submit 上限 16MB，超了明确报错引导分批
+          //（不发请求：超限会被服务端先拒体后关连接，报成「服务不可达」更费解）
+          if (Buffer.byteLength(payload, "utf-8") > 15 * 1024 * 1024) {
+            return { ok: false, error: "所选文件过多（路径列表超过 15MB），超出服务端单次提交上限：请取消部分勾选后分批提交" };
+          }
           const r = await httpJson<any>(entry.url + "/scan/submit", {
             method: "POST",
             headers,
-            body: JSON.stringify({
-              files,
-              ...(batch ? { batch_id: batch.id, batch_label: batch.label || "" } : {}),
-            }),
+            body: payload,
             timeoutMs: 30000,
           });
           if (r.status !== 201) {
+            const bodyErr = (r.data as { error?: unknown })?.error;
+            if (r.status === 400 && typeof bodyErr === "string" && bodyErr.startsWith("bad body size")) {
+              // 旧 serve（≤0.2.7，1MB 上限）：友好文案，提示升级或分批
+              return { ok: false, error: "所选文件过多，超出该服务单次提交上限：请升级服务端到 0.2.8+，或取消部分勾选后分批提交" };
+            }
             const err = configError(r.status, r.data);
             // 400「文件不存在」= 服务读不到本机路径（远程服务场景）：结构化上抛，
             // 渲染层据此自动回退本机提取+上传
-            const bodyErr = (r.data as { error?: unknown })?.error;
             if (r.status === 400 && typeof bodyErr === "string" && bodyErr.startsWith("文件不存在")) {
               (err as Error & { code?: string }).code = "not-found";
             }

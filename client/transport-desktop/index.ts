@@ -97,6 +97,10 @@ export const desktopTransport: Transport = {
   addEngine: (name, url, apiKey) => call("addEngine", name, url, apiKey || ""),
   deleteEngine: (name) => call("deleteEngine", name),
   putEngineKey: (name, apiKey) => call("putEngineKey", name, apiKey),
+  // 「参与自动均衡」开关：desktop 形态本地持久化（main EngineStore；auto 解析在客户端侧）
+  setEngineEnabled: (name, enabled) => call("setEngineEnabled", name, String(enabled)),
+  // 手动重探测所有服务（绕过 main 3s TTL 快照）
+  refreshEngines: () => call<Engine[]>("refreshEngines"),
   listJobs: () => call<JobRow[]>("listJobs"),
 
   // 桌面端更新走 main 进程 electron-updater（window.javDesktop.update.*），

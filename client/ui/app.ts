@@ -34,6 +34,7 @@ interface AppState {
   scanResolvedPath: string;
   scanChecked: Set<string>;
   scanPage: number;          // 扫描列表当前页（0 起；勾选态全局维护，与翻页互不影响）
+  scanFilter: "all" | "no-sub" | "has-sub" | "small"; // 分类 tab 过滤（all 恒可用；勾选态跨 tab 全局）
   scanPageSize: number;      // 扫描列表每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
   scanTask: ScanTaskSnapshot | null; // 后台扫描任务（web 形态刷新后可恢复）
@@ -84,6 +85,7 @@ const state: AppState = {
   scanResolvedPath: "",
   scanChecked: new Set(),
   scanPage: 0,
+  scanFilter: "all",
   scanPageSize: readPageSize("javweb_scan_pagesize"),
   lastScan: null,
   scanTask: null,
@@ -1815,6 +1817,32 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   ($("engine-add-btn") as HTMLButtonElement | null)?.addEventListener("click", engineAddOpen);
+  // 「刷新状态」：立即重探测所有服务（web 触发工作台 poller 一轮；desktop 绕过 main 3s 快照）
+  {
+    const btn = $("engine-refresh-btn") as HTMLButtonElement | null;
+    if (!btn) throw new Error("engine-refresh-btn 缺失");
+    if (typeof t.refreshEngines !== "function") {
+      btn.remove(); // 形态不支持（理论分支）：隐藏按钮
+    } else {
+      btn.addEventListener("click", async () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        const prev = btn.innerHTML;
+        btn.innerHTML = "检测中…";
+        try {
+          const list = await t.refreshEngines!();
+          const on = list.filter((e) => e.online).length;
+          toast(`在线 ${on} 台 / 离线 ${list.length - on} 台`, on ? "ok" : "err");
+        } catch (ex) {
+          toast(ex instanceof Error ? ex.message : "刷新失败", "err");
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = prev;
+          refresh(); // 以新快照重渲服务列表
+        }
+      });
+    }
+  }
   ($("engine-add-x") as HTMLButtonElement | null)?.addEventListener("click", engineAddClose);
   ($("engine-add-cancel") as HTMLButtonElement | null)?.addEventListener("click", engineAddClose);
   engineAddBackdrop?.addEventListener("click", (ev) => { if (ev.target === engineAddBackdrop) engineAddClose(); });
@@ -1871,9 +1899,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const online = engines.filter((e) => e.online);
     const pool = online.length ? online : engines;
-    // auto 选项：仅工作台形态且 ≥2 台服务（auto 由工作台服务端在派发时刻按实时负载解析；
-    // desktop 形态客户端直连单服务，无均衡概念）
-    const canAuto = typeof t.setEngineEnabled === "function" && engines.length >= 2;
+    // auto 选项：≥2 台服务即可用。派发时刻实时选最闲：web 由工作台服务端 pick_engine 解析，
+    // desktop 由客户端 resolveAutoEngine 解析（数据源=客户端在途记账，desktop v0.2.32+）
+    const canAuto = engines.length >= 2;
     // 选项集（auto 可用性+名称+在线态）无变化不重建：避免 5s 轮询周期性重绘把用户手选静默打回第一项
     const sig = (canAuto ? "auto|" : "") + pool.map((e) => `${e.name}:${e.online ? 1 : 0}`).join("|");
     if (sel.dataset.sig === sig) {
@@ -2557,6 +2585,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return state.ccfg?.queue_cap ?? CLIENT_CFG_DEFAULTS.queue_cap;
   }
 
+  /** auto 派发时刻解析：在线且参与均衡的服务里选在途最少者；平手按注册序取首个
+   *  （稳定即可，不复制工作台的同负载轮转——客户端在途记账粒度下同义）。无候选返 null */
+  function resolveAutoEngine(): string | null {
+    let best: string | null = null;
+    let bestN = Infinity;
+    for (const e of state.engines) {
+      if (!e.online || e.enabled === false) continue;
+      const n = inFlightOf(e.name);
+      if (n < bestN) { best = e.name; bestN = n; }
+    }
+    return best;
+  }
+
   function canDispatch(engine: string): boolean {
     return canStartInFlight({ engine, cap: queueCapNow(), inFlight: inFlightOf, engines: state.engines });
   }
@@ -2606,6 +2647,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function startSingle(engine: string) {
     const file = state.file;
     if (!file) { singleQueuedFile = null; return; }
+    if (engine === "auto") {
+      const real = resolveAutoEngine();
+      if (!real) {
+        // 全部离线/都未勾选参与均衡：等待也等不出服务，明确告知（不占排队标记）
+        singleQueuedFile = null;
+        showStatus("没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
+        toast("没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
+        return;
+      }
+      engine = real;
+    }
     if (!canDispatch(engine)) {
       // 在途封顶（queue_cap）：不阻塞 UI，等 cap 槽位释放 → pumpDispatch 重触发（≤5s 轮询安全网）
       singleQueuedFile = file;
@@ -2665,7 +2717,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const startNext = (): void => {
       if (done) return;
       while (started < total) {
-        if (!canDispatch(engine)) break; // 封顶：等 refresh / 链结算 / 设置保存重触发
+        // auto：canDispatch("auto")=任一在线+参与均衡有空位；再解析出最闲者落具体服务
+        let realName: string | null = engine;
+        if (engine === "auto") {
+          if (!canDispatch("auto")) break; // 全满/全离线：等泵重触发
+          realName = resolveAutoEngine();
+          if (!realName) break; // 理论不可达（canDispatch 真即有候选），双保险
+        } else if (!canDispatch(engine)) {
+          break; // 封顶：等 refresh / 链结算 / 设置保存重触发
+        }
+        const real = realName; // 收窄为 string（闭包内使用需 const）
         const idx = started++;
         const file = queue[idx];
         const prefix = `文件 ${idx + 1}/${total} · `;
@@ -2673,13 +2734,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         void (async () => {
           let ok = false;
           let d: UploadStatus | { error: string } = { error: "" };
-          try { [ok, d] = await dispatchTracked(file, engine, prefix, batch); } catch (_e) { ok = false; }
+          try { [ok, d] = await dispatchTracked(file, real, prefix, batch); } catch (_e) { ok = false; }
           if (ok) {
             okN++;
             const up = d as UploadStatus;
             if (up.job_id) {
-              state.writeBackJobs.set(engine + "|" + up.job_id, {
-                engine, videoName: file.name, dirHandle: file._dirHandle || null,
+              state.writeBackJobs.set(real + "|" + up.job_id, {
+                engine: real, videoName: file.name, dirHandle: file._dirHandle || null,
                 videoPath: file._localPath || null,
               });
             }
@@ -2730,6 +2791,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     state.scanChecked = new Set();
     state.lastScan = null;
     state.scanPage = 0;
+    state.scanFilter = "all";
     $("scan-pager").hidden = true;
     $("scan-results").hidden = true;
     $("scan-submit").hidden = true;
@@ -3544,10 +3606,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (scanTaskCancel) scanTaskCancel.hidden = !["queued", "running", "paused"].includes(task.status);
     updateScanGo();
   }
+  // 扫描列表分类（互斥）：已有字幕 > 过小 > 无字幕（含「无字幕（名）」信息标项）
+  function scanCatOf(i: ScanItem): "no-sub" | "has-sub" | "small" {
+    if (i.has_subtitle) return "has-sub";
+    if (i.too_small) return "small";
+    return "no-sub";
+  }
+  function scanViewItems(): ScanItem[] {
+    if (state.scanFilter === "all") return state.scanItems;
+    return state.scanItems.filter((i) => scanCatOf(i) === state.scanFilter);
+  }
+  /** 当前视图内可被「全选」覆盖的项（过小只能手动勾选，任何视图下都不进全选域） */
+  function scanViewSelectable(): ScanItem[] {
+    return scanViewItems().filter((i) => !i.too_small);
+  }
+
   function applyScanResult(d: ScanResult) {
     state.scanItems = d.items || [];
     state.lastScan = d;
     state.scanPage = 0;
+    state.scanFilter = "all"; // 每次新扫描重置分类 tab
     state.scanMapped = d.mapped === true;
     state.scanResolvedPath = d.path || "";
     state.scanChecked = new Set(state.scanItems.filter((i) => !i.has_subtitle && !i.too_small).map((i) => i.path));
@@ -3660,7 +3738,33 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   function renderScanResults(d: ScanResult) {
-    const items = state.scanItems;
+    const items = scanViewItems();
+    // 分类 tab（计数按全集；空分类隐藏，All 恒显；无结果整体隐藏）
+    {
+      const tabsEl = $("scan-tabs");
+      if (state.scanItems.length) {
+        const counts: Record<string, number> = { "no-sub": 0, "has-sub": 0, small: 0 };
+        for (const i of state.scanItems) counts[scanCatOf(i)]++;
+        const defs: Array<[typeof state.scanFilter, string]> =
+          [["all", "全部"], ["no-sub", "无字幕"], ["has-sub", "已有字幕"], ["small", "过小"]];
+        tabsEl.innerHTML = defs
+          .filter(([k]) => k === "all" || counts[k] > 0)
+          .map(([k, label]) =>
+            `<button type="button" class="scan-tab${state.scanFilter === k ? " on" : ""}" data-f="${k}">${label} ${k === "all" ? state.scanItems.length : counts[k]}</button>`)
+          .join("");
+        tabsEl.hidden = false;
+        tabsEl.querySelectorAll<HTMLButtonElement>("button.scan-tab").forEach((b) => {
+          b.onclick = () => {
+            state.scanFilter = (b.dataset.f as typeof state.scanFilter) || "all";
+            state.scanPage = 0;
+            if (state.lastScan) renderScanResults(state.lastScan);
+          };
+        });
+      } else {
+        tabsEl.hidden = true;
+        tabsEl.innerHTML = "";
+      }
+    }
     if (state.scanMapped) {
       $("scan-mapped").hidden = false;
       $("scan-mapped").textContent =
@@ -3670,11 +3774,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       $("scan-mapped").hidden = true;
     }
     if (!items.length) {
-      $("scan-table").innerHTML =
-        '<div class="muted small">没有找到符合条件的视频文件。可到「客户端设置 · 扫描规则」调整扩展名'
-      + (platform.kind === "web"
-        ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」"
-        : "；路径需被所选服务可读（本地服务可填 D:\\Videos 等本机路径）") + "）</div>";
+      $("scan-table").innerHTML = state.scanItems.length
+        ? '<div class="muted small">该分类下没有文件，可切到上方其它 tab</div>'
+        : '<div class="muted small">没有找到符合条件的视频文件。可到「客户端设置 · 扫描规则」调整扩展名'
+          + (platform.kind === "web"
+            ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」"
+            : "；路径需被所选服务可读（本地服务可填 D:\\Videos 等本机路径）") + "）</div>";
       renderScanPager(0);
     } else {
       const PAGE = state.scanPageSize;
@@ -3766,17 +3871,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const button = scanSubmit;
     button.disabled = n === 0 || !engineSelect.value || state.busy;
     button.innerHTML = "&#9654; 生成字幕（已选择 " + n + " 项）";
-    // 「全选」只覆盖非「忽略」文件：too_small 只能手动勾选
-    const selectable = state.scanItems.filter((i) => !i.too_small).length;
-    scanSelectAll.checked = selectable > 0 && state.scanChecked.size === selectable;
+    // 「全选」按当前分类 tab 视图域：只覆盖视图内非「过小」文件（too_small 只能手动勾选）
+    const selectable = scanViewSelectable();
+    scanSelectAll.checked = selectable.length > 0
+      && selectable.every((i) => state.scanChecked.has(i.path));
+    scanSelectAll.disabled = selectable.length === 0; // 「过小」tab / 空视图：全选不可用
   }
 
   scanSelectAll.onchange = (ev) => {
     const checked = (ev.target as HTMLInputElement).checked;
-    // 过小（忽略）文件不参与全选，保持未选
-    state.scanChecked = checked
-      ? new Set(state.scanItems.filter((i) => !i.too_small).map((i) => i.path))
-      : new Set<string>();
+    // 视图域全选：勾选=加视图内非过小项（保留其它 tab 已选项）；取消=只减视图项
+    const view = new Set(scanViewItems().map((i) => i.path));
+    if (checked) {
+      for (const i of state.scanItems) if (view.has(i.path) && !i.too_small) state.scanChecked.add(i.path);
+    } else {
+      for (const p of [...state.scanChecked]) if (view.has(p)) state.scanChecked.delete(p);
+    }
     $("scan-table").querySelectorAll("input[type=checkbox]")
       .forEach((cb) => {
         const input = cb as HTMLInputElement;
@@ -3813,7 +3923,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     try {
       // 主任务（batch）：扫描提交恒生成（label=扫描目录名）
       const batch = { id: genBatchId(), label: batchLabelForScan() };
-      const d = await t.submitScan(engine, files, subStatus, batch);
+      let target = engine;
+      if (engine === "auto") {
+        // 整批落一个服务（serve 侧单任务多文件）：提交前 probe 取一次最闲者
+        const probe = resolveAutoEngine();
+        if (!probe) {
+          toast("自动均衡没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
+          return;
+        }
+        target = probe;
+      }
+      const d = await t.submitScan(target, files, subStatus, batch);
       if (d.skipped && d.skipped.length) {
         const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
         toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
@@ -3827,6 +3947,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       state.scanChecked = new Set();
       state.lastScan = null;
       state.scanPage = 0;
+      state.scanFilter = "all";
       $("scan-pager").hidden = true;
       $("scan-results").hidden = true;
       $("scan-submit").hidden = true;
@@ -3835,7 +3956,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
       if (platform.kind === "desktop" && e instanceof TransportError && e.code === "not-found") {
-        toast("所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
+        toast(engine === "auto"
+          ? "所选服务读不到这些本机路径，已改为本机提取后上传（自动均衡分发）"
+          : "所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
         dispatchLocalScanPaths(engine, files, { id: genBatchId(), label: batchLabelForScan() });
         return;
       }
@@ -3920,9 +4043,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           if (state.busy || watchDispatchingPath) return;
           const it = watchQueue[0];
           if (!it) { watchRender(); return; }
-          const engine = engineSelect.value;
+          let engine = engineSelect.value;
           if (!engine) { watchRender(); return; } // 未选服务：留队列等（onchange / 5s 轮询会再触发）
-          if (!canDispatch(engine)) return; // S4 在途封顶：留队列等（refresh / watchPump 5s 安全网重触发）
+          if (engine === "auto") {
+            const real = resolveAutoEngine();
+            if (!real || !canDispatch(real)) return; // 无候选/全满：留队列等（5s 安全网重触发）
+            engine = real;
+          } else if (!canDispatch(engine)) {
+            return; // S4 在途封顶：留队列等（refresh / watchPump 5s 安全网重触发）
+          }
           watchQueue.shift();
           watchDispatchingPath = it.path;
           state.busy = true;

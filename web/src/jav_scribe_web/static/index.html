@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-BdTTrJSO.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-CvxrayrD.css">
+  <script type="module" crossorigin src="/assets/index-vDbl88yb.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DzEYhUKr.css">
 </head>
 <body>
 <header>
@@ -52,6 +52,7 @@
     <div class="sec-head">
       <div class="sec-title"><span class="kicker">Services</span><h2>字幕服务</h2></div>
       <button type="button" id="engine-add-btn" class="btn" title="登记一台字幕服务端（JavScribe Serve）">＋ 添加服务</button>
+      <button type="button" id="engine-refresh-btn" class="btn" title="立即重新探测所有服务的在线状态 / 版本 / 运行任务数">⟳ 刷新状态</button>
     </div>
     <div id="local-serve-status" hidden>
       <span id="local-serve-lamp" class="watch-lamp" aria-hidden="true"></span>
@@ -174,6 +175,7 @@
       <div id="scan-results" hidden>
         <div id="scan-mapped" class="muted small scan-mapped-note" hidden></div>
         <div class="scan-safety-note" role="status">本次只检查文件名、大小和同目录字幕；内嵌字幕暂不检查，不会因扫描触发网盘下载。</div>
+        <div id="scan-tabs" class="scan-tabs" hidden></div>
         <div class="scan-summary">
           <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
           <span id="scan-count" class="muted small mono"></span>

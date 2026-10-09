@@ -107,6 +107,8 @@ export const webTransport: Transport = {
   setEngineEnabled: (name, enabled) =>
     jput("/api/engines/" + encodeURIComponent(name), { enabled }),
 
+  refreshEngines: () => jpost<Engine[]>("/api/engines/refresh"),
+
   listJobs: () => jget<JobRow[]>("/api/jobs"),
 
   // 主任务（batch）操作：无 body；本机任务立即生效 + fan-out 各在线服务（旧版服务 404 → 该引擎 unsupported）
