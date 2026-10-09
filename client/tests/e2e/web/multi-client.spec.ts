@@ -123,13 +123,15 @@ test("他端任务全部消失：来源条自动收起，筛选复位「全部�
 });
 
 test("服务端级操作提示：暂停所有 tooltip + 服务设置弹窗横幅", async ({ page }) => {
+  // 无在途任务时按钮隐藏 → seed 一个排队任务让「暂停所有」出现
+  await mockSeed(req, { n: 1, status: "pending" });
   await page.goto("/");
   await waitForEngineOnline(page);
   await goTab(page, "jobs");
 
   // 暂停所有：tooltip 明示服务端级影响面
   const btn = page.locator("#job-pause-all");
-  await expect(btn).toBeVisible();
+  await expect(btn).toBeVisible({ timeout: 15_000 });
   await expect(btn).toHaveAttribute("title", /服务端级操作/);
 
   // 服务设置弹窗：顶部服务端级设置横幅（客户端设置卡片除外说明）

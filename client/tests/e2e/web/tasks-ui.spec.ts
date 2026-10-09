@@ -39,8 +39,10 @@ test("任务行显示添加时间与完成时间", async ({ page }) => {
   await waitForEngineOnline(page);
   await goTab(page, "jobs");
   const row = page.locator(".job-row").first();
-  await expect(row.locator(".job-time-created")).toHaveText(/^添加于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-  await expect(row.locator(".job-time-finished")).toHaveText(/^完成于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  // 「添加于/完成于」独立列（10-09 需求：从文件列内拆出）
+  await expect(row.locator(".cell-created")).toHaveText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".cell-finished")).toHaveText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".cell-finished")).toHaveClass(/is-done/);
 });
 
 test("筛选条：9 个状态按钮（内嵌计数）取代旧统计行，点击筛选生效", async ({ page }) => {

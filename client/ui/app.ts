@@ -903,12 +903,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       : "—";
     const createdAt = fmtJobDateTime(j.created);
     const finishedAt = fmtJobDateTime(j.finished);
-    const finishedLabel = j.status === "done" ? "完成于" : "结束于";
-    const jobTime = createdAt
-      ? `<div class="job-time"><span class="job-time-created">添加于 ${esc(createdAt)}</span>`
-        + (finishedAt ? `<span class="job-time-finished">${finishedLabel} ${esc(finishedAt)}</span>` : "")
-        + `</div>`
-      : "";
     let eta = "";
     const prog = j.progress || 0;
     if (isRun) {
@@ -1001,11 +995,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const html = `
       <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
-      <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}${jobTime}</div>
+      <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
+      <div class="job-cell mono cell-created">${esc(createdAt) || "—"}</div>
+      <div class="job-cell mono cell-finished${j.status === "done" && finishedAt ? " is-done" : ""}">${esc(finishedAt) || "—"}</div>
       <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${cancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
@@ -1096,6 +1092,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="prog"><div class="bar${agg.status === "running" ? " live" : ""}"><div style="width:${agg.pct}%"></div></div><span class="pct mono">${agg.pct}%</span></div>
       <div class="job-cell mono cell-pos cell-bt"${timeTitle ? ` title="${esc(timeTitle)}"` : ""}>${created ? (fmtJobDateTime(created).split(" ")[1] || "—") : "—"}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
+      <div class="job-cell mono cell-created">${created ? esc(fmtJobDateTime(created)) : "—"}</div>
+      <div class="job-cell mono cell-finished${agg.status === "done" && finished ? " is-done" : ""}">${finished ? esc(fmtJobDateTime(finished)) : "—"}</div>
       <div class="job-actions">${ops}</div>`;
   }
 
@@ -1625,6 +1623,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function renderPauseAllBtn() {
     const btn = $("job-pause-all") as HTMLButtonElement;
     if (!t.pauseAll) { btn.hidden = true; return; }
+    // 无在途任务（运行中/排队中/已暂停）→ 隐藏：空列表或全终态时无暂停对象
+    const hasActive = state._jobs.some(
+      (r) => r.status === "running" || r.status === "pending" || r.status === "paused" || r.paused,
+    );
+    if (!hasActive) { btn.hidden = true; return; }
     const pausedAll = !!state._summary?.paused_all;
     btn.hidden = false;
     btn.classList.toggle("on", pausedAll);
@@ -4422,9 +4425,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
   const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>("#nav .view-tab[data-view]"));
   const navBadge = $("nav-badge") as HTMLElement | null;
+  // URL 锚点：hash 是合法 view 名时优先于 localStorage（分享/书签直接定位 tab）
+  const hashView = (() => {
+    const h = location.hash.replace(/^#/, "");
+    return VIEWS.includes(h as ViewName) ? (h as ViewName) : null;
+  })();
   let savedView = "dispatch";
   try { savedView = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
-  const initialView: ViewName = VIEWS.includes(savedView as ViewName) ? (savedView as ViewName) : "dispatch";
+  const initialView: ViewName = hashView || (VIEWS.includes(savedView as ViewName) ? (savedView as ViewName) : "dispatch");
+  let currentView: ViewName = initialView;
   webShowView = (view: ViewName) => {
     for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
     for (const item of navItems) {
@@ -4432,13 +4441,23 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       item.classList.toggle("on", active);
       item.setAttribute("aria-selected", active ? "true" : "false");
     }
+    currentView = view;
     try { localStorage.setItem("javview_view", view); } catch { /* 忽略 */ }
+    // 切 tab → 同步 hash（replaceState 不污染历史栈；失败退回 location.hash 同文档跳转）
+    if (location.hash !== "#" + view) {
+      try { history.replaceState(null, "", "#" + view); } catch { location.hash = view; }
+    }
     if (view === "ccfg") void renderCcView(); // 激活即重渲染（取最新值；seq 丢弃过期异步）
   };
   webShowView(initialView);
   for (const item of navItems) {
     item.addEventListener("click", () => webShowView(item.dataset.view as ViewName));
   }
+  // 外部 hash 变化（浏览器前进/后退、手改地址栏）→ 跟随切 tab
+  window.addEventListener("hashchange", () => {
+    const h = location.hash.replace(/^#/, "");
+    if (VIEWS.includes(h as ViewName) && h !== currentView) webShowView(h as ViewName);
+  });
   viewBadge = (n: number) => {
     if (!navBadge) return;
     navBadge.hidden = n <= 0;

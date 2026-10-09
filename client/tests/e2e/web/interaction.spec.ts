@@ -50,8 +50,10 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await req.put("/api/client-config", { data: { scan_min_size_mb: 0 } });
   page.on("dialog", (d) => d.accept());
   const scanDir = makeScanDir(`pause-${process.pid}-${Date.now()}`);
-  // 1. 暂停所有（confirm 放行）
+  // 1. 暂停所有（confirm 放行）。无在途任务时按钮隐藏 → 先 seed 一个排队任务让按钮出现
+  await mockSeed(req, { n: 1, status: "pending" });
   await goTab(page, "jobs");
+  await expect(page.locator("#job-pause-all")).toBeVisible({ timeout: 15_000 });
   await page.click("#job-pause-all");
   await expectToast(page, "已暂停所有任务");
   const btn = page.locator("#job-pause-all");
@@ -68,6 +70,8 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await page.locator("#scan-select-all").check();
   await page.click("#scan-submit");
   await expectToast(page, "已入队 3 项");
+  // 3 条本机扫描任务停在闸前显示「已暂停」；seed 的服务侧排队任务保持 pending——
+  // serve 队列挂起只冻新开任务、不改已入队 job 状态（mock 与 serve 0.2.3+ 同语义）
   await expect(page.locator(".job-row .pill.p-paused")).toHaveCount(3, { timeout: 20_000 });
   await expect(
     page.locator(".job-row .cell-pos", { hasText: "已暂停（等待继续）" }).first(),

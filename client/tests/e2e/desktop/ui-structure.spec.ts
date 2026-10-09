@@ -99,17 +99,19 @@ test("任务行显示添加时间与完成时间", async ({ page, request }) => 
   await waitForReady(page);
   await goView(page, "jobs");
   const row = page.locator(".job-row").first();
-  await expect(row.locator(".job-time-created")).toHaveText(/^添加于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-  await expect(row.locator(".job-time-finished")).toHaveText(/^完成于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  // 「添加于/完成于」独立列（10-09 需求：从文件列内拆出）
+  await expect(row.locator(".cell-created")).toHaveText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".cell-finished")).toHaveText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  await expect(row.locator(".cell-finished")).toHaveClass(/is-done/);
 });
 
 test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => {
   await goView(page, "jobs");
   const head = page.locator(".job-head > span");
-  // 8 列：首列批量勾选框 + 末列行操作（010aff7 任务改派后新增勾选列）
-  await expect(head).toHaveCount(8);
+  // 10 列：首列批量勾选框 + 末列行操作；「添加于/完成于」独立两列（10-09 需求）
+  await expect(head).toHaveCount(10);
   expect(await head.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(
-    ["", "服务", "文件", "状态", "进度", "位置", "耗时", ""],
+    ["", "服务", "文件", "状态", "进度", "位置", "耗时", "添加于", "完成于", ""],
   );
   // 旧 #job-stats 统计行已删：计数内嵌筛选按钮（web/desktop 同一契约）
   expect(await page.locator("#job-stats").count()).toBe(0);
