@@ -303,3 +303,41 @@ test("d) 双 serve：一 batch 跨 2 服务，暂停→两台都冻结，继续�
   await m2ctl("reset");
   await req.delete("/api/engines/mock2").catch(() => {});
 });
+
+test("e) 服务设置·应用到所有服务：fan-out 双端，Key 类留空 = 各端保持现值", async ({ page }) => {
+  await addEngine(req, { name: "mock2", url: M2, api_key: MOCK_KEY });
+  await engineOnlineApi("mock2");
+  // 前置：两端 lang_tag 不同；mock2 的 polish Key 已有值（fan-out 不得覆盖）
+  const jh = { "Content-Type": "application/json" };
+  await (await req.put("/api/engines/mock2/config", { data: { values: { "subtitle.lang_tag": "ja", "polish.api_key": "m2-key" } }, headers: jh })).json();
+  const getCfg = async (n: string): Promise<Record<string, unknown>> => {
+    const d = (await (await req.get(`/api/engines/${n}/config`)).json()) as { items: Array<{ path: string; value: unknown }> };
+    return Object.fromEntries(d.items.map((i) => [i.path, i.value]));
+  };
+  expect((await getCfg("mock2"))["subtitle.lang_tag"]).toBe("ja");
+
+  await goTab(page, "engines");
+  // applyAll 显隐只在弹窗渲染时按 state.engines 判一次：先等页面 poller 刷到双服务卡
+  await expect(page.locator("article.eng")).toHaveCount(2, { timeout: 15_000 });
+  try {
+    await page.locator('button.set[data-name="mock"]').click();
+    // 双服务 → 按钮出现；改 lang_tag（mock 现值 zh → en）；polish Key 留空 = 不发送
+    const applyAll = page.locator("#cfg-apply-all");
+    await expect(applyAll).toBeVisible({ timeout: 15_000 });
+    // lang_tag 在「字幕」tab 页（弹窗默认激活总览），先切页再填
+    await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
+    await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible();
+    await page.locator("#cfg-subtitle-lang_tag").fill("en");
+    await applyAll.click();
+    await expectToast(page, "已应用到全部 2 个服务");
+    // 两端 lang_tag 同步为 en；mock2 的 Key 保留（打码非空）
+    expect((await getCfg("mock"))["subtitle.lang_tag"]).toBe("en");
+    expect((await getCfg("mock2"))["subtitle.lang_tag"]).toBe("en");
+    expect((await getCfg("mock2"))["polish.api_key"]).toBe("***");
+  } finally {
+    // 环境归位（失败也执行，防 mock2 注册 / 配置值残留共享目录与 8302 进程）
+    await req.put("/api/engines/mock/config", { data: { values: { "subtitle.lang_tag": "zh" } }, headers: jh }).catch(() => {});
+    await m2ctl("reset");
+    await req.delete("/api/engines/mock2").catch(() => {});
+  }
+});

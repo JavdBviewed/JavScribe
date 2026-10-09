@@ -3293,6 +3293,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <span id="cfg-dirty" class="muted small">无改动</span>
       <span class="cfg-foot-actions">
         <button type="button" id="cfg-reset" class="btn" hidden>重置改动</button>
+        <button type="button" id="cfg-apply-all" class="btn" hidden title="把当前表单值应用到全部已注册服务（逐端保存；Key 类留空 = 各端保持现值，不覆盖）"></button>
         <button type="button" id="cfg-save" class="btn btn-primary">保存设置</button>
       </span>
     </div>`;
@@ -3351,6 +3352,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
     };
     ($("cfg-save") as HTMLButtonElement).onclick = () => saveConfig(name);
+    // 「应用到所有服务」：仅多服务时出现（单服务 = 保存即全部）
+    const applyAll = $("cfg-apply-all") as HTMLButtonElement;
+    applyAll.textContent = "应用到所有服务";
+    applyAll.hidden = state.engines.length < 2;
+    applyAll.onclick = () => applyConfigToAll(name);
   }
 
   // 组件就绪自检：拉取 /ready 渲染卡片；旧服务(unsupported)/离线(unreachable)降级为提示，不 throw
@@ -3443,7 +3449,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
              value="${esc(val)}" placeholder="${esc(ph)}" spellcheck="false" autocomplete="off"></div>`;
   }
 
-  async function saveConfig(name: string) {
+  // 表单当前值 → 待提交 map（secret 留空 = 不发送，服务端保持现值）；校验失败 toast + 返回 null
+  function collectCfgValues(): Record<string, unknown> | null {
     const values: Record<string, unknown> = {};
     for (const it of state.cfgItems) {
       const f = $("cfg-" + it.path.replace(/\./g, "-")) as HTMLInputElement;
@@ -3452,12 +3459,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         values[it.path] = f.checked;
       } else if (it.type === "int") {
         const v = parseInt(f.value, 10);
-        if (isNaN(v) || v < 1) { toast(`${it.label} 需要正整数`, "err"); return; }
+        if (isNaN(v) || v < 1) { toast(`${it.label} 需要正整数`, "err"); return null; }
         values[it.path] = v;
       } else if (it.type === "float") {
         if (f.value.trim() === "") continue; // 空 = 保持服务端默认阈值
         const v = parseFloat(f.value);
-        if (isNaN(v) || v < 0.01 || v > 0.99) { toast(`${it.label} 需在 0.01 ~ 0.99 之间`, "err"); return; }
+        if (isNaN(v) || v < 0.01 || v > 0.99) { toast(`${it.label} 需在 0.01 ~ 0.99 之间`, "err"); return null; }
         values[it.path] = v;
       } else if (it.type === "secret") {
         if (f.value === "") continue; // 空 = 保持
@@ -3466,6 +3473,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         values[it.path] = f.value;
       }
     }
+    return values;
+  }
+
+  async function saveConfig(name: string) {
+    const values = collectCfgValues();
+    if (!values) return;
     try {
       await t.putConfig(name, values);
       toast("服务设置已保存（对新提交的任务生效）", "ok");
@@ -3474,6 +3487,34 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     } catch (e) {
       toast((e as Error).message, "err");
     }
+  }
+
+  // 「应用到所有服务」：当前表单 fan-out 到全部已注册服务端（并行 putConfig，逐端独立成败）
+  async function applyConfigToAll(name: string) {
+    const values = collectCfgValues();
+    if (!values) return;
+    const targets = state.engines.map((e) => e.name);
+    if (targets.length < 2) return;
+    const btn = $("cfg-apply-all") as HTMLButtonElement;
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "应用中…";
+    const results = await Promise.allSettled(targets.map((n) => t.putConfig(n, values)));
+    const fails: string[] = [];
+    results.forEach((r, i) => {
+      if (r.status === "rejected") fails.push(`${targets[i]}（${(r.reason as Error).message}）`);
+    });
+    btn.disabled = false;
+    btn.textContent = prev;
+    if (fails.length === 0) {
+      toast(`已应用到全部 ${targets.length} 个服务（对新提交的任务生效）`, "ok");
+    } else if (fails.length < targets.length) {
+      toast(`已应用到 ${targets.length - fails.length}/${targets.length} 个服务；失败：${fails.join("、")}`, "err");
+    } else {
+      toast(`应用失败：${fails.join("、")}`, "err");
+    }
+    refresh();
+    openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
   }
 
   // ---------- 本机目录扫描 ----------

@@ -800,6 +800,8 @@ test("服务设置弹窗：tab 分类（加宽 + 切换保留输入 + 未保存�
   await page.locator('button.set[data-name="mock"]').click();
   // 加宽：仅服务设置挂 modal-wide（#modal 多弹窗共用容器）
   await expect(page.locator("#modal")).toHaveClass(/modal-wide/);
+  // 「应用到所有服务」：仅多服务时出现（本套件单 mock；多服务 fan-out 见 batch-pipeline e 用例）
+  await expect(page.locator("#cfg-apply-all")).toBeHidden();
   // tab 栏：总览 + 8 设置组（mock /config 白名单）；默认激活总览（组件就绪卡可见）
   const tabs = page.locator("#cfg-tabs .cfg-tab");
   await expect(tabs).toHaveCount(9);
