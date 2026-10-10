@@ -78,6 +78,10 @@ const state = {
   ready: { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" },
   metricsHist: [],      // 环形历史（/metrics/json 每请求追一点，reset 预填）
   lastScanSubmit: null,  // 最近一次 /scan/submit 请求头快照（e2e 断言：Content-Length 在位、非 chunked）
+  // 请求计数（/_mock/req-count 读取，?reset=1 清零；桌面端「明细单飞」e2e 断言用）：
+  // jobs_list = GET /jobs（无 detail）、jobs_list_detail = GET /jobs?detail=1、jobs_detail = GET /jobs/<id>
+  reqCount: { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 },
+  legacyDetail: false,  // 模拟老 serve：GET /jobs?detail=1 → 404（回退路径 e2e 用）
 };
 
 function metricsCounts() {
@@ -280,7 +284,7 @@ const server = http.createServer((req, res) => {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; return send(200, { ok: true }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -365,6 +369,13 @@ const server = http.createServer((req, res) => {
           return send(200, { ok: true, ms: state.uploadDelayMs });
         });
       }
+      if (sub === "legacy-detail") {
+        // 模拟老 serve（无 detail 参数语义）：/jobs?detail=1 → 404；逐 job 明细端点不受影响
+        return readBody().then((b) => {
+          state.legacyDetail = !!(b && JSON.parse(b).legacy);
+          return send(200, { ok: true, legacy: state.legacyDetail });
+        });
+      }
       return sendErr(404, "not found");
     }
     if (req.method === "GET" && parts[1] === "uploads") return send(200, state.uploads);
@@ -372,6 +383,10 @@ const server = http.createServer((req, res) => {
     if (req.method === "GET" && parts[1] === "last-scan-submit") {
       if (url.searchParams.get("reset")) state.lastScanSubmit = null;
       return send(200, state.lastScanSubmit ?? { none: true });
+    }
+    if (req.method === "GET" && parts[1] === "req-count") {
+      if (url.searchParams.get("reset")) state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 };
+      return send(200, { ...state.reqCount });
     }
     return sendErr(404, "not found");
   }
@@ -439,9 +454,12 @@ const server = http.createServer((req, res) => {
     }
     if (parts[0] === "jobs") {
       if (parts.length === 1) {
+        const withDetail = url.searchParams.get("detail") === "1";
+        state.reqCount[withDetail ? "jobs_list_detail" : "jobs_list"] += 1;
+        if (withDetail && state.legacyDetail) return sendErr(404, "not found");
         const bq = url.searchParams.get("batch_id");
         const jobs = bq ? [...state.jobs.values()].filter((j) => j.batch_id === bq) : [...state.jobs.values()];
-        return send(200, jobs.map((j) => jobToDict(j)));
+        return send(200, jobs.map((j) => jobToDict(j, withDetail)));
       }
       const j = state.jobs.get(parts[1]);
       if (!j) return sendErr(404, "job not found");
@@ -465,6 +483,7 @@ const server = http.createServer((req, res) => {
         res.end(body);
         return;
       }
+      state.reqCount.jobs_detail += 1;
       return send(200, jobToDict(j, true));
     }
     return sendErr(404, "not found");

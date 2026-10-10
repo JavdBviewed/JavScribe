@@ -339,6 +339,81 @@ test("listJobs IPC：展平 + running 优先 + created 降序", async ({ page, r
   }
 });
 
+// ---------------------------------------------------------------------------
+// /jobs?detail=1 明细单飞（serve 0.2.10+）：≥3 任务时 refresh 只发 1 个明细请求，
+// 回退路径（老 serve detail=1→404）行为与旧版一致
+// ---------------------------------------------------------------------------
+
+type ReqCount = { jobs_list: number; jobs_list_detail: number; jobs_detail: number };
+
+async function mockReqCount(req: APIRequestContext, reset = false): Promise<ReqCount> {
+  const url = `${MOCK}/_mock/req-count${reset ? "?reset=1" : ""}`;
+  return (await (await req.get(url)).json()) as ReqCount;
+}
+
+test("jobs 明细单飞：3 个任务时强制 refresh 只发 1 个 /jobs?detail=1（0 个逐 job 明细），文件级行正常", async ({ page, request }) => {
+  await mockPause(request);
+  try {
+    // 3 个 finished 任务（看板文件级行对 finished 也要 files）
+    await (await request.post(`${MOCK}/_mock/seed`, { data: { n: 3, status: "done" }, headers: jh })).json();
+    // 强制刷新：绕过 3s TTL 单飞，await 完成
+    const r1 = await icall(page, "refreshEngines");
+    expect(r1.ok).toBe(true);
+    const c1 = await mockReqCount(request);
+    // 文件级行来自单次 detail 响应（3 job × 1 文件）
+    const lj = await icall(page, "listJobs");
+    expect(lj.ok).toBe(true);
+    const rows = lj.data as Array<{ file: string; status: string; engine: string }>;
+    expect(rows).toHaveLength(3);
+    expect(rows.every((x) => x.status === "done" && x.engine === "mock")).toBe(true);
+    expect(rows.every((x) => x.file.match(/^seed-\d{3}\.mp4$/))).toBe(true);
+    // 第二次强制刷新：窗口内恰好 +1 个 /jobs?detail=1，+0 个逐 job 明细
+    const r2 = await icall(page, "refreshEngines");
+    expect(r2.ok).toBe(true);
+    const c2 = await mockReqCount(request);
+    expect(c2.jobs_list_detail - c1.jobs_list_detail).toBe(1);
+    expect(c2.jobs_detail - c1.jobs_detail).toBe(0);
+    // 引擎视图：finished 任务 running 计 0（state 取自 detail 响应）
+    const e = (r2.data as Array<{ name: string; online: boolean; jobs_running: number }>).find((x) => x.name === "mock");
+    expect(e).toBeTruthy();
+    expect(e!.online).toBe(true);
+    expect(e!.jobs_running).toBe(0);
+  } finally {
+    await mockResume(request);
+  }
+});
+
+test("jobs 明细回退：老 serve（detail=1→404）下逐 job 明细仍工作，行渲染不变", async ({ page, request }) => {
+  await mockPause(request);
+  try {
+    await (await request.post(`${MOCK}/_mock/seed`, { data: { n: 3, status: "done" }, headers: jh })).json();
+    // 模拟老 serve：/jobs?detail=1 → 404（逐 job 明细端点不受影响）
+    const leg = await (await request.post(`${MOCK}/_mock/legacy-detail`, { data: { legacy: true }, headers: jh })).json() as { ok: boolean; legacy: boolean };
+    expect(leg.ok).toBe(true);
+    expect(leg.legacy).toBe(true);
+    const r1 = await icall(page, "refreshEngines");
+    expect(r1.ok).toBe(true);
+    const c1 = await mockReqCount(request);
+    const r2 = await icall(page, "refreshEngines");
+    expect(r2.ok).toBe(true);
+    const c2 = await mockReqCount(request);
+    // 回退：1 次 detail=1 尝试（404）+ 1 次 /jobs 摘要 + 3 次逐 job 明细
+    expect(c2.jobs_list_detail - c1.jobs_list_detail).toBe(1);
+    expect(c2.jobs_list - c1.jobs_list).toBe(1);
+    expect(c2.jobs_detail - c1.jobs_detail).toBe(3);
+    // 行数据不变（老 serve 下行为完全一致）
+    const lj = await icall(page, "listJobs");
+    expect(lj.ok).toBe(true);
+    const rows = lj.data as Array<{ file: string; status: string }>;
+    expect(rows).toHaveLength(3);
+    expect(rows.every((x) => x.status === "done")).toBe(true);
+    expect(rows.every((x) => x.file.match(/^seed-\d{3}\.mp4$/))).toBe(true);
+  } finally {
+    await (await request.post(`${MOCK}/_mock/legacy-detail`, { data: { legacy: false }, headers: jh })).json();
+    await mockResume(request);
+  }
+});
+
 // 09-12 回归：空 label + 音轨 sha1 文件名的任务，下载按钮文件名绝不许是 40 位 hash
 //（用户实机拿到 <opus-sha1>.zh.srt 的根因路径：srtNameFor 兜底链泄漏内容寻址名）
 test("下载名回归：空 label + hash 名音轨任务 → 下载按钮用任务 id 命名（非 40 位 hash）", async ({ page, request }) => {
