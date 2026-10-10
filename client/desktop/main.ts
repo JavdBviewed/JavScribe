@@ -1412,6 +1412,24 @@ function registerIpc(): void {
             return { ok: true, data: { ok: false, error: "unreachable" } };
           }
         }
+        case "engineMetrics": {
+          // 监控快照（serve 0.2.4+ /metrics/json；后台 LiveSampler 读取，成本可忽略）：
+          // 错误不外抛，包装成 payload 让 UI 降级展示（与工作台 /api/engines/{name}/metrics 同构）
+          let entry;
+          try {
+            entry = engineByName(String(a0));
+          } catch {
+            return { ok: true, data: { ok: false, error: "unsupported" } };
+          }
+          try {
+            const r = await httpJson<any>(entry.url + "/metrics/json", { timeoutMs: 15000 });
+            if (r.status === 200) return { ok: true, data: { ok: true, metrics: r.data } };
+            if (r.status === 404) return { ok: true, data: { ok: false, error: "unsupported" } };
+            return { ok: true, data: { ok: false, error: `服务返回 HTTP ${r.status}` } };
+          } catch {
+            return { ok: true, data: { ok: false, error: "unreachable" } };
+          }
+        }
         case "scan": {
           const entry = engineByName(String(a0));
           const headers: Record<string, string> = {};

@@ -371,7 +371,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
       state._batches = batches || [];
       renderJobs(jobs);
-      if (platform.kind === "web" && typeof t.engineMetrics === "function") {
+      if (typeof t.engineMetrics === "function") { // web + desktop 均支持（desktop 走 main IPC 直连 serve /metrics/json）
         for (const e of engines) {
           if (!e.online) continue;
           void t.engineMetrics(e.name).then((m) => {

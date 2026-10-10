@@ -9,7 +9,7 @@
 
 import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
+  BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, MetricsResponse, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -135,6 +135,9 @@ export const desktopTransport: Transport = {
     const r = await desktop.call("getReadiness", [name]);
     return (r.ok ? r.data : { ok: false, error: r.error || "unreachable" }) as ReadinessPayload;
   },
+
+  // 监控快照（serve 0.2.4+；旧版服务 404 → ok=false unsupported，UI 降级小字提示）
+  engineMetrics: (name) => call<MetricsResponse>("engineMetrics", name),
   putConfig: (name, values) => call("putConfig", name, JSON.stringify(values)),
 
   async uploadFile(file, engine, onProgress) {

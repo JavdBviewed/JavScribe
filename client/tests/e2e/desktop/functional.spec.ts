@@ -24,6 +24,25 @@ test("getHealth：app 名 / 版本 / 在线数", async ({ page }) => {
   expect(r.data).toMatchObject({ ok: true, app: "JavScribe Client", version: CLIENT_VERSION, engines: 1, online: 1 });
 });
 
+test("engineMetrics：main IPC 直连 serve /metrics/json → 服务卡片监控渲染（不卡在「加载中」）", async ({ page }) => {
+  // IPC 直调：mock serve（0.2.4+ 语义）返回 jobs/gpu/history；旧版 404 → ok=false unsupported
+  const r = await icall(page, "engineMetrics", "mock");
+  expect(r.ok).toBe(true);
+  expect(r.data.ok).toBe(true);
+  expect(r.data.metrics.jobs).toMatchObject({ running: 0, queued: 0 });
+  expect(Array.isArray(r.data.metrics.history)).toBe(true);
+  // 未知服务名 → unsupported（UI 降级小字，不报错）
+  const bad = await icall(page, "engineMetrics", "no-such");
+  expect(bad.ok).toBe(true);
+  expect(bad.data).toEqual({ ok: false, error: "unsupported" });
+  // 卡片渲染：mock 无 GPU → 「队列深度」行 + sparkline 趋势图（历史预填 40 点）
+  await goView(page, "engines");
+  const box = page.locator('#engine-grid .eng[data-name="mock"] .eng-metrics');
+  await expect(box).not.toContainText("监控数据加载中", { timeout: 20_000 });
+  await expect(box).toContainText("队列深度", { timeout: 20_000 });
+  await expect(box.locator("svg.spark")).toHaveCount(1);
+});
+
 test("addEngine / putEngineKey / deleteEngine 全路径（IPC）", async ({ page }) => {
   expect((await icall(page, "addEngine", "srv-b", MOCK, "")).ok).toBe(true);
 
