@@ -77,6 +77,7 @@ const state = {
   // 组件就绪自检（GET /ready；/_mock/ready 可改单项状态）
   ready: { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" },
   metricsHist: [],      // 环形历史（/metrics/json 每请求追一点，reset 预填）
+  lastScanSubmit: null,  // 最近一次 /scan/submit 请求头快照（e2e 断言：Content-Length 在位、非 chunked）
 };
 
 function metricsCounts() {
@@ -368,6 +369,10 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === "GET" && parts[1] === "uploads") return send(200, state.uploads);
     if (req.method === "GET" && parts[1] === "cache") return send(200, Object.fromEntries(state.cache));
+    if (req.method === "GET" && parts[1] === "last-scan-submit") {
+      if (url.searchParams.get("reset")) state.lastScanSubmit = null;
+      return send(200, state.lastScanSubmit ?? { none: true });
+    }
     return sendErr(404, "not found");
   }
 
@@ -539,9 +544,16 @@ const server = http.createServer((req, res) => {
   // ---- POST /scan/submit ----
   if (req.method === "POST" && parts.length === 2 && parts[0] === "scan" && parts[1] === "submit") {
     if (!checkKey()) return;
+    // 原始头快照（Node 自动解 chunked，故只能从头判断客户端是否规范带 CL）
+    state.lastScanSubmit = {
+      contentLength: req.headers["content-length"] ?? null,
+      transferEncoding: req.headers["transfer-encoding"] ?? null,
+      bodyBytes: null,
+    };
     let b = "";
     req.on("data", (c) => (b += c));
     req.on("end", () => {
+      if (state.lastScanSubmit) state.lastScanSubmit.bodyBytes = Buffer.byteLength(b, "utf-8");
       let body;
       try { body = JSON.parse(b || "{}"); } catch { return sendErr(400, "bad body"); }
       const files = body.files;

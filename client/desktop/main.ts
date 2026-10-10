@@ -176,11 +176,15 @@ function httpJson<T = unknown>(url: string, opts: HttpOpts = {}): Promise<{ stat
       return;
     }
     const lib = u.protocol === "https:" ? https : http;
+    // 显式 Content-Length：不带时 Node http 自动改 chunked 编码，serve（http.server）
+    // 不自动解 chunked → 一切带体 POST 会被 400「bad body size」误杀
+    const headers: Record<string, string> = { "Content-Type": "application/json", ...(opts.headers || {}) };
+    if (opts.body) headers["Content-Length"] = String(Buffer.byteLength(opts.body, "utf-8"));
     const req = lib.request(
       u,
       {
         method: opts.method || "GET",
-        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+        headers,
         timeout: opts.timeoutMs ?? 15000,
       },
       (res) => {
@@ -1541,8 +1545,14 @@ function registerIpc(): void {
           if (r.status !== 201) {
             const bodyErr = (r.data as { error?: unknown })?.error;
             if (r.status === 400 && typeof bodyErr === "string" && bodyErr.startsWith("bad body size")) {
-              // 旧 serve（≤0.2.7，1MB 上限）：友好文案，提示升级或分批
-              return { ok: false, error: "所选文件过多，超出该服务单次提交上限：请升级服务端到 0.2.8+，或取消部分勾选后分批提交" };
+              // 按服务端上报上限分流：≥16MB = 0.2.8+ 新服务端（确实文件过多）；
+              // 1MB = 旧服务端 ≤0.2.7（提示升级或分批）
+              const capMatch = /max (\d+)KB/.exec(bodyErr);
+              const capKb = capMatch ? Number(capMatch[1]) : 0;
+              if (capKb >= 16384) {
+                return { ok: false, error: "所选文件过多：路径列表超过服务端单次提交上限（16MB），请取消部分勾选后分批提交" };
+              }
+              return { ok: false, error: "所选文件过多，超出该服务单次提交上限（1MB）：请升级服务端到 0.2.8+，或取消部分勾选后分批提交" };
             }
             const err = configError(r.status, r.data);
             // 400「文件不存在」= 服务读不到本机路径（远程服务场景）：结构化上抛，

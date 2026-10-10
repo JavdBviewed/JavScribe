@@ -297,6 +297,13 @@ test("scan + submitScan IPC：三项（1 有字幕）/ Windows 路径 / 不存�
   expect(sd.jobId).toBeTruthy();
   const jobs = await mockJobs(request);
   expect(jobs.find((j) => j.id === sd.jobId)?.label).toBe("文件夹扫描 · 2 项");
+  // 回归：httpJson 必须显式带 Content-Length——不带时 Node 自动改 chunked，
+  // 真实 serve（http.server）只认 CL → 400「bad body size」误杀（桌面端提交曾全挂）
+  const lsr = await (await request.get(`${MOCK}/_mock/last-scan-submit`, { headers: jh })).json();
+  expect(typeof lsr.contentLength).toBe("string");
+  expect(lsr.transferEncoding).toBeNull();
+  const wantCl = Buffer.byteLength(JSON.stringify({ files: ["/media/jav/AKDL-001.mp4", "/media/jav/SUB-001.mkv"] }), "utf-8");
+  expect(Number(lsr.contentLength)).toBe(wantCl);
 
   const empty = await icall(page, "submitScan", "mock", "[]");
   expect(empty.ok).toBe(false);
