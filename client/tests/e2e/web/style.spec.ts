@@ -87,6 +87,10 @@ test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
   await mockSeed(req, { n: 1, status: "running", progress: 0.37 });
   await goTab(page, "jobs");
   await page.locator(".job-row.running").waitFor({ timeout: 15_000 });
+  // 根治断言：前序用例残留批次记录随保留期剪枝 → 看板无 0 子任务孤儿主任务行，
+  // 行集合精确 = 本用例 1 条 running seed（expect 自动重试覆盖最后几个 tick 的剪枝延迟）
+  await expect(page.locator(".job-batch-row")).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(".job-row")).toHaveCount(1, { timeout: 15_000 });
   await page.waitForTimeout(400);
   await freezeForShot(page, req);
   await shot(page, "style-07-jobs-running", { element: "#sec-jobs" });

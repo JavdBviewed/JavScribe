@@ -41,6 +41,10 @@ LOCAL_WB_MAX_FAILS = 6  # 回写连续失败 N 次（约 N*轮询间隔）后放
 # 时钟度量「连续缺失时长」而非锚定派发时间：轮询失败保留上次快照（仅成功才
 # 刷新），单次网络抖动不会误判；刚派发的 job 秒级进快照，60s 缺失窗留足余量。
 LOCAL_WB_JOB_MISSING_S = float(os.environ.get("JAV_LOCAL_WB_JOB_MISSING_S", "60"))  # e2e 用 env 加速
+# 主任务（batch）记录保留期：子 job 已全部不在任何在线引擎快照的孤儿记录，
+# 超过此时长由回写 tick 剪枝（根治任务看板 0 子任务主任务行永久堆积）。
+# e2e 用 env 调短加速（默认 24h）。
+BATCH_RETAIN_S = float(os.environ.get("JAV_BATCH_RETAIN_S", "86400"))
 
 # ---- 客户端并发设置（本机工作台专属，不进 serve /config 白名单） ----
 # extract_workers：本机同时跑 ffmpeg 提取音轨的数量（封顶 1..8）
@@ -836,6 +840,38 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
             _batch_cap()
             _save_batches()
 
+    def _batch_prune() -> None:
+        """过期剪枝（回写 tick 驱动；启动加载后随首个 tick 生效，不在空快照上判）：
+        主任务子 job 均不在任何「已登记且在线」引擎的 live 快照、且记录年龄超过
+        BATCH_RETAIN_S → 剪掉孤儿记录（任务看板 0 子任务兜底行不再永久堆积）。
+        安全闸：services 引用的引擎已登记但离线 → 不剪（防服务宕机误删）；
+        有未终态本地任务的 batch → 不剪（派发在途，job 未进快照）。
+        引擎已从注册表删除 → 视为确认缺失（任务不可复归，正是要剪的孤儿）。"""
+        now = time.time()
+        removed = False
+        for bid, rec in list(_batches.items()):
+            if now - (rec.get("created") or 0) <= BATCH_RETAIN_S:
+                continue
+            if any(not t.finished for t in _uploads.values() if t.batch_id == bid):
+                continue
+            all_missing = True
+            for eng, ids in (rec.get("services") or {}).items():
+                info = poller.engines.get(eng)
+                if info is not None and not info.online:
+                    all_missing = False  # 引擎宕机：无法区分「job 没了」与「服务停了」
+                    break
+                if info is None:
+                    continue  # 引擎已删除：任务不可复归，按缺失计
+                live = {j.get("id") for j in (poller.jobs.get(eng) or [])}
+                if any(jid in live for jid in (ids or [])):
+                    all_missing = False
+                    break
+            if all_missing:
+                _batches.pop(bid, None)
+                removed = True
+        if removed:
+            _save_batches()
+
     @app.get("/api/health")
     async def api_health() -> dict:
         infos = list(poller.engines.values())
@@ -1207,6 +1243,17 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         ]
         out.sort(key=lambda r: r.get("created") or 0, reverse=True)
         return out
+
+    @app.post("/api/batches/{batch_id}/clear")
+    async def api_batch_clear(batch_id: str) -> dict:
+        """手动清除单条主任务记录（看板孤儿行「清除」入口）。
+
+        显式用户意图、针对用户正看到的具体记录 → 直接删本地记录，不走保留期闸门
+        （孤儿行渲染前提=子 job 已不在 live 快照，属兜底展示行）。"""
+        if _batches.pop(batch_id, None) is None:
+            raise HTTPException(404, "主任务记录不存在")
+        _save_batches()
+        return {"ok": True}
 
     # -- 生成字幕：浏览器上传 → 本地提取音频 → 转发服务（2 段式，进度可查）-----------
 
@@ -2184,6 +2231,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         """
         _prune_uploads()
         _batch_maybe_finish()
+        _batch_prune()
 
         def _wb_close(task: UploadTask) -> None:
             _local_wb.pop(task.id, None)

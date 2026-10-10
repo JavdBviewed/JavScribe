@@ -86,6 +86,8 @@ export interface Transport {
   batchOp?(action: "pause" | "resume" | "cancel", batchId: string): Promise<BatchOpResult>;
   /** 主任务（batch）记录列表（created 降序；客户端侧持久化，已完成/已过期主任务对账用） */
   listBatches?(): Promise<BatchRecord[]>;
+  /** 手动清除单条主任务记录（看板孤儿行「清除」入口）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
+  batchClear?(batchId: string): Promise<{ ok: boolean }>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */

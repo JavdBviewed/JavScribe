@@ -53,8 +53,13 @@ export default defineConfig({
         "JAV_UPDATE_CHECK=on JAV_UPDATE_GITHUB_BASE=http://127.0.0.1:8303 JAV_UPDATE_INTERVAL_S=3 " +
         // 本机任务「服务侧丢失」判定与残留 error 行清理加速，对齐 e2e 时间预算
         // （缺失 60s→3s；error 行 TTL 24h→15s < waitForJobsEmpty 30s 空表预算）
-        "JAV_LOCAL_WB_JOB_MISSING_S=3 JAV_UPLOAD_TTL_S=15 " +
-        "uv run jav-scribe-web",
+        // 主任务（batch）记录保留期 24h→15s：跨用例孤儿批次记录随 tick 剪枝，
+        // style-07 看板只剩本用例 seed 行（根治 0 子任务孤儿行进快照）；15s 兼顾
+        // batch-prune 专测「兜底行先出现后被剪/可手动清除」的观察窗
+        "JAV_LOCAL_WB_JOB_MISSING_S=3 JAV_UPLOAD_TTL_S=15 JAV_BATCH_RETAIN_S=15 " +
+        // --frozen：webServer 直接按 uv.lock 同步 .venv，不重新解析（解析需外网 pypi，
+        // e2e 机器常不可达；锁与 venv 已随分支维护，frozen 时离线可起服）
+        "uv run --frozen jav-scribe-web",
       url: "http://127.0.0.1:8901/api/health",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,

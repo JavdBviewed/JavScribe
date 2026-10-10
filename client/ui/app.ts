@@ -1229,6 +1229,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const collapsed = state._batchCollapsed.has(g.bid);
       const hasFailed = g.children.some((j) => j.status === "error" || j.status === "canceled");
       const canOp = typeof t.batchOp === "function" && !g.stale;
+      // 孤儿行（兜底 0 子任务）：手动清除入口（删本地 batches.json 记录；子任务已过期）
+      const canClear = typeof t.batchClear === "function" && !!g.stale;
       const ops = [
         canOp && agg.status !== "paused" && !allTerminal
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="pause" title="暂停主任务：运行中的子任务跑完，排队中冻结">&#9208; 暂停</button>` : "",
@@ -1238,9 +1240,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="retry" title="重试本主任务中失败的子任务">&#8635; 重试失败</button>` : "",
         canOp && !allTerminal
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="cancel" title="取消主任务：未开始子任务全部取消，运行中不受影响">&#10006; 取消</button>` : "",
+        canClear
+          ? `<button type="button" class="dl-btn batch-op batch-clear" data-bid="${esc(g.bid)}" data-bact="clear" title="清除该过期主任务记录（仅本地记录，子任务已过期）">&#10005; 清除</button>` : "",
       ].join("");
       const label = g.label || g.bid;
-      const core = [gkey, label, g.children.length, agg.status, collapsed, allTerminal, created, finished, hasFailed, canOp, ops].join("\u0001");
+      const core = [gkey, label, g.children.length, agg.status, collapsed, allTerminal, created, finished, hasFailed, canOp, canClear, ops].join("\u0001");
       let el = rowMap.get(gkey);
       if (!el) {
         const div = document.createElement("div");
@@ -1442,10 +1446,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     // 主任务（batch）行操作：暂停/继续/取消/重试失败子任务（fan-out 逐引擎提示，不阻塞）
     const bo = (ev.target as HTMLElement).closest(".batch-op") as HTMLButtonElement | null;
-    if (bo && !bo.disabled && t.batchOp) {
+    if (bo && !bo.disabled && (t.batchOp || t.batchClear)) {
       const bid = bo.dataset.bid || "";
       const act = bo.dataset.bact || "";
       const btn = bo as HTMLButtonElement;
+      if (act === "clear") {
+        // 孤儿行手动清除：显式用户意图，直接删本地记录（不走保留期闸门）
+        btn.disabled = true;
+        if (t.batchClear) {
+          try {
+            await t.batchClear(bid);
+            toast("已清除过期主任务记录", "ok");
+          } catch (e) {
+            toast(`清除失败：${(e as Error).message}`, "err");
+          }
+        }
+        btn.disabled = false;
+        refresh();
+        return;
+      }
       const labelOf = (x: string) => x === "pause" ? "暂停" : x === "resume" ? "继续" : x === "cancel" ? "取消" : "重试";
       if (act === "cancel") {
         const ok = window.confirm(
@@ -1470,7 +1489,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             } catch (_e2) { /* 单个失败继续：结果在任务行可见 */ }
           }
           toast(n ? `已重新提交 ${n} 个失败子任务` : "重试失败（子任务已过期或不可重试）", n ? "ok" : "err");
-        } else {
+        } else if (t.batchOp) {
           const d = await t.batchOp(act as "pause" | "resume" | "cancel", bid);
           const bad = (d.engines || []).filter((e) => !e.ok);
           const badTxt = bad.map((e) => `${e.engine}：${e.unsupported ? "版本过旧不支持" : (e.error || "失败")}`).join("；");

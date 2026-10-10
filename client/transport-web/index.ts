@@ -116,6 +116,9 @@ export const webTransport: Transport = {
     jpost<BatchOpResult>(`/api/batch/${encodeURIComponent(batchId)}/${action}`),
   // 主任务记录列表（created 降序；完成/过期主任务对账用）
   listBatches: () => jget<BatchRecord[]>("/api/batches"),
+  // 手动清除单条主任务记录（孤儿行「清除」入口；显式用户意图，本地直接删）
+  batchClear: (batchId) =>
+    jpost<{ ok: boolean }>(`/api/batches/${encodeURIComponent(batchId)}/clear`),
 
   listJobsSummary: () => jget<import("../core/types").JobSummary>("/api/jobs/summary"),
 

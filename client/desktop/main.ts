@@ -1600,6 +1600,16 @@ function registerIpc(): void {
             .sort((a, b) => (b.created || 0) - (a.created || 0));
           return { ok: true, data: recs };
         }
+        // 手动清除单条主任务记录（看板孤儿行「清除」入口；显式用户意图，直接删本地记录）
+        case "batchClear": {
+          const bid = String(a0 || "");
+          if (!bid) return { ok: false, error: "batchClear 参数错误（batch_id）" };
+          if (!(bid in batches)) return { ok: false, error: "主任务记录不存在" };
+          delete batches[bid];
+          batchCap();
+          batchesSave();
+          return { ok: true };
+        }
         default:
           return { ok: false, error: "unknown method: " + args?.method };
       }
@@ -2603,6 +2613,10 @@ function watchApplySettings(next: WatchSettings): void {
 
 const BATCH_FILE = "batches.json";
 const BATCH_CAP = 200;
+// 主任务记录保留期（秒）：子 job 均不在任何「已登记且在线」引擎快照的孤儿记录，
+// 超过此时长随对账剪枝（根治任务看板 0 子任务主任务行永久堆积）；e2e 可用 env 调短。
+const BATCH_RETAIN_S = Number(process.env.JAV_BATCH_RETAIN_S) > 0
+  ? Number(process.env.JAV_BATCH_RETAIN_S) : 86400;
 
 interface BatchRec {
   label?: string | null;
@@ -2691,6 +2705,29 @@ function batchCap(): void {
   }
 }
 
+/** 过期剪枝（随完成对账同触发）：子 job 均不在「已登记且在线」引擎的 live 快照、
+ *  且记录年龄超过 BATCH_RETAIN_S → 剪掉孤儿记录（任务看板 0 子任务兜底行不再永久堆积）。
+ *  安全闸：services 引用的引擎已登记但离线 → 不剪（防服务宕机误删）；
+ *  引擎已从注册表删除 → 视为确认缺失（任务不可复归，正是要剪的孤儿）。 */
+function batchesPrune(engines: EngineInfo[]): void {
+  if (!batchesPath) return;
+  const now = Date.now() / 1000;
+  let removed = false;
+  for (const id of Object.keys(batches)) {
+    if (now - (batches[id].created || 0) <= BATCH_RETAIN_S) continue;
+    let allMissing = true;
+    for (const [svc, list] of Object.entries(batches[id].services || {})) {
+      const info = engines.find((e) => e.name === svc);
+      if (info && !info.online) { allMissing = false; break; } // 引擎宕机：无法区分「job 没了」与「服务停了」
+      if (!info) continue; // 引擎已删除：任务不可复归，按缺失计
+      const liveIds = new Set((info._details || []).map((x) => String(x && x.id)));
+      if ((list || []).some((j) => liveIds.has(String(j)))) { allMissing = false; break; }
+    }
+    if (allMissing) { delete batches[id]; removed = true; }
+  }
+  if (removed) { batchCap(); batchesSave(); }
+}
+
 /** 完成对账（refresh() 快照成功后调用）：记录 services 各 job 均 finished 或
  *  不在在线引擎快照（200 窗过期/serve 重启 → 视为完成）→ finished。
  *  离线引擎不判（无法区分过期与离线）；服务侧未登记的记录（上传在途）不判。 */
@@ -2721,6 +2758,7 @@ function batchesReconcile(engines: EngineInfo[]): void {
     batchCap();
     batchesSave();
   }
+  batchesPrune(engines); // 过期剪枝（与完成对账同触发：快照成功才判）
 }
 
 /** batch 操作 fan-out：对全部已登记服务发 /jobs/batch/<id>/<action>。

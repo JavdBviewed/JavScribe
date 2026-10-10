@@ -196,4 +196,6 @@ export const desktopTransport: Transport = {
   batchOp: (action, batchId) => call<BatchOpResult>("batchOp", action, batchId),
   // 主任务记录列表（main 进程 batches.json，created 降序）
   listBatches: () => call<BatchRecord[]>("listBatches"),
+  // 手动清除单条主任务记录（main 进程 batches.json；孤儿行「清除」入口）
+  batchClear: (batchId) => call<{ ok: boolean }>("batchClear", batchId),
 };
