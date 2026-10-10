@@ -142,6 +142,10 @@ export async function freezeForShot(page: Page, req: APIRequestContext) {
     }
     document.querySelectorAll<HTMLElement>(".cell-elapsed").forEach((el) => (el.style.visibility = "hidden"));
     document.querySelectorAll(".eta").forEach((el) => (el.textContent = ""));
+    // 「添加于/完成于」是秒级动态时间（mock seed 用 Date.now）：归一化成定长同格式值，
+    // 否则基线烙进运行时刻、跨时间窗跑必飘（长度对齐 fmtJobDateTime 实际输出 19 字符）
+    document.querySelectorAll<HTMLElement>(".cell-created, .cell-finished").forEach((el) => (el.textContent = "2026-01-01 00:00:00"));
+    document.querySelectorAll<HTMLElement>(".cell-bt").forEach((el) => (el.textContent = "00:00:00"));
     // 版本文本归一化：基线不烙版本号（v0.2.x 每次 bump 字形都变）
     const walk = (n: Node): void => {
       if (n.nodeType === 3) {
