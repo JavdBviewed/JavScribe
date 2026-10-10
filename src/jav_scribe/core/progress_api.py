@@ -420,12 +420,22 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json_body(self, max_bytes: int = 1024 * 1024) -> Optional[dict]:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > max_bytes:
-            self._send(400, {"ok": False, "error": f"bad body size (max {max_bytes // 1024}KB)"})
-            return None
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            # 桌面客户端 httpJson 用 Node req.write 发体、不设 Content-Length →
+            # Node 自动 chunked；http.server 不自动解码 → 必须在此接住，
+            # 否则一切带体 POST（/scan/submit、PUT /config）全被 400
+            raw = self._read_chunked_body(max_bytes)
+            if raw is None:
+                return None
+        else:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > max_bytes:
+                self._send(400, {"ok": False, "error": f"bad body size (max {max_bytes // 1024}KB)"})
+                return None
+            raw = self.rfile.read(length)
         try:
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._send(400, {"ok": False, "error": "body 不是合法 JSON"})
             return None
@@ -433,6 +443,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": "body 必须是 JSON 对象"})
             return None
         return body
+
+    def _read_chunked_body(self, max_bytes: int) -> Optional[bytes]:
+        """解码 Transfer-Encoding: chunked 请求体（http.server 不自动解码）。"""
+        parts: list[bytes] = []
+        total = 0
+        for _ in range(10_000_000):  # 防御死循环
+            size_line = self.rfile.readline(64).strip()
+            if not size_line:
+                break  # 连接提前断开
+            try:
+                size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+            except ValueError:
+                self._send(400, {"ok": False, "error": f"bad body size (max {max_bytes // 1024}KB)"})
+                return None
+            if size == 0:
+                break
+            total += size
+            if total > max_bytes:
+                self._send(400, {"ok": False, "error": f"bad body size (max {max_bytes // 1024}KB)"})
+                return None
+            data = self.rfile.read(size)
+            if len(data) != size:
+                break
+            self.rfile.read(2)  # 块尾 \r\n
+            parts.append(data)
+        return b"".join(parts)
 
     # -- GET -------------------------------------------------------------
     def do_GET(self) -> None:

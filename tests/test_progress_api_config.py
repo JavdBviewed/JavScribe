@@ -474,6 +474,32 @@ def test_upload_source_name_percent_encoded() -> None:
             http.stop()
 
 
+
+
+def test_put_chunked_body() -> None:
+    """桌面客户端 httpJson 的 chunked PUT /config 必须受理（回归：只认 Content-Length 时 400）。"""
+    from test_scan_api import _chunked_request
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        cfg = _merged()
+        file_cfg = copy.deepcopy(BASE_CFG)
+        http, engine, _cfg_path = _start(td, cfg, file_cfg)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            cfg["api"]["key"] = "k1"
+            payload = json.dumps({"values": {"subtitle.lang_tag": "ja"}}).encode()
+            code, body = _chunked_request(base, "PUT", "/config", payload)
+            assert code == 200 and body["ok"], (code, body)
+            assert body["updated"] == ["subtitle.lang_tag"]
+            assert cfg["subtitle"]["lang_tag"] == "ja"  # 内存热更生效
+            # chunked 超限（默认 1MB）→ 400 bad body size
+            big = json.dumps({"values": {"infer.extra_args": ["x" * (1100 * 1024)]}}).encode()
+            assert len(big) > 1024 * 1024
+            code2, body2 = _chunked_request(base, "PUT", "/config", big, chunk_size=1 << 20)
+            assert code2 == 400 and str(body2.get("error", "")).startswith("bad body size"), (code2, body2)
+        finally:
+            http.stop()
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

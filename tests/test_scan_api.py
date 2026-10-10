@@ -410,6 +410,113 @@ def test_scan_host_root_mapping() -> None:
                 _os.environ["JAVSCRIBE_HOST_ROOT"] = old_env
 
 
+
+def _chunked_request(base: str, method: str, path: str, body: bytes,
+                     key: str = "k1", chunk_size: int = 4096) -> tuple:
+    """裸 socket 发 Transfer-Encoding: chunked 请求（模拟桌面客户端 httpJson：
+    Node req.write 不带 Content-Length → 自动 chunked）。返回 (status, body_json)。"""
+    import socket
+    import threading
+    host, port = base.split("://", 1)[1].rsplit(":", 1)
+    sock = socket.create_connection((host, int(port)), timeout=20)
+    head = f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+    if key:
+        head += f"X-Api-Key: {key}\r\n"
+    head += "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+
+    def _encode(b: bytes) -> bytes:
+        out = b""
+        for i in range(0, len(b), chunk_size):
+            c = b[i:i + chunk_size]
+            out += f"{len(c):x}\r\n".encode() + c + b"\r\n"
+        return out + b"0\r\n\r\n"
+
+    def _send_all() -> None:
+        try:
+            sock.sendall(head.encode() + _encode(body))
+        except OSError:
+            pass  # 服务端 400 后关连接，写失败符合预期
+
+    th = threading.Thread(target=_send_all, daemon=True)
+    th.start()
+    data = b""
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    th.join(timeout=20)
+    rhead, _, rbody = data.partition(b"\r\n\r\n")
+    code = int(rhead.split(b" ", 2)[1]) if rhead else 0
+    try:
+        jbody = json.loads(rbody.decode("utf-8", "replace") or "{}")
+    except json.JSONDecodeError:
+        jbody = {"raw": rbody.decode("utf-8", "replace")}
+    return code, jbody
+
+
+def test_scan_submit_chunked_body() -> None:
+    """桌面客户端 httpJson（Node req.write 无 Content-Length → chunked）必须被受理。
+
+    回归：serve 只认 Content-Length 时，chunked 请求全部 400「bad body size」，
+    桌面端 /scan/submit、PUT /config 整体不可用（web 端 fetch 带 CL 不受影响）。
+    ① chunked 合法路径 → 201 入队
+    ② chunked >16MB → 400 bad body size（上限对 chunked 同样生效）
+    ③ 畸形 chunk 大小行 → 400
+    """
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        media = _media(td)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        http, engine, _ = _start(td, cfg, None)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            # ① chunked（4KB 分块）合法提交 → 201
+            payload = json.dumps({"files": [str(media / "a.mp4")], "batch_id": "b1", "batch_label": "chunked"}).encode()
+            code, body = _chunked_request(base, "POST", "/scan/submit", payload)
+            assert code == 201 and body["ok"] and body["files"] == 1, (code, body)
+            assert len(engine.jobs) == 1
+            assert engine.jobs[0].batch_id == "b1" and engine.jobs[0].batch_label == "chunked"
+            # ② chunked 超 16MB → 400 bad body size（垃圾路径，校验前拦截）
+            big = json.dumps({"files": ["/ghost/" + "x" * 390 + f"_{i:06d}.mp4" for i in range(42000)]}).encode()
+            assert len(big) > 16 * 1024 * 1024, len(big)
+            code2, body2 = _chunked_request(base, "POST", "/scan/submit", big, chunk_size=1 << 20)
+            assert code2 == 400 and str(body2.get("error", "")).startswith("bad body size"), (code2, body2)
+            assert len(engine.jobs) == 1  # 超限未入队
+            # ③ 畸形 chunk 大小行 → 400（不炸 500）
+            import socket as _s
+            host, port = base.split("://", 1)[1].rsplit(":", 1)
+            sock = _s.create_connection((host, int(port)), timeout=10)
+            try:
+                sock.sendall((
+                    f"POST /scan/submit HTTP/1.1\r\nHost: {host}\r\n"
+                    "Content-Type: application/json\r\nX-Api-Key: k1\r\n"
+                    "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    "zzz\r\nxx\r\n0\r\n\r\n").encode())
+                data = b""
+                while True:
+                    c = sock.recv(65536)
+                    if not c:
+                        break
+                    data += c
+            finally:
+                sock.close()
+            rhead, _, rbody = data.partition(b"\r\n\r\n")
+            code3 = int(rhead.split(b" ", 2)[1]) if rhead else 0
+            body3 = json.loads(rbody.decode("utf-8", "replace") or "{}")
+            assert code3 == 400 and not code3 == 500, (code3, body3)
+            assert len(engine.jobs) == 1
+            print("  test_scan_submit_chunked_body PASSED")
+        finally:
+            http.stop()
+
+
 def main() -> None:
     print("test_scan_api.py")
     test_scan_auth_and_listing()
@@ -417,6 +524,7 @@ def main() -> None:
     test_scan_rules_hot_update()
     test_scan_submit()
     test_scan_submit_large_body()
+    test_scan_submit_chunked_body()
     test_scan_host_root_mapping()
     print("ALL SCAN API TESTS PASSED")
 
