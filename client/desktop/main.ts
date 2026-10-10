@@ -421,19 +421,27 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
     const h = await httpJson<any>(entry.url + "/health", { timeoutMs: 5000 });
     if (h.status !== 200 || !h.data || h.data.ok !== true) throw new Error("health not ok");
     let details: any[] = [];
-    const sj = await httpJson<any[]>(entry.url + "/jobs", { timeoutMs: 5000 });
-    const summaries = Array.isArray(sj.data) ? sj.data : [];
-    details = await Promise.all(
-      summaries.map(async (s) => {
-        try {
-          const d = await httpJson<any>(entry.url + "/jobs/" + encodeURIComponent(String(s.id)), { timeoutMs: 5000 });
-          // 明细仅采纳 200 且带 id 的响应；404 错误体回退摘要（摘要必带 id），杜绝幻行
-          return pickJobDetail(d.status, d.data, s);
-        } catch {
-          return s; // 单任务明细失败：摘要兜底，不拖垮引擎
-        }
-      }),
-    );
+    // 优先单次 /jobs?detail=1（serve 0.2.10+：摘要+files 一次拉齐，800+ 任务免逐 job 明细洪水）；
+    // 200 数组且每项含 files → 单飞路径收工。否则（404/老格式/请求失败）→ 回退现有逐 job 明细行为
+    const dj = await httpJson<any[]>(entry.url + "/jobs?detail=1", { timeoutMs: 5000 });
+    const dlist = dj.status === 200 && Array.isArray(dj.data) ? dj.data : null;
+    if (dlist && dlist.every((j) => j && Array.isArray(j.files))) {
+      details = dlist;
+    } else {
+      const sj = await httpJson<any[]>(entry.url + "/jobs", { timeoutMs: 5000 });
+      const summaries = Array.isArray(sj.data) ? sj.data : [];
+      details = await Promise.all(
+        summaries.map(async (s) => {
+          try {
+            const d = await httpJson<any>(entry.url + "/jobs/" + encodeURIComponent(String(s.id)), { timeoutMs: 5000 });
+            // 明细仅采纳 200 且带 id 的响应；404 错误体回退摘要（摘要必带 id），杜绝幻行
+            return pickJobDetail(d.status, d.data, s);
+          } catch {
+            return s; // 单任务明细失败：摘要兜底，不拖垮引擎
+          }
+        }),
+      );
+    }
     return {
       name: entry.name,
       url: entry.url,

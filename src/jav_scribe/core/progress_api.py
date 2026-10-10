@@ -7,6 +7,9 @@ Endpoints (all JSON unless noted):
   GET  /ready                -> 组件就绪自检（模型/VAD/ffmpeg/GPU/磁盘…；0.2.6+，
                                 客户端「服务设置」弹窗展示；与 /health 同敏感级）
   GET  /jobs                   -> list of job summaries
+       [&batch_id=X&detail=1]  -> batch 过滤可叠加；detail=1 每项含 per-file
+                                   files 明细（0.2.10+，桌面端刷新单飞）；
+                                   不带参数行为逐字节不变
   GET  /jobs/<id>              -> job detail (per-file status/progress/position)
   GET  /jobs/<id>/result       -> raw bytes of the primary finished SRT
   POST /jobs/<id>/retry       -> re-queue SKIPPED files (force regenerate)
@@ -558,10 +561,13 @@ class _Handler(BaseHTTPRequestHandler):
             if len(parts) == 1:
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 batch_id = (q.get("batch_id") or [None])[0]
+                # ?detail=1：摘要+per-file 明细一次拉齐（桌面端单飞，免逐 job 打 /jobs/<id> 的
+                # 请求洪水）；可叠 batch_id 过滤；不带参数时逐字节不变（老客户端兼容）
+                detail = (q.get("detail") or [None])[0] == "1"
                 jobs = self.engine.jobs
                 if batch_id is not None:
                     jobs = [j for j in jobs if j.batch_id == batch_id]
-                self._send(200, [j.to_dict() for j in jobs])
+                self._send(200, [j.to_dict(detail=detail) for j in jobs])
                 return
             job = self.engine.job_by_id(parts[1])
             if job is None:

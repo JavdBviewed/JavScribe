@@ -3,6 +3,7 @@
 - 已完成（含全失败/跳过/取消）任务 → 恢复，/jobs 可见，任务表「已完成」不丢
 - 未完成任务（pending/running）→ 不恢复（worker 已随进程消亡，重新提交即可）
 - 损坏的 jobs.json → 忽略并继续启动
+- GET /jobs?detail=1：一次拉齐 per-file 明细（桌面端单飞）；可叠 batch_id；无参行为不变
 Run: python3 tests/test_jobs_history.py
 """
 from __future__ import annotations
@@ -10,12 +11,24 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jav_scribe.core.engine import Engine  # noqa: E402
+from jav_scribe.core.progress_api import ProgressHTTP  # noqa: E402
 from jav_scribe.core.task import Job, Task, TaskStatus, new_job_id  # noqa: E402
+
+
+def _http(url: str):
+    req = urllib.request.Request(url, data=b"", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as ex:
+        return ex.code, json.loads(ex.read().decode())
 
 FAKE_OK = (
     "import sys, pathlib\n"
@@ -146,10 +159,59 @@ def test_history_grows_after_restart() -> None:
         assert len(eng3.jobs) == 2
 
 
+def test_jobs_detail_param() -> None:
+    """GET /jobs?detail=1：每项含 files 明细；可叠 batch_id 过滤；无参行为不变。"""
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        fake = td / "fake_infer.py"
+        fake.write_text(FAKE_OK, encoding="utf-8")
+        va, vb = td / "a.mkv", td / "b.mkv"
+        va.write_bytes(b"1")
+        vb.write_bytes(b"2")
+        logs: list[str] = []
+        eng = _make_engine(td, fake, logs)
+        httpd = ProgressHTTP(eng, host="127.0.0.1", port=0, inbox_dir=td)
+        httpd.start()
+        base = f"http://127.0.0.1:{httpd.server.server_address[1]}"
+        try:
+            ja = eng.submit([va], run_in_thread=False)
+            jb = eng.submit([vb], run_in_thread=False, batch_id="B1", batch_label="样本")
+            assert ja.files[0].status == TaskStatus.DONE
+            assert jb.files[0].status == TaskStatus.DONE
+            # 无参：摘要口径不变（无 files 键）
+            code, body = _http(base + "/jobs")
+            assert code == 200 and [x["id"] for x in body] == [ja.id, jb.id], (code, body)
+            for x in body:
+                assert "files" not in x, x
+            # detail=1：每项含 files（路径/状态齐全），摘要字段与无参逐键一致
+            code, body = _http(base + "/jobs?detail=1")
+            assert code == 200 and [x["id"] for x in body] == [ja.id, jb.id], (code, body)
+            by_id = {x["id"]: x for x in body}
+            for x in body:
+                assert isinstance(x["files"], list) and len(x["files"]) == 1, x["id"]
+            assert by_id[ja.id]["files"][0]["path"] == str(va)
+            assert by_id[ja.id]["files"][0]["status"] == "done"
+            assert by_id[jb.id]["files"][0]["path"] == str(vb)
+            for jid, p in ((ja.id, by_id[ja.id]), (jb.id, by_id[jb.id])):
+                plain = [x for x in _http(base + "/jobs")[1] if x["id"] == jid][0]
+                for k, v in plain.items():
+                    assert p[k] == v, (jid, k)  # detail 是摘要的严格超集
+            # batch_id 过滤可叠加
+            code, body = _http(base + "/jobs?batch_id=B1&detail=1")
+            assert code == 200 and [x["id"] for x in body] == [jb.id], (code, body)
+            assert isinstance(body[0]["files"], list) and body[0]["files"]
+            code, body = _http(base + "/jobs?batch_id=NOPE&detail=1")
+            assert code == 200 and body == [], (code, body)
+        finally:
+            httpd.stop()
+            eng.stop()
+
+
 if __name__ == "__main__":
     test_history_survives_restart()
     test_unfinished_job_not_restored()
     test_all_failed_job_state_finished()
     test_corrupt_history_ignored()
     test_history_grows_after_restart()
+    test_jobs_detail_param()
     print("ALL JOBS HISTORY TESTS PASSED")
