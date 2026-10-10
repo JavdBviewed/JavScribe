@@ -107,7 +107,7 @@ test("整片直传（extract-select=server 逃生通道）：上传视频→提�
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
-test("文件夹批量：待选表手动勾选 →（2 项）→ 批量完成 toast → 两行看板完成", async ({ page, request }) => {
+test("文件夹批量（行优先）：提交即建主任务+子行 → 派发页无流程节点 → 两行看板完成", async ({ page, request }) => {
   await slowJobs(request);
   await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录，相对路径自动带上
   // 夹具小文件均低于默认「忽略小于 200MB」→ 默认 0 勾选，待选表 3 行
@@ -119,11 +119,23 @@ test("文件夹批量：待选表手动勾选 →（2 项）→ 批量完成 toa
   await page.selectOption("#engine-select", "mock");
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");
-  await expect(page.locator("#dispatch-status.ok", { hasText: /批量完成：已提交 2\/2 项/ })).toBeVisible({ timeout: 30_000 });
+  // 行优先（桌面批量）：派发页不再有逐文件流程节点，提交即自动切「字幕任务」看板
+  await expect(page.locator("#pipeline")).toBeHidden();
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  // 主任务 + 2 条子行即刻在册（此刻 serve 侧还没有这些任务）
+  await expect(page.locator(".job-batch-row")).toHaveCount(1);
+  await expect(page.locator(".job-batch-row .batch-sub-n")).toHaveText("2 子任务");
+  await expect(page.locator(".job-row")).toHaveCount(2);
+  // 派发页只剩一条状态行：收尾汇总（逐文件进度不在这里）
+  await goView(page, "dispatch");
+  await expect(page.locator("#dispatch-status.ok", { hasText: /批量完成：已提交 2\/2 项/ }))
+    .toBeVisible({ timeout: 60_000 });
   await goView(page, "jobs");
   for (const name of ["video-a.mp4", "video-b.mkv"]) {
+    // serve 真行接管：同文件恒一行（不出现 pending + serve 双行）
     const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: name }) });
-    await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
+    await expect(row).toHaveCount(1);
+    await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 60_000 });
   }
 });
 

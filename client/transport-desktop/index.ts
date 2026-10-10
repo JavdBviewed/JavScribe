@@ -16,8 +16,8 @@ import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 /** preload 实际暴露的窗口对象（JavDesktop + 上传通道） */
 export interface DesktopBridge extends JavDesktop {
   upload: {
-    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array }): Promise<UploadDispatchResult>;
-    file(args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array }): Promise<UploadDispatchResult>;
+    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }): Promise<UploadDispatchResult>;
+    file(args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }): Promise<UploadDispatchResult>;
   };
 }
 
@@ -32,6 +32,9 @@ function call<T = unknown>(method: string, ...args: string[]): Promise<T> {
 
 const toMb = (bytes: number): number => Math.round(bytes / 1048576);
 const extOf = (name: string): string => (name.split(".").pop() || "mp4").toLowerCase();
+/** 主任务（batch）归属参数：透传给 main 的上传通道（batchQ/batchUpsert 记账用） */
+const batchArgs = (batch?: { id: string; label?: string }): { batchId?: string; batchLabel?: string } =>
+  (batch ? { batchId: batch.id, batchLabel: batch.label || "" } : {});
 
 /** 引擎 name→url 缓存（getResultUrl 是同步接口，listEngines 时填充） */
 const urlCache = new Map<string, string>();
@@ -140,31 +143,35 @@ export const desktopTransport: Transport = {
   engineMetrics: (name) => call<MetricsResponse>("engineMetrics", name),
   putConfig: (name, values) => call("putConfig", name, JSON.stringify(values)),
 
-  async uploadFile(file, engine, onProgress) {
+  async uploadFile(file, engine, onProgress, batch) {
     const localPath = localPathOf(file);
+    const bArgs = batchArgs(batch);
     return dispatchUpload(file, engine, (id) =>
       localPath
-        ? desktop.upload.file({ id, engine, name: file.name, ext: extOf(file.name), localPath })
+        ? desktop.upload.file({ id, engine, name: file.name, ext: extOf(file.name), localPath, ...bArgs })
         : desktop.upload.file({
             id, engine, name: file.name, ext: extOf(file.name),
             data: new Uint8Array(0),
+            ...bArgs,
           }),
       onProgress,
     );
   },
 
-  async uploadAudio(file, engine, audio, onProgress) {
+  async uploadAudio(file, engine, audio, onProgress, batch) {
     const b = audio as Blob & { _javOpusPath?: string; _javOpusSize?: number };
     const extra: Partial<UploadStatus> = b._javOpusSize != null
       ? { audio_mb: Math.round(b._javOpusSize / 1048576) }
       : {};
+    const bArgs = batchArgs(batch);
     return dispatchUpload(file, engine, async (id) => {
       if (b._javOpusPath) {
-        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath });
+        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath, ...bArgs });
       }
       return desktop.upload.audio({
         id, engine, name: file.name,
         data: new Uint8Array(await audio.arrayBuffer()),
+        ...bArgs,
       });
     }, onProgress, extra);
   },

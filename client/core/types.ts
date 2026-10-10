@@ -104,6 +104,10 @@ export interface JobRow {
    *  false = 他端客户端提交的服务任务（可看进度 + 服务端操作，字幕不落回本机）；
    *  未定义 = 形态不区分归属（desktop / 旧版 API），前端按本机处理 */
   local?: boolean | null;
+  /** 派发「行优先」pending 行（仅 renderer 态：批量提交即建行，serve 真行出现后让位删除） */
+  dispatch_pending?: boolean;
+  /** pending 行的稳定 key（无 job_id / created 会重建，供勾选、patch、取消定位） */
+  pkey?: string;
 }
 
 /** GET /api/uploads/{id}：提取→派发 两阶段任务 */
