@@ -50,8 +50,14 @@ RUN for p in /tmp/chickenrice-patches/*.patch; do \
     done && rm -rf /tmp/chickenrice-patches
 
 WORKDIR /opt/chickenrice
+# faster-whisper 钉 <1.3：其 audio.py 的 decode_audio 无条件调用
+# av.open(..., metadata_errors="ignore")，该关键字 PyAV 12.0.0 加入、
+# 19.0.0 移除——fw 1.2.1 + av 19.x 组合下所有转译在解码阶段 TypeError 全灭
+# （2026-10-11 127/158 v0.2.10 镜像实锤）。av 钉 <19 与之配套；升级任一项
+# 必须重评两者组合。
 RUN python3 -m pip install --no-cache-dir --index-url ${PIP_INDEX} \
-        "faster-whisper>=1.0.0" \
+        "faster-whisper>=1.2.1,<1.3" \
+        "av>=12.0.0,<19.0.0" \
         "ctranslate2>=4.5.0" \
         "transformers>=4.30.0" \
         "librosa>=0.10.0" \
