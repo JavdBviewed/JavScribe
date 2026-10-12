@@ -91,9 +91,26 @@ export function canStartInFlight(opts: {
   return cands.some((e) => e.online && e.enabled !== false && opts.inFlight(e.name) < cap);
 }
 
+/** 本机提取已中止（主任务取消）：池入口闸/main 进程 kill 回传；派发链识别后行落「跳过」而非失败 */
+export class ExtractAbortError extends Error {
+  constructor() {
+    super("提取已中止（主任务取消）");
+    this.name = "ExtractAbortError";
+  }
+}
+
+/**
+ * 池任务钩子：onQueue = 入队等槽时回调一次（ahead=前方等待数，UI 展示「提取排队（前方 N）」）；
+ * onStart = 拿到槽、task 真正执行前回调（UI 从「排队」切「执行中」，状态与真实并发对齐）。
+ */
+export interface PoolHooks {
+  onQueue?: (ahead: number) => void;
+  onStart?: () => void;
+}
+
 /** 可 resize 工作池：limit 每次获取时现读（热重载），FIFO，调大唤醒等待者，调小不中断在跑者。 */
 export interface WorkerPool {
-  run<T>(task: () => Promise<T>): Promise<T>;
+  run<T>(task: () => Promise<T>, hooks?: PoolHooks): Promise<T>;
   /** 换 limit 读数函数（app 注入 state.ccfg 实时读者；注入后旧读者作废）。 */
   setLimitReader(read: () => number): void;
   /** limit 调大后释放等待者（设置保存/变更时调用；无空位时空操作）。 */
@@ -118,11 +135,15 @@ export function createPool(limitOf: () => number): WorkerPool {
     }
   };
   return {
-    run<T>(task: () => Promise<T>): Promise<T> {
+    run<T>(task: () => Promise<T>, hooks?: PoolHooks): Promise<T> {
       const acquired = active < limit()
         ? ((active += 1), Promise.resolve())
-        : new Promise<void>((res) => waiters.push(res));
+        : new Promise<void>((res) => {
+          waiters.push(res);
+          hooks?.onQueue?.(waiters.length - 1);
+        });
       return acquired.then(async () => {
+        hooks?.onStart?.();
         try {
           return await task();
         } finally {

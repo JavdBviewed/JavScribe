@@ -10,13 +10,23 @@
  * 避免 wasm 内存叠加——基线串行语义的推广）。
  */
 import { DEFAULT_MAX_EXTRACT_BYTES, OPUS_EXTRACT_ARGS } from "../core/constants";
-import { CLIENT_CFG_DEFAULTS, createPool } from "../core/concurrency";
+import { CLIENT_CFG_DEFAULTS, createPool, ExtractAbortError } from "../core/concurrency";
 
 // 历史行为（基线 1:1 保留）：app 直接传回调函数，而实现按 opts 对象读 onProgress
 // （函数上没有 onProgress 属性），因此当前生产代码本地提取阶段没有实时百分比。
 // 二期 desktop 形态可顺手修正，一期不得改变 web 行为。
 export type ExtractProgress = (p: number) => void;
-export type ExtractOpts = { onProgress?: ExtractProgress } | ExtractProgress;
+/** 提取钩子对象（app.ts 链层传入；web 一期函数形式保留兼容） */
+export interface ExtractHooks {
+  onProgress?: ExtractProgress;
+  /** 池入队等槽（ahead=前方等待数；UI 落「排队中」桶并显示「前方 N」） */
+  onQueue?: (ahead: number) => void;
+  /** 拿到槽、task 真正执行前（UI 从「排队」切「提取中」，状态与真实并发对齐） */
+  onStart?: () => void;
+  /** 主任务中止检查（池入口闸：true=放弃，不起 ffmpeg） */
+  isAborted?: () => boolean;
+}
+export type ExtractOpts = ExtractHooks | ExtractProgress;
 
 export interface JavExtractAPI {
   extractAudio: (f: File, opts?: ExtractOpts) => Promise<Blob | { skipped: true }>;
@@ -26,6 +36,8 @@ export interface JavExtractAPI {
   setExtractLimit?: (read: () => number) => void;
   /** S4：extract_workers 调大后释放池等待者。 */
   wakeExtract?: () => void;
+  /** 主任务「取消」：立即终止在跑的本机 ffmpeg 提取（web wasm 形态无此能力，不实现） */
+  cancelExtracts?: (names: string[]) => Promise<number>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -69,7 +81,9 @@ function ensure(): Promise<FFmpegLike> {
   return loading ?? Promise.reject(new Error("ffmpeg.wasm 未加载"));
 }
 
-function runOne(f: File, onProgress?: (p: number) => void) {
+function runOne(f: File, hooks?: ExtractHooks) {
+  if (hooks?.isAborted?.()) return Promise.reject(new ExtractAbortError());
+  const onProgress = hooks?.onProgress;
   return ensure().then((ff) => {
     const ext = /\.([a-z0-9]{1,8})$/i.exec(f.name);
     const inName = "in" + (ext ? "." + ext[1].toLowerCase() : ".bin");
@@ -120,12 +134,12 @@ function extractAudio(f: File, opts?: ExtractOpts) {
   if (f.size <= 0) return Promise.resolve({ skipped: true } as const);
   if (f.size > MAX_BYTES) return Promise.resolve({ skipped: true } as const);
   // 与迁移前一致：函数形式第二参读不到 onProgress → 无实时进度（生产基线行为）
-  const optsObj = (typeof opts === "function" ? undefined : opts) as
-    | { onProgress?: ExtractProgress }
-    | undefined;
-  const onProgress = optsObj?.onProgress;
+  const optsObj = (typeof opts === "function" ? undefined : opts) as ExtractHooks | undefined;
   // skipped 分支不进池（无提取动作，不占并发槽）
-  return pool.run(() => runOne(f, onProgress));
+  return pool.run(() => runOne(f, optsObj), {
+    onQueue: optsObj?.onQueue,
+    onStart: optsObj?.onStart,
+  });
 }
 
 const api: JavExtractAPI = {

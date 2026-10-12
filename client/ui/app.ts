@@ -8,7 +8,7 @@ import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineM
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, normalizeClientConfig } from "../core/concurrency";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, normalizeClientConfig } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { TransportError } from "../core/transport";
 import { $, esc } from "./dom";
@@ -1326,6 +1326,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     stageDone(n: number, meta: string): void;
     done(meta: string, info?: { audioMb?: number | null; jobId?: string | null }): void;
     fail(msg: string, n: number, info?: { audioMb?: number | null }): void;
+    /** 提取池入队等槽（尚未执行）：行落「排队中」桶显示「前方 N」，不计「提取中」 */
+    queue(n: number, meta: string): void;
     /** 主任务取消闸门：true = 子行已置「跳过」终态，调用方必须放弃提交服务 */
     abort(): boolean;
   }
@@ -1342,6 +1344,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       mode: (m) => { labelPipeline(m); },
       // 派发页 pipeline 不参与主任务取消：链照常提交服务
       abort: () => false,
+      queue: (n, meta) => { setStep(stepId(n), "active", String(n), meta); setFill("0", true); },
       stage: (n, meta, prog, width) => {
         setStep(stepId(n), "active", String(n), meta);
         if (prog == null) setFill("0", true);
@@ -1377,6 +1380,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       : (mode === "local") === (n === 1) ? "extracting" : "uploading");
     return {
       mode: (m) => { mode = m; },
+      // 池入队等槽：状态保持 pending（落「排队中」桶、不计「提取中」——并发显示虚高根因）
+      queue: (_n, meta) => {
+        if (r.job_id || BATCH_TERMINAL.has(r.status)) return;
+        r.status = "pending";
+        r.phase = "queued";
+        setPos(meta, meta);
+        r.progress = 0;
+        schedulePendingRender();
+      },
       stage: (n, meta, prog) => {
         p.started = true;
         r.status = "running";
@@ -1415,6 +1427,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         return true;
       },
       fail: (msg) => {
+        if (r.job_id || r.status === "skipped" || r.status === "canceled") return;
         p.started = true;
         r.status = "error";
         r.message = msg;
@@ -1553,12 +1566,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       // 行优先：子行还全是本端 pending（尚未提交到服务）→ 服务侧不认识该主任务，
       // 暂停/继续/重试发了只会拿到「批次不存在」；「取消」走本端 pending 语义仍可用。
       const servedGroup = batchServed(g.bid);
+      const localBatch = batchQueues.has(g.bid); // 本端行优先批次（serve 尚不认识）：暂停/继续/取消本端即时生效
       // 孤儿行（兜底 0 子任务）：手动清除入口（删本地 batches.json 记录；子任务已过期）
       const canClear = typeof t.batchClear === "function" && !!g.stale;
       const ops = [
-        canOp && servedGroup && agg.status !== "paused" && !allTerminal
+        canOp && (servedGroup || localBatch) && agg.status !== "paused" && !allTerminal
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="pause" title="暂停主任务：运行中的子任务跑完，排队中冻结">&#9208; 暂停</button>` : "",
-        canOp && servedGroup && agg.status === "paused"
+        canOp && (servedGroup || localBatch) && agg.status === "paused"
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="resume" title="继续主任务：解除排队冻结，恢复开跑">&#9654; 继续</button>` : "",
         canOp && servedGroup && hasFailed
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="retry" title="重试本主任务中失败的子任务">&#8635; 重试失败</button>` : "",
@@ -1568,7 +1582,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           ? `<button type="button" class="dl-btn batch-op batch-clear" data-bid="${esc(g.bid)}" data-bact="clear" title="清除该过期主任务记录（仅本地记录，子任务已过期）">&#10005; 清除</button>` : "",
       ].join("");
       const label = g.label || g.bid;
-      const core = [gkey, label, g.children.length, agg.status, collapsed, allTerminal, created, finished, hasFailed, canOp, canClear, servedGroup, ops].join("\u0001");
+      const core = [gkey, label, g.children.length, agg.status, collapsed, allTerminal, created, finished, hasFailed, canOp, canClear, servedGroup, localBatch, ops].join("\u0001");
       let el = rowMap.get(gkey);
       if (!el) {
         const div = document.createElement("div");
@@ -1804,15 +1818,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       let pendingN = 0;
       if (act === "cancel") {
         const ok = window.confirm(
-          `确认取消主任务？\n\n· 未开始的子任务全部取消\n· 本机提取/上传中的子任务跑完当前阶段后不再提交服务（标记已跳过）\n· 已提交到服务的子任务不受影响（与单任务取消语义一致）`,
+          `确认取消主任务？\n\n· 未开始的子任务全部取消\n· 本机提取中的子任务立即终止（标记已跳过）\n· 已提交到服务的子任务不受影响（与单任务取消语义一致）`,
         );
         if (!ok) return;
         // 行优先：先收掉本端 pending 子行（serve 侧此时还没有这些任务）——
         // 未开始的置「已取消」，已在跑的打中止标记（跑完当前阶段不提交服务 → 「已跳过」）
         pendingN = cancelPendingBatch(bid);
+        // 立杀在跑本机 ffmpeg 提取：链收到取消 → 行立即「已跳过」（不等当前阶段跑完）
+        const killNames: string[] = [];
+        for (const p of state._pending.values()) {
+          const r = p.row;
+          if (r.batch_id === bid && !r.job_id && !BATCH_TERMINAL.has(r.status) && r.file) killNames.push(r.file);
+        }
+        if (killNames.length) void jav()?.cancelExtracts?.(killNames);
+        // 上传/提交中的行：上传完成后 serve 侧建 job —— serve 尚不认识该批次也必须发取消 fan-out 防漏杀
+        const anyUploading = Array.from(state._pending.values()).some(
+          (p) => p.row.batch_id === bid && !p.row.job_id && !BATCH_TERMINAL.has(p.row.status)
+            && (p.row.phase === "uploading" || p.row.phase === "submitting"));
         // 首个文件还没提交成功 → serve 不认识这个 batch，只做本端取消，不发无谓的 fan-out
         const served = batchServed(bid);
-        if (!served && batchQueues.has(bid)) {
+        if (!served && !anyUploading && batchQueues.has(bid)) {
           btn.disabled = true;
           toast(pendingN
             ? `主任务已取消：${pendingN} 个子任务不再提交服务（在跑的跑完当前阶段即止）`
@@ -1840,6 +1865,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           }
           toast(n ? `已重新提交 ${n} 个失败子任务` : "重试失败（子任务已过期或不可重试）", n ? "ok" : "err");
         } else if (t.batchOp) {
+          // 本端（行优先）暂停/继续：立即冻结/放行本机派发队列（独立于 serve fan-out）
+          const q = batchQueues.get(bid);
+          if (q && (act === "pause" || act === "resume")) {
+            if (act === "pause") q.pause(); else q.resume();
+          }
           const d = await t.batchOp(act as "pause" | "resume" | "cancel", bid);
           const bad = (d.engines || []).filter((e) => !e.ok);
           const badTxt = bad.map((e) => `${e.engine}：${e.unsupported ? "版本过旧不支持" : (e.error || "失败")}`).join("；");
@@ -2939,8 +2969,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 三者相加 = inFlightOf(engine)；任一记账到终态/行可见即释槽，pumpDispatch 为重触发入口。
   const chainInFlight = new Map<string, number>();
   const pendingJobIds = new Map<string, Set<string>>();
-  // 行优先批次取消登记：batch_id -> { cancel 整批未开始子行 / onRowCancel 单行取消后续发 }
-  const batchQueues = new Map<string, { cancel: () => number; onRowCancel: () => void }>();
+  // 主任务「暂停」本地冻结集：链层提取池入口闸在此等待放行（不占池槽，防阻塞他批次）
+  const pausedBatches = new Set<string>();
+  // 行优先批次操作登记：batch_id -> { 取消整批未开始子行 / 单行取消后续发 / 暂停冻结 / 继续放行 }
+  const batchQueues = new Map<string, { cancel: () => number; onRowCancel: () => void; pause: () => void; resume: () => void }>();
   let batchStartNext: (() => void) | null = null; // 文件夹批量封顶等待的续发（泵重触发）
   let singleQueuedFile: File | null = null;       // 等 cap 槽位的单文件（文件变更/重新派发即失效，身份匹配防误发）
 
@@ -3080,7 +3112,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const total = queue.length;
     const rowFirst = platform.kind === "desktop";
     const pend = rowFirst ? createPendingRows(batch, queue, engine) : [];
-    let okN = 0, started = 0, settled = 0, done = false, cancelRequested = false;
+    let okN = 0, started = 0, settled = 0, done = false, cancelRequested = false, queuePaused = false;
     // settled 去重：整批取消标记的项与链结算的项可能重叠（在跑链跑完也只算一次）
     const counted = new Set<number>();
     const settle = (i: number): void => { if (!counted.has(i)) { counted.add(i); settled++; } };
@@ -3089,6 +3121,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       done = true;
       batchStartNext = null;
       batchQueues.delete(batch.id);
+      pausedBatches.delete(batch.id);
       const canceledN = rowFirst
         ? pend.filter((p) => p.row.status === "canceled" || p.row.status === "skipped").length : 0;
       showStatus(finishNote(okN, total, canceledN), okN ? "ok" : "err");
@@ -3099,7 +3132,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (okN > 0 && !rowFirst) webShowView("jobs"); // web：批量完成进任务看板
     };
     const startNext = (): void => {
-      if (done || cancelRequested) return;
+      if (done || cancelRequested || queuePaused) return;
       while (started < total) {
         // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
         if (rowFirst && pend[started].row.status === "canceled") { settle(started); started++; continue; }
@@ -3167,7 +3200,41 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       startNext();
       if (settled === total) finish();
     };
-    if (rowFirst) batchQueues.set(batch.id, { cancel, onRowCancel });
+    // 主任务「暂停/继续」（本端）：冻结派发队列 + 未开始子行标「已暂停」；
+    // 已开跑的链（提取/上传/提交中）不中断——跑完当前阶段（与按钮语义一致）
+    const pause = (): void => {
+      if (!rowFirst) return;
+      queuePaused = true;
+      pausedBatches.add(batch.id);
+      for (let i = started; i < total; i++) {
+        const p = pend[i];
+        const r = p.row;
+        if (p.started || r.job_id || BATCH_TERMINAL.has(r.status) || r.status === "paused") continue;
+        r._prevStatus = r.status;
+        r.status = "paused";
+        r.position = "已暂停（主任务暂停）";
+        r.phase_detail = "已暂停（主任务暂停）";
+        r.message = "主任务已暂停：提取上传冻结，点「继续」恢复";
+      }
+      schedulePendingRender();
+    };
+    const resume = (): void => {
+      if (!rowFirst) return;
+      queuePaused = false;
+      pausedBatches.delete(batch.id);
+      for (let i = started; i < total; i++) {
+        const r = pend[i].row;
+        if (r.status !== "paused") continue;
+        r.status = r._prevStatus || "pending";
+        r.position = PENDING_TEXT.queued[0];
+        r.phase_detail = PENDING_TEXT.queued[0];
+        r.message = PENDING_TEXT.queued[1];
+        delete r._prevStatus;
+      }
+      schedulePendingRender();
+      startNext(); // 放行：立即补位至封顶
+    };
+    if (rowFirst) batchQueues.set(batch.id, { cancel, onRowCancel, pause, resume });
     if (rowFirst && total > 0) {
       // 派发页收掉流程节点，只留一条状态行；提交即进任务看板看进度
       resetPipeline();
@@ -3266,21 +3333,35 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     });
   }
 
-  function extractLocal(f: File, prefix: string, sink?: ChainSink): Promise<Blob | { skipped: true }> {
+  function extractLocal(f: File, prefix: string, sink?: ChainSink, batchId?: string): Promise<Blob | { skipped: true }> {
     const s = sink || pipelineSink();
     return new Promise<Blob | { skipped: true }>((resolve, reject) => {
       let t0: number | null = null;
-      s.stage(1, prefix + (platform.kind === "desktop"
-        ? "本地提取音轨…"
-        : "加载提取引擎（首次 ~30MB，有缓存）…"), null);
-      jav()!.extractAudio(f, (p) => {
-        const now = Date.now() / 1000;
-        if (t0 == null) t0 = now;
-        let meta = prefix + (platform.kind === "desktop" ? "本机提取 · " : "浏览器本地提取 · ") + Math.round(p * 100) + "%";
-        const el = now - t0;
-        if (el > 5 && p > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - p) / p)}`;
-        s.stage(1, meta, p, (p * 100).toFixed(1) + "%");
-      }).then(resolve, reject);
+      void (async () => {
+        // 链层暂停闸（主任务暂停）：等待放行后才进提取池——不占池槽、不起 ffmpeg；
+        // 等待期间被取消则立即收口（行落「跳过」）
+        if (batchId) {
+          while (pausedBatches.has(batchId) && !s.abort()) {
+            await new Promise((r2) => setTimeout(r2, 500));
+          }
+          if (s.abort()) { reject(new Error("主任务已取消，未提交服务")); return; }
+        }
+        jav()!.extractAudio(f, {
+          onProgress: (p) => {
+            const now = Date.now() / 1000;
+            if (t0 == null) t0 = now;
+            let meta = prefix + (platform.kind === "desktop" ? "本机提取 · " : "浏览器本地提取 · ") + Math.round(p * 100) + "%";
+            const el = now - t0;
+            if (el > 5 && p > 0.01) meta += ` · 剩 ~${fmtDuration(el * (1 - p) / p)}`;
+            s.stage(1, meta, p, (p * 100).toFixed(1) + "%");
+          },
+          // 池入队/拿到槽：状态与真实并发对齐（并发 3 = 3「提取中」+ N「排队中·前方 N」）
+          onQueue: (a) => s.queue(1, prefix + `本机提取排队（前方 ${a}）`),
+          onStart: () => s.stage(1, prefix + (platform.kind === "desktop"
+            ? "本地提取音轨…" : "加载提取引擎（首次 ~30MB，有缓存）…"), 0),
+          isAborted: () => s.abort(),
+        }).then(resolve, reject);
+      })();
     });
   }
 
@@ -3334,11 +3415,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     if (mode === "local") {
       s.mode("local");
-      return extractLocal(f, prefix, s)
+      return extractLocal(f, prefix, s, batch?.id)
         .catch((e: unknown) => ({ error: e }))
         .then((r: Blob | { skipped: true } | { error: unknown }) => {
           if (r && "error" in r) {
             const err = r.error;
+            // 取消即时生效（池入口闸 ExtractAbortError / 中止标记）：行落「跳过」，
+            // 不进 fail 分支、不回退整片上传；s.abort() 必须实际执行（防 || 短路漏标）
+            if (err instanceof ExtractAbortError) s.abort();
+            if (s.abort()) return [false, { error: "主任务已取消，未提交服务" }];
             const msg = String((err as Error)?.message || err);
             if (state.extractMode === "local") {
               s.fail(prefix + msg, 1);

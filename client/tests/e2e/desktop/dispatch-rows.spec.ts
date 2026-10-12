@@ -223,9 +223,10 @@ test("批量取消：未开始子行「取消」=已取消、在跑链跑完当�
     await submitScanBatch(page, makeScanDir("javscribe-desktop-scan-__notfound__"));
 
     await expect(page.locator(".job-row")).toHaveCount(3);
-    // 纯 pending 批：服务侧还不认识这个主任务 → 只给「取消」，不给暂停/继续/重试
+    // 纯 pending 批：服务侧还不认识这个主任务 → 「取消」+「暂停」（本端即时冻结派发队列，不依赖 serve）；重试仍隐藏
     await expect(page.locator('.job-batch-row [data-bact="cancel"]')).toHaveCount(1);
-    await expect(page.locator('.job-batch-row [data-bact="pause"]')).toHaveCount(0);
+    await expect(page.locator('.job-batch-row [data-bact="pause"]')).toHaveCount(1);
+    await expect(page.locator('.job-batch-row [data-bact="resume"]')).toHaveCount(0);
     await expect(page.locator('.job-batch-row [data-bact="retry"]')).toHaveCount(0);
 
     // 未开始的子行：单行取消 → 行转「已取消」，不进队列、不提交服务

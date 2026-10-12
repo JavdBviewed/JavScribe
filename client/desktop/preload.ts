@@ -40,19 +40,27 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
     }
   },
 
-  // 提取进度走 main→renderer 推送事件；同一时刻仅一个提取任务（UI 串行队列）
-  extractAudio(args: { videoPath?: string; data?: Uint8Array }, onProgress?: (frac: number) => void) {
+  // 提取进度走 main→renderer 推送事件；按任务 id 过滤（并行提取互不串扰）
+  extractAudio(args: { videoPath?: string; data?: Uint8Array; id?: string }, onProgress?: (frac: number) => void) {
+    const id = args.id || `ext-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = { ...args, id };
     if (onProgress) {
-      const listener = (_e: unknown, p: { frac: number }) => onProgress(p.frac);
+      const listener = (_e: unknown, p: { id?: string; frac: number }) => {
+        if (p.id === id) onProgress(p.frac);
+      };
       ipcRenderer.on("extract-progress", listener);
-      return ipcRenderer.invoke("extract-audio", args)
+      return ipcRenderer.invoke("extract-audio", payload)
         .then((r) => {
           ipcRenderer.removeListener("extract-progress", listener);
           return r;
         }) as Promise<ExtractResult>;
     }
-    return ipcRenderer.invoke("extract-audio", args) as Promise<ExtractResult>;
+    return ipcRenderer.invoke("extract-audio", payload) as Promise<ExtractResult>;
   },
+
+  extractAudioCancel: (id: string) =>
+    ipcRenderer.invoke("extract-audio-cancel", id) as Promise<{ ok: boolean; error?: string }>,
+
 
   onTProgress(cb: (p: TProgress) => void): () => void {
     const listener = (_e: unknown, p: TProgress) => cb(p);

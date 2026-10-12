@@ -1000,9 +1000,14 @@ function cachePrune(): void {
   }
 }
 
-type ExtractResult = { ok: true; opusPath: string; sizeBytes: number; cached?: boolean } | { ok: false; error: string };
+type ExtractResult = { ok: true; opusPath: string; sizeBytes: number; cached?: boolean } | { ok: false; error: string; cancelled?: boolean };
 
-function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f: number) => void): Promise<ExtractResult> {
+// 在跑本机提取登记（id → 进程/tmp/中止标志）：主任务「取消」立杀 ffmpeg（extract-audio-cancel）；
+// 中止时 close 回调回 cancelled=true，链侧行落「跳过」（非失败）
+interface ActiveExtract { proc: ChildProcess; tmp: string; aborted: boolean; }
+const activeExtracts = new Map<string, ActiveExtract>();
+
+function runExtract(args: { videoPath?: string; data?: Uint8Array; id?: string }, onFrac: (f: number) => void): Promise<ExtractResult> {
   // 音轨缓存命中：源视频未变（size/mtime）→ 免重提，直接复用
   if (args.videoPath) {
     try {
@@ -1055,6 +1060,8 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
       { stdio: ["ignore", "ignore", "pipe"] },
     );
     let stderrTail = "";
+    const entry: ActiveExtract = { proc, tmp, aborted: false };
+    if (args.id) activeExtracts.set(args.id, entry);
     proc.stderr.on("data", (c: Buffer) => {
       const s = c.toString("utf-8");
       stderrTail = (stderrTail + s).slice(-4000);
@@ -1072,6 +1079,7 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
     });
     proc.on("error", (e) => finish({ ok: false, error: "ffmpeg 启动失败: " + e.message }));
     proc.on("close", (code) => {
+      if (args.id) activeExtracts.delete(args.id);
       if (code === 0) {
         try {
           const size = fs.statSync(outPath).size;
@@ -1093,6 +1101,10 @@ function runExtract(args: { videoPath?: string; data?: Uint8Array }, onFrac: (f:
           finish({ ok: false, error: "提取输出读取失败: " + (e as Error).message });
         }
       } else {
+        if (entry.aborted) {
+          finish({ ok: false, cancelled: true, error: "提取已取消" });
+          return;
+        }
         const lines = stderrTail.split("\n").map((l) => l.trim()).filter(Boolean);
         const tail = lines.slice(-3).join(" | ").slice(0, 300);
         finish({ ok: false, error: `本地提取失败（退出码 ${code}）${tail ? ": " + tail : ""}` });
@@ -1622,9 +1634,21 @@ function registerIpc(): void {
     }
   });
 
-  // 本地提音轨：videoPath（本机文件）或 data（无路径的 File 字节，e2e setInputFiles 场景）
-  ipcMain.handle("extract-audio", (_ev, args: { videoPath?: string; data?: Uint8Array }) => {
-    return runExtract(args || {}, (frac) => sendToWin("extract-progress", { frac }));
+  // 本地提音轨：videoPath（本机文件）或 data（无路径的 File 字节，e2e setInputFiles 场景）；
+  // id = renderer 生成任务 id（进度按 id 回推，防并行提取互串）
+  ipcMain.handle("extract-audio", (_ev, args: { videoPath?: string; data?: Uint8Array; id?: string }) => {
+    const id = (args && args.id) || "";
+    return runExtract(args || {}, (frac) => sendToWin("extract-progress", { id, frac }));
+  });
+
+  // 终止在跑本机提取（主任务「取消」）：置 aborted + kill ffmpeg；
+  // close 回调回 cancelled，链侧行落「跳过」（非失败）；未命中 id = no-op
+  ipcMain.handle("extract-audio-cancel", (_ev, id: string) => {
+    const entry = activeExtracts.get(String(id || ""));
+    if (!entry) return { ok: false, error: "没有进行中的提取任务" };
+    entry.aborted = true;
+    try { entry.proc.kill(); } catch { /* 进程已退 */ }
+    return { ok: true };
   });
 
   // 音轨缓存查找（任务表「换服务重跑」按影片文件名查最近条目）

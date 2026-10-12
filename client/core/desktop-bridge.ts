@@ -23,7 +23,7 @@ export interface TProgress {
 /** 本地提音轨结果：ok 时 opus 在 main 侧（命中音轨缓存=缓存目录；未命中=tmp，upload 流式读后清理） */
 export type ExtractResult =
   | { ok: true; opusPath: string; sizeBytes: number; cached?: boolean }
-  | { ok: false; error: string };
+  | { ok: false; error: string; /** 主任务取消被 kill（行落「跳过」，非失败） */ cancelled?: boolean };
 
 /** 音轨缓存查找结果（main 侧 audio-cache/；videoName 匹配最近条目） */
 export interface AudioCacheHit {
@@ -150,9 +150,11 @@ export interface JavDesktop {
   /** renderer File 的真实磁盘路径（对话框选中的文件；合成文件返回 ""） */
   filePath(f: File): string;
   extractAudio(
-    args: { videoPath?: string; data?: Uint8Array },
+    args: { videoPath?: string; data?: Uint8Array; id?: string },
     onProgress?: (frac: number) => void,
   ): Promise<ExtractResult>;
+  /** 终止在跑本机提取（主任务取消）；ok=false=无匹配任务 */
+  extractAudioCancel(id: string): Promise<{ ok: boolean; error?: string }>;
   /** 音轨缓存（按影片文件名查最近条目；无则 null） */
   audioCache: {
     find(videoName: string): Promise<AudioCacheHit | null>;

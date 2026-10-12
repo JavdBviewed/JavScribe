@@ -201,7 +201,56 @@ try {
   }
   console.log("ok 9 - normalizeClientConfig 值域钳制/默认回落");
 
-  console.log("concurrency.test: 9/9 组断言全过");
+  // ---------- 池 hooks（onQueue/onStart）：UI 状态与真实并发对齐 ----------
+  {
+    const p = createPool(() => 1);
+    const events = [];
+    let releaseA;
+    const gateA = new Promise((res) => { releaseA = res; });
+    const pa = p.run(async () => { events.push("a:run"); await gateA; }, { onStart: () => events.push("a:start") });
+    const pb = p.run(async () => { events.push("b:run"); }, {
+      onQueue: (ahead) => events.push(`b:queue:${ahead}`),
+      onStart: () => events.push("b:start"),
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    // 契约：拿到槽的任务有 onStart 且先于 task 执行；等槽任务有 onQueue（ahead=前方等待数）且不占槽
+    const q = events.filter((e) => e.startsWith("b:queue"));
+    assert.deepEqual(q, ["b:queue:0"], "b 入队一次且 ahead=0");
+    assert.equal(events.filter((e) => e.startsWith("a:queue")).length, 0, "a 立即拿到槽，无 onQueue");
+    assert.equal(p.active(), 1, "b 等待不占槽");
+    assert.ok(events.indexOf("a:start") >= 0 && events.indexOf("a:start") < events.indexOf("a:run"), "a 先 onStart 再执行");
+    releaseA("done");
+    await Promise.all([pa, pb]);
+    assert.ok(events.indexOf("b:start") < events.indexOf("b:run"), "槽释放后 b 先 onStart 再执行");
+    assert.equal(p.active(), 0);
+  }
+  console.log("ok 10 - pool hooks onQueue/onStart 时序");
+
+  // 不传 hooks：旧行为逐字回归（无回调、并发不变）
+  {
+    const p = createPool(() => 1);
+    let running = 0, maxRunning = 0;
+    const gates = []; // task 执行时才注册（排队中的任务拿不到 gate）
+    const mk = () => () => new Promise((res) => {
+      running++; maxRunning = Math.max(maxRunning, running);
+      gates.push(() => { running--; res("done"); });
+    });
+    const pa = p.run(mk());
+    const pb = p.run(mk());
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(running, 1, "不传 hooks：cap=1 串行（仅 a 在跑）");
+    assert.equal(gates.length, 1, "b 排队中未执行");
+    gates[0](); // 放 a → 释槽 → b 补位开跑
+    for (let i = 0; i < 200 && gates.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(gates.length, 2, "b 拿到槽后开跑");
+    assert.equal(running, 1, "b 开跑时 a 已收口");
+    gates[1]();
+    await Promise.all([pa, pb]);
+    assert.equal(maxRunning, 1, "不传 hooks：并发不变");
+  }
+  console.log("ok 11 - pool 不传 hooks 旧行为回归");
+
+  console.log("concurrency.test: 11/11 组断言全过");
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }

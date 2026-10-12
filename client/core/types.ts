@@ -108,6 +108,8 @@ export interface JobRow {
   dispatch_pending?: boolean;
   /** pending 行的稳定 key（无 job_id / created 会重建，供勾选、patch、取消定位） */
   pkey?: string;
+  /** 主任务暂停前的状态备份（「继续」时还原；renderer 态字段） */
+  _prevStatus?: string;
 }
 
 /** GET /api/uploads/{id}：提取→派发 两阶段任务 */
