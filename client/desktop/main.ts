@@ -1819,6 +1819,17 @@ function registerIpc(): void {
     }
   });
 
+  // 写回幂等预检：影片同目录目标 srt 是否已存在（只读探测；与 write-srt 同口径的路径安全校验）
+  ipcMain.handle("srt-exists", (_ev, args: { videoPath: string; srtName: string }) => {
+    try {
+      const videoPath = String(args.videoPath || "");
+      const srtName = String(args.srtName || "");
+      if (!videoPath || !srtName) return false;
+      if (srtName.includes("/") || srtName.includes("\\")) return false;
+      return fs.existsSync(path.join(path.dirname(videoPath), srtName));
+    } catch { return false; }
+  });
+
   // 原生对话框
   ipcMain.handle("pick-video-file", async () => {
     const r = await dialog.showOpenDialog(win as BrowserWindow, {

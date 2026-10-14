@@ -29,6 +29,9 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
   writeSrt: (videoPath: string, srtName: string, data: Uint8Array) =>
     ipcRenderer.invoke("write-srt", { videoPath, srtName, data }) as Promise<FileOpResult>,
 
+  srtExists: (videoPath: string, srtName: string) =>
+    ipcRenderer.invoke("srt-exists", { videoPath, srtName }) as Promise<boolean>,
+
   download: (url: string, filename: string) =>
     ipcRenderer.invoke("download-srt", { url, filename }) as Promise<FileOpResult>,
 

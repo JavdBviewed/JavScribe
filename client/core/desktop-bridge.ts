@@ -145,6 +145,8 @@ export interface JavDesktop {
   /** 字幕预览读文件（main 侧校验字幕扩展名/≤2MB）；失败 throw */
   readSrt(p: string): Promise<{ path: string; name: string; size_mb: number; text: string }>;
   writeSrt(videoPath: string, srtName: string, data: Uint8Array): Promise<FileOpResult>;
+  /** 幂等预检：影片同目录目标 srt 是否已存在（main 侧只读探测，不落盘） */
+  srtExists(videoPath: string, srtName: string): Promise<boolean>;
   /** srt 保存对话框（手动下载 / 自动下载兜底） */
   download(url: string, filename: string): Promise<FileOpResult>;
   /** renderer File 的真实磁盘路径（对话框选中的文件；合成文件返回 ""） */

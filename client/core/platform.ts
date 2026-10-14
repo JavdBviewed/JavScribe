@@ -64,6 +64,8 @@ export interface PlatformAdapter {
    * 返回 false = 失败，由调用方回退自动下载；抛错时 err.name/err.message 用于文案。
    */
   writeSrt(info: WriteBackInfo, srtName: string, data: ArrayBuffer): Promise<boolean>;
+  /** 幂等预检：影片同目录目标 srt 是否已存在（web 无 dirHandle / desktop 无 videoPath 恒 false） */
+  srtExists(info: WriteBackInfo, srtName: string): Promise<boolean>;
   /** 触发"保存/下载 srt"（web: <a download> 点击；desktop: 保存对话框） */
   downloadSrt(url: string, filename: string): void;
   /**

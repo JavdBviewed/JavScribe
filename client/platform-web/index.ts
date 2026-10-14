@@ -82,6 +82,16 @@ export const webPlatform: PlatformAdapter = {
     return true;
   },
 
+  async srtExists(info, srtName) {
+    if (!info.dirHandle) return false;
+    try {
+      await info.dirHandle.getFileHandle(srtName); // 不传 create：只探测
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   downloadSrt(url, filename) {
     const a = document.createElement("a");
     a.href = url;

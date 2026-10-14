@@ -8,8 +8,9 @@ import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineM
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, normalizeClientConfig } from "../core/concurrency";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
+import { pickWriteBackRows } from "../core/writeback";
 import { TransportError } from "../core/transport";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
@@ -64,7 +65,7 @@ interface AppState {
   ccfg: ClientConfig | null;    // S4：客户端并发设置（热重载：refresh 读回 + 本端保存即时应用）
   autoSave: boolean;
   writeBackJobs: Map<string, WriteBackInfo>; // jobKey(engine|job_id) -> { engine, videoName, dirHandle|null }
-  watchWriteBack: Set<string>;          // watch 派发任务完成后强制写回（不受 autoSave 门控；仅 desktop 会写入）
+  watchWriteBack: Set<string>;          // 本地源派发任务完成后强制写回（不受 autoSave 门控；desktop：watch/扫描/选择文件夹/单文件/换服务重跑）
   _fsFileDir: FileSystemDirectoryHandle | null; // 当前单文件所选目录句柄（File System Access API，用于写回源目录）
 }
 
@@ -282,6 +283,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const sh = $("scan-help") as HTMLElement | null;
     if (sh) sh.dataset.tip =
       "扫描这台电脑上的目录。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理另一台电脑里的文件，请改用「选择文件 / 选择文件夹」。";
+    // autosave 说明桌面措辞（10-13-javscribe-client-writeback-guard F1）：本地源任务强制写回不受开关门控
+    const ah = document.querySelector(".autosave-chk .help") as HTMLElement | null;
+    if (ah) ah.dataset.tip =
+      "桌面端：本地源任务（选择文件 / 选择文件夹、扫描目录、监听目录、换服务重跑）完成后一律自动写回影片旁，不受本开关控制；写回失败时改为自动下载（保存对话框）。本开关仅控制无本地路径的文件（如拖入）：勾选后完成时弹保存对话框另存 srt。";
   }
   const modalX = $("modal-x");
   const modalBackdrop = $("modal-backdrop");
@@ -306,16 +311,35 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (r.status === "done") maybeWriteBack(r);
       }
     }
+    // F2 对账兜底（10-13-javscribe-client-writeback-guard）：快任务（首见即 done）/ 客户端重启后
+    //（knownJobs 内存态，首见 prev=undefined）running→done 转换不可观测 → 每轮对「已登记且过门的
+    // done 行」对账式触发写回；幂等：maybeWriteBack 触发即消费登记，成功后不再命中
+    for (const r of pickWriteBackRows(rows, {
+      autoSave: state.autoSave,
+      registered: new Set(state.writeBackJobs.keys()),
+      forced: state.watchWriteBack,
+    })) maybeWriteBack(r);
     for (const k of [...state.knownJobs.keys()]) if (!seen.has(k)) state.knownJobs.delete(k);
   }
 
-  // ---------- 完成后写回源目录（auto-save）：任务 running→done 时触发 ----------
+  // 本地源派发登记收口（10-13-javscribe-client-writeback-guard F1）：writeBackJobs（写回登记）
+  // +（desktop 且有本地路径）watchWriteBack（强制写回集）。desktop 本地源任务（扫描/选择文件夹/
+  // watch/单文件/换服务重跑）完成后一律写回影片旁，不受 autoSave 门控；autoSave 开关仅继续
+  // 控制无本地源场景（web 形态 / desktop 拖入文件）既有行为，本线不改 web 语义。
+  function registerWriteBack(key: string, info: WriteBackInfo): void {
+    state.writeBackJobs.set(key, info);
+    if (platform.kind === "desktop" && info.videoPath) state.watchWriteBack.add(key);
+  }
+
+  // ---------- 完成后写回源目录（auto-save）：running→done 即时分支 + reconcile 对账兜底触发 ----------
   function maybeWriteBack(r: JobRow) {
     if (!r.job_id) return;
     const key = r.engine + "|" + r.job_id;
     const info = state.writeBackJobs.get(key);
     if (!info) return;
-    // autoSave 门控：watch 派发的任务在 watchWriteBack 里登记，完成后必须写回（语义上就是「落回影片旁」）
+    // 门控：本地源派发任务（desktop：watch/扫描/选择文件夹/单文件/换服务重跑）在 watchWriteBack
+    // 登记，完成后一律写回影片旁（不受 autoSave 门控）；autoSave 开关仅控制无本地源场景
+    //（web 自动下载 srt 等）既有行为
     if (!state.autoSave && !state.watchWriteBack.has(key)) return;
     state.writeBackJobs.delete(key);
     state.watchWriteBack.delete(key);
@@ -326,6 +350,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   async function doWriteBack(r: JobRow, info: WriteBackInfo) {
     const srtName = info.videoName.replace(/\.[^.]+$/, "") + SRT_SUFFIX;
     try {
+      // 幂等预检（10-13-javscribe-client-writeback-guard）：目标 srt 已存在（重复触发 / 用户已
+      // 手动放到影片旁）→ 跳过不覆盖；登记已由 maybeWriteBack 消费（跳过并清理登记）
+      if (await platform.srtExists(info, srtName)) {
+        toast(`「${info.videoName}」字幕已存在（${srtName}），跳过写回`, "");
+        return;
+      }
       let data: ArrayBuffer | null = null;
       for (let i = 0; i < 5 && !data; i++) {
         data = await t.getResultData(r.engine, r.job_id!);
@@ -2007,7 +2037,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     try {
       const d = await t.retryJob(eng, jid);
       const oldInfo = state.writeBackJobs.get(eng + "|" + jid);
-      if (oldInfo) state.writeBackJobs.set(eng + "|" + d.jobId, oldInfo);
+      if (oldInfo) {
+        state.writeBackJobs.set(eng + "|" + d.jobId, oldInfo);
+        // 强制写回标记随重跑迁移（否则本地源任务点「重试/重新生成」后新 job_id 丢标记 → F1 复发）
+        if (state.watchWriteBack.has(eng + "|" + jid)) state.watchWriteBack.add(eng + "|" + d.jobId);
+      }
       toast(isErrRetry
         ? `「${name}」已重新入队 → 任务 ${d.jobId}`
         : `「${name}」已删旧字幕并重新提交 → 任务 ${d.jobId}`, "ok");
@@ -2988,17 +3022,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return state.ccfg?.queue_cap ?? CLIENT_CFG_DEFAULTS.queue_cap;
   }
 
-  /** auto 派发时刻解析：在线且参与均衡的服务里选在途最少者；平手按注册序取首个
-   *  （稳定即可，不复制工作台的同负载轮转——客户端在途记账粒度下同义）。无候选返 null */
+  /** auto 派发时刻解析（显存感知，10-13-javscribe-client-writeback-guard F3④）：
+   *  在线且参与均衡的服务里，先按最近 metrics 采样的空闲显存过滤（< MIN_FREE_VRAM_GB 不作候选；
+   *  无数据视为满足不过滤），再选在途最少者（平手注册序）；显存过滤后候选全空 → 回退在途最少
+   *  保证不卡派发。无候选返 null。决策纯函数在 core/concurrency.pickAutoEngine（单测）。 */
   function resolveAutoEngine(): string | null {
-    let best: string | null = null;
-    let bestN = Infinity;
-    for (const e of state.engines) {
-      if (!e.online || e.enabled === false) continue;
-      const n = inFlightOf(e.name);
-      if (n < bestN) { best = e.name; bestN = n; }
-    }
-    return best;
+    return pickAutoEngine(state.engines, {
+      inFlight: inFlightOf,
+      freeVramOf: (name) => {
+        const m = state._metrics[name];
+        if (!m || !m.ok || !m.metrics) return null;
+        return freeVramGb(m.metrics.gpu ?? null);
+      },
+    });
   }
 
   function canDispatch(engine: string): boolean {
@@ -3075,7 +3111,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     dispatchTracked(file, engine).then(([ok, d]) => {
       if (ok) {
         const up = d as UploadStatus;
-        state.writeBackJobs.set(engine + "|" + up.job_id, {
+        registerWriteBack(engine + "|" + up.job_id, {
           engine, videoName: file.name, dirHandle: state._fsFileDir || null,
           videoPath: (file as FolderFile)._localPath || null,
         });
@@ -3160,7 +3196,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             okN++;
             const up = d as UploadStatus;
             if (up.job_id) {
-              state.writeBackJobs.set(real + "|" + up.job_id, {
+              registerWriteBack(real + "|" + up.job_id, {
                 engine: real, videoName: file.name, dirHandle: file._dirHandle || null,
                 videoPath: file._localPath || null,
               });
@@ -3606,7 +3642,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           else await new Promise((r) => setTimeout(r, 300));
         }
         if (!jobId) throw new Error("提交接受超时（可在任务表查看）");
-        state.writeBackJobs.set(eng + "|" + jobId, {
+        registerWriteBack(eng + "|" + jobId, {
           engine: eng, videoName, dirHandle: null, videoPath: h.videoPath,
         });
         hideModal();
@@ -4442,7 +4478,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (d.files > 0) {
         toast(d.jobId
           ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
-          : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`, "ok");
+          : platform.kind === "desktop"
+            ? `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`
+            : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进`, "ok");
       }
       state.scanItems = [];
       state.scanChecked = new Set();
@@ -4570,8 +4608,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const up = d as UploadStatus;
             if (ok && up.job_id) {
               const k = engine + "|" + up.job_id;
-              state.writeBackJobs.set(k, { engine, videoName: it.name, dirHandle: null, videoPath: it.path });
-              state.watchWriteBack.add(k); // 完成后强制写回影片同目录（不受 autoSave 门控）
+              registerWriteBack(k, { engine, videoName: it.name, dirHandle: null, videoPath: it.path }); // 完成后强制写回影片同目录（不受 autoSave 门控）
               void b.markProcessed(it.path).catch(() => {});
               toast(`监听 · ${it.name} 已提交 → 任务 ${up.job_id}`, "ok");
             } else {

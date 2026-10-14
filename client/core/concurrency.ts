@@ -6,7 +6,8 @@
 //   - normalizeClientConfig → 并发设置值域钳制（与 web 工作台 /api/client-config、desktop
 //                             userData/client-config.json 的 clamp 口径一致：1..8 / 1..16）
 
-import type { ClientConfig } from "./types";
+import type { ClientConfig, EngineMetricsGpu } from "./types";
+import { MIN_FREE_VRAM_GB } from "./constants";
 
 /** 终态集（与 app.ts rowBucket 终态口径一致）：到终态才释放在途槽。 */
 export const TERMINAL_JOB_STATUSES: ReadonlySet<string> = new Set(["done", "skipped", "error", "canceled"]);
@@ -165,4 +166,59 @@ export function createPool(limitOf: () => number): WorkerPool {
       return waiters.length;
     },
   };
+}
+
+// ---------- auto 派发显存感知（10-13-javscribe-client-writeback-guard F3④；单测见 client/tests/unit/auto-engine.test.mjs） ----------
+// 背景：run10 A4 实锤——auto 均衡只看「在途最少」，把任务发到显存不足的服务
+//（158 空闲 9.3G 仍收 2 并发 → 后起进程 CUDA OOM）。显存数据已有（/metrics/json 采样，
+// 看板「显存 used/totalG」同源），派发侧用它过滤无谓命中；服务端预检是兜底（另线）。
+
+/**
+ * 某服务最近一次 metrics 采样的空闲显存（GB）：
+ *  - null = 无数据（旧版 serve 无 /metrics/json、未采样、无 GPU、字段缺失）→ 调用方视为「满足」不过滤；
+ *  - 否则 (mem_total_mb - mem_used_mb) / 1024。
+ */
+export function freeVramGb(gpu: EngineMetricsGpu | null | undefined): number | null {
+  if (!gpu) return null;
+  if (typeof gpu.mem_used_mb !== "number" || typeof gpu.mem_total_mb !== "number") return null;
+  if (!Number.isFinite(gpu.mem_used_mb) || !Number.isFinite(gpu.mem_total_mb)) return null;
+  return (gpu.mem_total_mb - gpu.mem_used_mb) / 1024;
+}
+
+/**
+ * auto 派发时刻解析（显存感知）：
+ *  - 候选 = 在线且参与均衡（enabled !== false）；
+ *  - 显存过滤：最近采样空闲显存 < minFreeVramGb → 不作候选；无数据（null）视为满足、不过滤；
+ *  - 剩余候选按在途最少取胜，平手按注册序取首个（稳定即可）；
+ *  - 显存过滤后候选全空但原候选非空 → 回退「在途最少」（原逻辑），保证不卡派发。
+ */
+export function pickAutoEngine(
+  engines: readonly EngineLite[],
+  opts: {
+    inFlight: (name: string) => number;
+    /** 显存阈值（GB）；缺省 MIN_FREE_VRAM_GB */
+    minFreeVramGb?: number;
+    /** 某服务最近 metrics 采样空闲显存（GB）；null/缺省 = 无数据不过滤 */
+    freeVramOf?: (name: string) => number | null;
+  },
+): string | null {
+  const minGb = typeof opts.minFreeVramGb === "number" && Number.isFinite(opts.minFreeVramGb) && opts.minFreeVramGb > 0
+    ? opts.minFreeVramGb
+    : MIN_FREE_VRAM_GB;
+  const freeVram = opts.freeVramOf || ((_n: string): number | null => null);
+  const cands = engines.filter((e) => e.online && e.enabled !== false);
+  const pickMin = (list: readonly EngineLite[]): string | null => {
+    let best: string | null = null;
+    let bestN = Infinity;
+    for (const e of list) {
+      const n = opts.inFlight(e.name);
+      if (n < bestN) { best = e.name; bestN = n; }
+    }
+    return best;
+  };
+  const vramOk = cands.filter((e) => {
+    const f = freeVram(e.name);
+    return f == null || f >= minGb;
+  });
+  return pickMin(vramOk) ?? pickMin(cands);
 }
