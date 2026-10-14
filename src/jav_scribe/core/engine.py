@@ -36,10 +36,37 @@ from .subprobe import probe_embedded_subs, should_skip_embedded
 from .log_parser import LogParser
 from .polish import PolishConfig, polish_srt
 from .proc_runner import ProcRunner
+from .vram import gpu_free_vram_gb
 from .rtf import RtfHistory
 from .task import TERMINAL_STATUSES, Job, Task, TaskPhase, TaskStatus, new_job_id
 
 LogFn = Callable[[str], None]
+
+# ---------------------------------------------------------------------------
+# OOM 签名识别（A：可读提示，serve 0.2.12）
+#
+# 引擎进程被显存不足终止时，stderr 必含下列签名之一（不区分大小写；
+# 现场铁证：158 并发 2 个 large-v2 同时驻显存，后起进程
+# "RuntimeError: CUDA failed with error out of memory"）。serve 捕获 stderr
+# 按行识别，命中的文件落 Task.oom，供可读文案（A）与自动重试（C）判定。
+# serve 日志保留原 traceback（stderr 原样透传，不动）。
+# ---------------------------------------------------------------------------
+OOM_SIGNATURES: tuple[str, ...] = (
+    "cuda failed with error out of memory",
+    "runtimeerror: cuda",
+    "out of memory",
+)
+
+OOM_MESSAGE = (
+    "GPU 显存不足（CUDA OOM）：转译进程被显存不足终止；"
+    "可等待同服务其它任务结束后重试，或降低服务端并发"
+)
+
+
+def looks_like_oom(text: str) -> bool:
+    """引擎 stderr 单行是否命中 OOM 签名（不区分大小写）。"""
+    low = text.lower()
+    return any(sig in low for sig in OOM_SIGNATURES)
 
 # Live sub-phase model (per task, driven by infer log events + a 1s ticker).
 # ChickenRice dumps all segment lines only when transcribe() finishes, so the
@@ -84,6 +111,7 @@ def job_from_dict(d: dict) -> "Job | None":
                     position_s=f.get("position_s"),
                     started=f.get("started"),
                     finished=f.get("finished"),
+                    oom=bool(f.get("oom", False)),
                 )
             )
         if not files or "id" not in d:
@@ -97,6 +125,7 @@ def job_from_dict(d: dict) -> "Job | None":
             label=str(d.get("label", "") or ""),
             cancel_requested=bool(d.get("cancel_requested", False)),
             paused=bool(d.get("paused", False)),
+            auto_retries=int(d.get("auto_retries") or 0),
             batch_id=d.get("batch_id"),  # 旧 jobs.json 条目无此字段 → None（天然兼容）
             batch_label=d.get("batch_label"),
         )
@@ -185,6 +214,39 @@ class Engine:
         except (TypeError, ValueError):
             v = 1
         return max(1, min(4, v))
+
+    @property
+    def vram_per_instance_gb(self) -> float:
+        """B 预检阈值：已有 ≥1 个推理进程在跑时，起新进程要求的最低 GPU 空闲显存（GB）。
+
+        取值依据：large-v2 int8 单实例驻留约 5G + 激活波动，12G 为单实例安全
+        边际；9.3G 空闲的 158 下预检自动把第 2 并发排队（等效串行），
+        22G 空闲的 127 下双并发照常。serve 0.2.12 新增键（默认 12）：
+        不展示于设置 UI（power user 可经 PUT /config 热调，对新派发生效）。
+        """
+        try:
+            v = float(self.cfg.get("infer", {}).get("vram_per_instance_gb", 12))
+        except (TypeError, ValueError):
+            v = 12.0
+        return max(1.0, v)
+
+    def _vram_gate_open(self) -> bool:
+        """B 预检：已有在跑推理进程时，新进程是否具备显存条件。
+
+        True = 可启动；False = 空闲显存低于阈值，该槽等待（job 留 pending，
+        在途任务结束 _release_slot 触发 _drain_pending 时自然补位）。
+        无 nvidia-smi / 查询失败 / 无 GPU 环境 → 不阻断（降级现状，记一条日志）。
+        调用方须已持有 _sched_lock（workers 计数与派发同临界区）。
+        """
+        need = self.vram_per_instance_gb
+        free = gpu_free_vram_gb()
+        if free is None:
+            self.log(f"[engine] 显存预检降级：nvidia-smi 不可用或查询失败，按现状启动（阈值 {need:g}G）")
+            return True
+        if free < need:
+            self.log(f"[engine] 显存预检：空闲 {free:.1f}G < {need:g}G，新转译任务排队等待在途显存释放")
+            return False
+        return True
 
     @property
     def coalesce_max_jobs(self) -> int:
@@ -651,10 +713,15 @@ class Engine:
         try:
             self._pipeline(job)
         finally:
-            job.finished = time.time()
-            self._count_terminals([job])
-            self._save_jobs()
-            self.log(f"[engine] ===== 任务 {job.id} 结束 =====")
+            # C：job 被 OOM 自动重试重排队首时不做终态收尾（finished/统计/落盘）——
+            # 它还在途，由重派发的那一轮收尾（统计计数按 job.id:序号 幂等去重）
+            with self._sched_lock:
+                requeued = job in self._pending_jobs
+            if not requeued:
+                job.finished = time.time()
+                self._count_terminals([job])
+                self._save_jobs()
+                self.log(f"[engine] ===== 任务 {job.id} 结束 =====")
             self._release_slot()
 
     def _release_slot(self) -> None:
@@ -691,6 +758,11 @@ class Engine:
                     job = cand
                     break
                 if job is None:
+                    return
+                # B 预检：仅当已有 ≥1 个在跑推理进程时查显存（首开不查询直接启动）；
+                # 不足 → 该槽不启动，job 留 pending，在途结束补派时自然重试
+                if self._workers and not self._vram_gate_open():
+                    self._pending_jobs.insert(0, job)
                     return
                 w = threading.Thread(target=self._run_job, args=(job,), daemon=True)
                 self._workers.append(w)
@@ -849,6 +921,11 @@ class Engine:
                 self._process_one(j, task, lang, batch=batch)
             with self._inflight_lock:
                 self._inflight_files.discard(task.path.resolve())
+        # C：OOM 一次自动重试（serve 0.2.12）——本轮 OOM 失败的文件重回 PENDING、
+        # job 回队首，由 _drain_pending 重新派发（受 B 预检/并发度约束）；
+        # 重排成立时跳过 polish/emby/收尾，worker 仅释放槽位（见 _run_job finally）。
+        if self._maybe_oom_retry(job, extra_jobs):
+            return
         for j in (job, *extra_jobs):
             self._polish_job(j)
             self._emby_job(j)
@@ -858,6 +935,55 @@ class Engine:
                 self._count_terminals([j])
                 self._save_jobs()
                 self.log(f"[engine] ===== 任务 {j.id} 结束（coalesce 并入 {job.id}） =====")
+
+    def _maybe_oom_retry(self, job: Job, extra_jobs: list[Job]) -> bool:
+        """C：OOM 一次自动重试（serve 0.2.12，E4 验证路径的服务端内化）。
+
+        本轮推理进程退出且失败文件命中 OOM 签名时，把文件重回 PENDING、
+        job 回队首，由 _drain_pending 重新派发（受 B 预检/并发度约束，
+        peer 仍在跑时自然排队——peer 结束后单跑重试天然成功）。
+
+        每 job 上限 1 次（auto_retries 计数落 job 记录，防循环）；
+        重试耗尽仍 OOM → 终态失败 + A 的可读文案。
+        取消/停止/挂起/batch 暂停 → 不重试（终态/暂停语义优先）。
+        返回 True = 已重排（调用方必须跳过收尾）。
+        """
+        now = time.time()
+        retry: list[Job] = []
+        for j in (job, *extra_jobs):
+            if not any(t.status == TaskStatus.ERROR and t.oom for t in j.files):
+                continue
+            if j.auto_retries >= 1:
+                continue  # 重试耗尽：终态失败（A 文案已就位）
+            if j.cancel_requested or self._stop_evt.is_set():
+                continue
+            if j.paused or (j.batch_id is not None and j.batch_id in self._batch_paused):
+                continue  # 暂停语义优先：挂起中不自动重试
+            retry.append(j)
+        if not retry:
+            return False
+        with self._sched_lock:
+            for j in retry:
+                j.auto_retries += 1
+                n = 0
+                for t in j.files:
+                    if t.status == TaskStatus.ERROR and t.oom:
+                        t.status = TaskStatus.PENDING
+                        t.oom = False
+                        t.phase = TaskPhase.QUEUED
+                        t.progress = 0.0
+                        t.message = "显存不足，自动重试中"
+                        t.phase_detail = "显存不足，自动重试中"
+                        t.live_phase = "preparing"
+                        t.live_phase_started = now
+                        t.eta_s = None
+                        t.output_files = []
+                        t.finished = None
+                        n += 1
+                self._pending_jobs.insert(0, j)
+                self.log(f"[engine] 任务 {j.id} 显存不足，自动重试中（第 {j.auto_retries}/1 次，{n} 个文件重回队列）")
+        self._save_jobs()
+        return True
 
     # ------------------------------------------------------------------
     # Stage 1: optional restore
@@ -910,7 +1036,7 @@ class Engine:
             parts = [p.replace("{out}", shlex.quote(str(out))) for p in parts]
         else:
             parts.append(str(out))  # default: last arg = output path
-        ok = self._run_command(
+        ok, _code = self._run_command(
             parts,
             on_line=lambda l: self.log(f"  [jasna] {l}"),
             on_progress=lambda p: setattr(task, "progress", p),
@@ -1003,10 +1129,12 @@ class Engine:
         # 日志解析与「当前文件」指针是 job 级私有的（并发 worker 互不串扰）
         parser = LogParser()
         cur: dict = {"t": None}
-        shared = {"transcribe_started": None, "model_loaded": False}
+        shared = {"transcribe_started": None, "model_loaded": False, "oom_lines": []}
 
         def on_line(line: str) -> None:
             self.log(f"  [infer] {line}")
+            if looks_like_oom(line):
+                shared["oom_lines"].append(line)
             evt = parser.feed(line)
             t = self._match_task(evt.file_path, evt.file_idx, todo, cur)
             if evt.kind == "file_start":
@@ -1079,9 +1207,11 @@ class Engine:
         self._model_up()
         # 单任务：任一取消即杀进程（现状）；合并批：全部 Job 都取消才终止，
         # 单个被取消 Job 不得杀整个进程（R2）
-        ok = self._run_command(cmd, cwd=cwd, on_line=on_line,
-                               stop_check=lambda: all(j.cancel_requested for j in jobs))
+        ok, code = self._run_command(cmd, cwd=cwd, on_line=on_line,
+                                     stop_check=lambda: all(j.cancel_requested for j in jobs))
         self._model_down()  # 推理进程已退出，模型随进程释放
+        if shared["oom_lines"]:
+            self.log(f"[engine] 检测到 CUDA OOM 签名（{len(shared['oom_lines'])} 行），按 OOM 语义处理失败文件")
         if not ok:
             for t in todo:
                 j = job_of[id(t)]
@@ -1095,7 +1225,15 @@ class Engine:
                         t.message = "已取消" if j.cancel_requested else "服务停止"
                     else:
                         t.status = TaskStatus.ERROR
-                        t.message = t.message or "引擎退出非零"
+                        if shared["oom_lines"]:
+                            # A：OOM 可读文案（含「显存不足」与「重试」要素）
+                            t.oom = True
+                            t.message = OOM_MESSAGE
+                        else:
+                            # 未命中 OOM 签名：保持原兜底（附退出码便于排障）
+                            t.message = t.message or (
+                                f"引擎退出非零（退出码 {code}）" if code is not None else "引擎退出非零"
+                            )
                     t.finished = time.time()
         self._record_rtf(todo, shared["transcribe_started"])
 
@@ -1317,7 +1455,7 @@ class Engine:
         on_progress: Optional[Callable[[float], None]] = None,
         timeout: float | None = None,
         stop_check: Optional[Callable[[], bool]] = None,
-    ) -> bool:
+    ) -> tuple[bool, int | None]:
         # 并发 worker 各自持有 ProcRunner 与退出码（不再用引擎级单例）
         exit_box: dict = {"code": None}
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -1333,7 +1471,7 @@ class Engine:
             self._active_runners.add(runner)
         try:
             if not runner.start():
-                return False
+                return False, exit_box["code"]
             start = time.time()
             while runner.running:
                 runner.wait(1.0)
@@ -1348,7 +1486,8 @@ class Engine:
                     self.log("[engine] 收到取消，终止子进程")
                     runner.stop()
                     break
-            return exit_box["code"] in (0, None)
+            code = exit_box["code"]
+            return code in (0, None), code
         finally:
             with self._runners_lock:
                 self._active_runners.discard(runner)

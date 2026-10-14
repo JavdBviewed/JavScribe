@@ -116,6 +116,7 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("infer.model", "字幕模型", "string", None, False),
     ("infer.concurrency", "转译并发数", "int", None, False),
     ("infer.coalesce_max_jobs", "合并批任务数（模型复用）", "int", None, False),
+    ("infer.vram_per_instance_gb", "单实例显存预检阈值（GB）", "int", None, False),
     ("infer.log_level", "日志级别", "enum", ["DEBUG", "INFO", "WARNING", "ERROR"], False),
     ("infer.batch", "批量推理", "bool", None, False),
     ("infer.max_batch_size", "批处理大小", "int", None, False),
@@ -144,6 +145,10 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
 ]
 
 CONFIG_SPEC = {path: (label, ftype, options, secret) for path, label, ftype, options, secret in CONFIG_ITEMS}
+
+# 服务端内部键：可经 PUT /config 热调（power user / 运维排障），但不出现在客户端
+# 设置页（build_config_view 动态渲染全量 items，隐藏须服务端做）。
+UI_HIDDEN_CONFIG_PATHS: frozenset[str] = frozenset({"infer.vram_per_instance_gb"})
 
 # 每项的帮助文案（客户端「服务设置」? 图标悬浮展示；旧客户端忽略该字段）
 CONFIG_HINTS: dict[str, str] = {
@@ -243,6 +248,8 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
                 raise ConfigError(f"{path} 最大 4")
             if path == "infer.coalesce_max_jobs" and value > 50:
                 raise ConfigError(f"{path} 最大 50")
+            if path == "infer.vram_per_instance_gb" and value > 512:
+                raise ConfigError(f"{path} 最大 512")
             if path == "polish.batch_lines" and value > 1000:
                 raise ConfigError(f"{path} 最大 1000")
             if path == "storage.retention_days" and value > 3650:
@@ -307,6 +314,8 @@ def build_config_view(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Current values for the GET /config view; secret items are masked."""
     items: list[dict[str, Any]] = []
     for path, label, ftype, options, secret in CONFIG_ITEMS:
+        if path in UI_HIDDEN_CONFIG_PATHS:
+            continue
         section, key = path.split(".", 1)
         cur = (cfg.get(section) or {}).get(key)
         if secret:

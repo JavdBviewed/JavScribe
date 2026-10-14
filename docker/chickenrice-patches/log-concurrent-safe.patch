@@ -1,0 +1,37 @@
+diff --git a/src/faster_whisper_transwithai_chickenrice/infer.py b/src/faster_whisper_transwithai_chickenrice/infer.py
+index d56e829..0409e04 100644
+--- a/src/faster_whisper_transwithai_chickenrice/infer.py
++++ b/src/faster_whisper_transwithai_chickenrice/infer.py
+@@ -1333,13 +1333,31 @@ def main():
+     # Add file logging to latest.log in current working directory
+     # This helps users report issues by providing a log file
+     log_file_path = os.path.join(os.getcwd(), "latest.log")
+-    file_handler = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
++    # [JavScribe] mode="a" (was "w"): concurrent transcribe instances share
++    # this working directory, and each FileHandler(mode="w") truncated the
++    # shared file the moment the peer started, destroying in-flight log
++    # lines (JavScribe serve 0.2.12 OOM incident, 158 dual-concurrency).
++    file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+     file_handler.setLevel(logging.DEBUG)
+ 
+     # Add file handler to the module logger
+     logger.addHandler(file_handler)
+ 
++    # [JavScribe] Per-process log file: mode="w" is safe here because the
++    # name is unique per pid. If one instance crashes (e.g. CUDA OOM), its
++    # own file keeps the full log + traceback intact no matter what the
++    # shared latest.log survived; serve can read latest-<pid>.log per proc.
++    try:
++        per_proc_log = os.path.join(os.getcwd(), "latest-{}.log".format(os.getpid()))
++        per_proc_handler = logging.FileHandler(per_proc_log, mode="w", encoding="utf-8")
++        per_proc_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
++        per_proc_handler.setLevel(logging.DEBUG)
++        logger.addHandler(per_proc_handler)
++        logger.info(_("info.logging_to_file").format(path=per_proc_log))
++    except OSError:
++        pass  # best-effort extra handler; shared handler above is primary
++
+     logger.info(_("info.logging_to_file").format(path=log_file_path))
+     logger.info(_("info.program_version").format(version="v1.9"))
+     logger.info(_("info.python_version").format(version=sys.version))

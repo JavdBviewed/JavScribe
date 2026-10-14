@@ -55,6 +55,7 @@ class Task:
     last_progress_at: float | None = None  # 最后一个真实片段位置时刻
     started: float | None = None
     finished: float | None = None
+    oom: bool = False  # 转译失败时命中 CUDA OOM 签名（serve 0.2.12：可读提示/自动重试依据）
 
     @property
     def source(self) -> Path:
@@ -78,6 +79,7 @@ class Task:
             "output_files": [str(p) for p in self.output_files],
             "started": self.started,
             "finished": self.finished,
+            "oom": self.oom,
         }
 
 
@@ -92,6 +94,7 @@ class Job:
     cancel_requested: bool = False  # 用户取消：排队任务立即收尾，运行任务由各检查点协作中止
     paused: bool = False  # 用户挂起：仅排队任务可挂起，恢复后重新排队
     committed: bool = False  # 运行时：已越过开跑门（pause 与 commit 同锁互斥的权威位）
+    auto_retries: int = 0  # OOM 自动重试次数（serve 0.2.12：上限 1，防循环）
     batch_id: str | None = None  # 主任务（batch）归属：扫描/文件夹上传时客户端生成（None=单文件不套壳）
     batch_label: str | None = None  # 主任务展示标签（客户端生成，如公共父目录名）
 
@@ -126,6 +129,7 @@ class Job:
             "canceled": sum(1 for t in self.files if t.status == TaskStatus.CANCELED),
             "cancel_requested": self.cancel_requested,
             "paused": self.paused,
+            "auto_retries": self.auto_retries,
             "batch_id": self.batch_id,
             "batch_label": self.batch_label,
             "state": "running" if not self.done else "finished",
