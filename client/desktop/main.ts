@@ -405,6 +405,10 @@ interface EngineInfo {
   jobs_running: number;
   error: string | null;
   batch_paused: string[];
+  /** serve 队列挂起态（/health paused，serve 0.2.3+；老 serve 无字段 → false） */
+  paused: boolean;
+  /** serve 累计终态统计（/health stats；老 serve 无字段 → null，统计回退行计数） */
+  stats: { done: number; skipped: number; failed: number } | null;
   _details: any[];
 }
 interface Snapshot { engines: EngineInfo[]; at: number; }
@@ -453,6 +457,14 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       batch_paused: Array.isArray(h.data.batch_paused)
         ? h.data.batch_paused.filter((x: unknown): x is string => typeof x === "string")
         : [],
+      paused: h.data.paused === true,
+      stats: h.data.stats && typeof h.data.stats === "object"
+        ? {
+            done: Number((h.data.stats as Record<string, unknown>).done) || 0,
+            skipped: Number((h.data.stats as Record<string, unknown>).skipped) || 0,
+            failed: Number((h.data.stats as Record<string, unknown>).failed) || 0,
+          }
+        : null,
       error: null,
       _details: details,
     };
@@ -467,6 +479,8 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       device: prev?.device ?? null,
       jobs_running: 0,
       batch_paused: prev?.batch_paused ?? [],
+      paused: prev?.paused ?? false,
+      stats: prev?.stats ?? null,
       error: String((e as Error)?.message || e).slice(0, 200),
       _details: prev?._details ?? [],
     };
@@ -1622,6 +1636,43 @@ function registerIpc(): void {
           batchesSave();
           return { ok: true };
         }
+        // 全局暂停/继续（桌面版）：本机管线闸立即生效（持久化）+ 扇出所有已登记服务队列
+        //（单服务失败逐条降级不 throw；离线按最近快照预判，与工作台 /api/pause 文案对齐）
+        case "pauseAll": {
+          const want = a0 === "true";
+          pipelineSetPaused(want);
+          const engines: Array<{ engine: string; ok: boolean; paused?: boolean; error?: string }> = [];
+          for (const entry of store.all()) {
+            const snap = lastSnap?.engines.find((e) => e.name === entry.name);
+            if (snap && !snap.online) {
+              engines.push({ engine: entry.name, ok: false, error: "服务离线" });
+              continue;
+            }
+            const headers: Record<string, string> = {};
+            if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
+            try {
+              const r = await httpJson<any>(
+                `${entry.url}/jobs/${want ? "pause" : "resume"}`,
+                { method: "POST", headers, timeoutMs: 5000 },
+              );
+              if (r.status === 200) {
+                const d = r.data as { paused?: unknown } | null;
+                engines.push({ engine: entry.name, ok: true, paused: d?.paused === true });
+              } else if (r.status === 404) {
+                engines.push({ engine: entry.name, ok: false, error: "服务版本过旧，不支持队列暂停" });
+              } else {
+                engines.push({ engine: entry.name, ok: false, error: `服务请求失败: HTTP ${r.status}` });
+              }
+            } catch (e) {
+              engines.push({ engine: entry.name, ok: false, error: `服务不可达: ${(e as Error).message || e}` });
+            }
+          }
+          return { ok: true, data: { ok: true, paused: pipelinePaused, engines } };
+        }
+        // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）
+        case "listJobsSummary": {
+          return { ok: true, data: await jobsSummaryAll() };
+        }
         default:
           return { ok: false, error: "unknown method: " + args?.method };
       }
@@ -1636,8 +1687,9 @@ function registerIpc(): void {
 
   // 本地提音轨：videoPath（本机文件）或 data（无路径的 File 字节，e2e setInputFiles 场景）；
   // id = renderer 生成任务 id（进度按 id 回推，防并行提取互串）
-  ipcMain.handle("extract-audio", (_ev, args: { videoPath?: string; data?: Uint8Array; id?: string }) => {
+  ipcMain.handle("extract-audio", async (_ev, args: { videoPath?: string; data?: Uint8Array; id?: string }) => {
     const id = (args && args.id) || "";
+    await pipelineGateWait(); // 全局暂停闸：暂停期间不开新提取（已开跑阶段不中断）
     return runExtract(args || {}, (frac) => sendToWin("extract-progress", { id, frac }));
   });
 
@@ -1663,6 +1715,7 @@ function registerIpc(): void {
 
   // 音频上传（opus 字节流 → serve /upload?ext=opus，无 key）
   ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
+    await pipelineGateWait(); // 全局暂停闸：暂停期间不提交新任务（先于缓存预检：缓存命中同样会在服务端建任务）
     let opusDir: string | null = null;
     try {
       const entry = engineByName(String(args.engine || ""));
@@ -1729,6 +1782,7 @@ function registerIpc(): void {
 
   // 整片直传（用户显式选「整片直传字幕服务」时的逃生通道；受服务端 MAX_UPLOAD_MB 限制）
   ipcMain.handle("upload-file", async (_ev, args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
+    await pipelineGateWait(); // 全局暂停闸：暂停期间不提交新任务（先于缓存预检：缓存命中同样会在服务端建任务）
     let tmpDir: string | null = null;
     try {
       const entry = engineByName(String(args.engine || ""));
@@ -2340,6 +2394,8 @@ function registerUpdateIpc(): void {
 interface ClientCfgFile {
   extract_workers: number;
   queue_cap: number;
+  /** 管线全局暂停（pauseAll 持久化，重启不丢；与本机闸 pipelinePaused 联动） */
+  pipeline_paused?: boolean;
   // ---- 扫描规则（扁平 scan_* 键，与 web client_config.json 同形；10-08 归位） ----
   scan_video_exts?: string[];
   scan_subtitle_patterns?: string[];
@@ -2378,9 +2434,41 @@ function clientCfgLoad(): ClientCfgFile {
     if (typeof raw.scan_min_size_mb === "number" && Number.isFinite(raw.scan_min_size_mb) && raw.scan_min_size_mb >= 0) {
       out.scan_min_size_mb = raw.scan_min_size_mb;
     }
+    if (typeof raw.pipeline_paused === "boolean") out.pipeline_paused = raw.pipeline_paused;
     return out;
   } catch {
     return { ...CLIENT_CFG_DEFAULTS }; // 无文件/损坏：默认值起步
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 管线全局暂停闸（pauseAll 桌面版）：暂停期间本机管线的新任务（音轨提取 /
+// 音频上传 / 整片上传）在 IPC 入口挂起等待「继续」才执行；语义对齐 web 工作台
+// _pause_gate_wait（不占槽、恢复后续跑）；已开跑的阶段不中断——跑完当前阶段。
+// 状态持久化 client-config.json（pipeline_paused），重启后保持暂停
+// ---------------------------------------------------------------------------
+
+let pipelinePaused = false;
+const pipelineWaiters = new Set<() => void>();
+
+/** 暂停闸：暂停期间挂起等待（循环重查，恢复后自然放行） */
+async function pipelineGateWait(): Promise<void> {
+  while (pipelinePaused) {
+    await new Promise<void>((resolve) => pipelineWaiters.add(resolve));
+  }
+}
+
+/** 置暂停态：翻旗 + 持久化；恢复时先翻旗再唤醒，等待者重查后放行 */
+function pipelineSetPaused(want: boolean): void {
+  if (pipelinePaused === want) return;
+  pipelinePaused = want;
+  const cfg = clientCfgLoad();
+  cfg.pipeline_paused = want;
+  clientCfgSave(cfg);
+  if (!want) {
+    const ws = [...pipelineWaiters];
+    pipelineWaiters.clear();
+    for (const w of ws) w();
   }
 }
 
@@ -2822,6 +2910,42 @@ async function batchOpAll(action: string, bid: string): Promise<unknown> {
   return { ok: true, batch_id: bid, action, engines, local: {} };
 }
 
+/** 看板统计（对齐 web 工作台 /api/jobs/summary）：进行中=当前在途行数 + 本机在跑提取；
+ *  完成/跳过/失败=serve 累计终态 stats（老 serve 无 stats 字段回退行计数） */
+async function jobsSummaryAll(): Promise<unknown> {
+  const s = await refresh();
+  let running = 0, done = 0, skipped = 0, failed = 0;
+  const enginesPaused: Record<string, boolean> = {};
+  for (const e of s.engines) {
+    enginesPaused[e.name] = e.paused;
+    const stats = e.stats;
+    if (stats) {
+      done += stats.done;
+      skipped += stats.skipped;
+      failed += stats.failed;
+    }
+    for (const j of e._details) {
+      if (!j) continue;
+      const files = Array.isArray(j.files) ? j.files : null;
+      const statuses: string[] = files
+        ? files.map((f: unknown) => (f && typeof f === "object" && typeof (f as { status?: unknown }).status === "string"
+            ? (f as { status: string }).status
+            : ""))
+        : [j.state === "finished" ? "done" : "running"];
+      for (const st of statuses) {
+        if (st === "running" || st === "pending") running += 1;
+        else if (!stats) {
+          if (st === "done") done += 1;
+          else if (st === "skipped") skipped += 1;
+          else if (st === "error" || st === "canceled") failed += 1;
+        }
+      }
+    }
+  }
+  running += activeExtracts.size; // 本机在跑提取（web 工作台把本机管线在途行计入进行中）
+  return { running, done, skipped, failed, paused: 0, paused_all: pipelinePaused, engines_paused: enginesPaused };
+}
+
 // ---------------------------------------------------------------------------
 // 本地服务端集成（仅 desktop 形态）：客户端同目录的服务程序自动拉起
 //   - 检测：打包态 → exe 同目录找 JavScribeServe.exe (win) / jav-scribe-serve (linux)；
@@ -3048,6 +3172,7 @@ app.whenReady().then(() => {
   registerUpdateIpc();
   initUpdater();
   clientCfgPath = path.join(app.getPath("userData"), CLIENT_CFG_FILE);
+  pipelinePaused = clientCfgLoad().pipeline_paused === true; // 暂停态跨重启保持（恢复需手动「继续任务」）
   watchStorePath = path.join(app.getPath("userData"), WATCH_FILE);
   watchLoad();
   batchesPath = path.join(app.getPath("userData"), BATCH_FILE);

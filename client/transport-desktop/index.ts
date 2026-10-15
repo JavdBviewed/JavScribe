@@ -7,9 +7,9 @@
 //      整片直传的服务端提取进度在任务看板呈现）
 //   - 无 _localPath 的合成 File（e2e setInputFiles 场景）走 data 通道读全量字节
 
-import { TransportError, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
+import { TransportError, type PauseAllResult, type Transport, type UploadDispatch, type UploadProgress } from "../core/transport";
 import type {
-  BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, MetricsResponse, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
+  BatchOpResult, BatchRecord, ClientConfig, ConfigItem, Engine, Health, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanResult, ScanTaskSnapshot, UpdateInfo, UploadStatus,
 } from "../core/types";
 import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 
@@ -205,4 +205,8 @@ export const desktopTransport: Transport = {
   listBatches: () => call<BatchRecord[]>("listBatches"),
   // 手动清除单条主任务记录（main 进程 batches.json；孤儿行「清除」入口）
   batchClear: (batchId) => call<{ ok: boolean }>("batchClear", batchId),
+  // 全局暂停/继续（桌面形态）：本机管线闸 + 全部已登记服务队列扇出，单端失败逐条降级不 throw
+  pauseAll: (paused) => call<PauseAllResult>("pauseAll", String(paused)),
+  // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）
+  listJobsSummary: () => call<JobSummary>("listJobsSummary"),
 };
