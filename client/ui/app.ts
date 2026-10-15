@@ -4040,7 +4040,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const type = it.type === "int" || it.type === "float" ? "number" : it.type === "secret" ? "password" : "text";
     const val = it.type === "secret" ? "" : (it.value == null ? "" : String(it.value));
     const ph = it.type === "secret" ? (it.value === "***" ? "已设置，留空保持不变" : "")
-      : it.type === "float" ? "留空用服务端默认（0.5）" : "";
+      : it.type === "float" ? "留空用服务端默认（0.5）"
+      : it.type === "int" ? "留空保持不变" : "";
     const numAttrs = it.type === "float" ? ' step="0.05" min="0.01" max="0.99"' : it.type === "int" ? ' min="1"' : "";
     return `<div class="cfg-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
       ${lab(it.label)}
@@ -4048,7 +4049,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
              value="${esc(val)}" placeholder="${esc(ph)}" spellcheck="false" autocomplete="off"></div>`;
   }
 
-  // 表单当前值 → 待提交 map（secret 留空 = 不发送，服务端保持现值）；校验失败 toast + 返回 null
+  // 表单当前值 → 待提交 map（int/float/secret 留空 = 不发送，服务端保持现值）；校验失败 toast + 返回 null
   function collectCfgValues(): Record<string, unknown> | null {
     const values: Record<string, unknown> = {};
     for (const it of state.cfgItems) {
@@ -4057,6 +4058,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (it.type === "bool") {
         values[it.path] = f.checked;
       } else if (it.type === "int") {
+        if (f.value.trim() === "") continue; // 空 = 保持服务端现值（对齐 float/secret 语义）
         const v = parseInt(f.value, 10);
         if (isNaN(v) || v < 1) { toast(`${it.label} 需要正整数`, "err"); return null; }
         values[it.path] = v;
