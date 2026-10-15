@@ -2021,6 +2021,12 @@ interface UpSettings {
 
 const UP_SETTINGS_FILE = "settings.json";
 const UP_AUTO_CHECK_DELAY_MS = 3000;
+/** 更新检查整体看门狗：checkForUpdates 自身无超时（feed 黑洞时请求永久挂起）；
+ *  env 可覆盖（e2e 提速钩子 JAVSCRIBE_UPDATE_CHECK_TIMEOUT_MS），生产默认 30s */
+const UP_CHECK_TIMEOUT_MS = (() => {
+  const n = Number(process.env.JAVSCRIBE_UPDATE_CHECK_TIMEOUT_MS || "");
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 30_000;
+})();
 
 let upState: UpState = { status: app.isPackaged ? "idle" : "disabled" };
 let upIgnored: string[] = [];
@@ -2188,10 +2194,20 @@ async function doUpdateCheck(): Promise<void> {
   }
   if (upState.status === "checking") return;
   upSet({ status: "checking" });
-  await upEnsureFeed(); // 动态 feed 解析（钩子/镜像/默认三种路径；内部全捕获不抛）
+  await upEnsureFeed(); // 动态 feed 解析（钩子/镜像/默认三种路径；内部全捕获不抛，自身有界）
+  // 整体看门狗：超时落 error 态并给可读指引；挂起的请求留后台不 abort，
+  // 最终 settle 时 autoUpdater 事件/catch 会把状态机自愈（error 覆盖 error / available 覆盖 error）
+  const watchdog = setTimeout(() => {
+    if (upState.status !== "checking") return;
+    upSet({
+      status: "error",
+      error: "更新检查超时：更新源响应过慢或不可达。请检查网络连接，或配置更新镜像源/代理（更新弹窗「高级」区）后重试。",
+    });
+  }, UP_CHECK_TIMEOUT_MS);
   autoUpdater
     .checkForUpdates()
-    .catch((e: Error) => upSet({ status: "error", error: e?.message || String(e) }));
+    .catch((e: Error) => upSet({ status: "error", error: e?.message || String(e) }))
+    .finally(() => clearTimeout(watchdog));
 }
 
 function initUpdater(): void {
