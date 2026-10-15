@@ -2970,7 +2970,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
   folderInput.onchange = (ev) => {
     const files = (ev.target as HTMLInputElement).files;
-    setFolder(files ? [...files] as FolderFile[] : []);
+    const items: FolderFile[] = files ? [...files] as FolderFile[] : [];
+    // 桌面端 webkitdirectory 回退：File 无 _localPath → 经 bridge 解析绝对路径挂上，
+    // 完成写回落源目录（web 形态无 bridge 保持现状：自动下载；合成文件返回 "" 不挂）
+    const dp = (window as unknown as { javDesktop?: { filePath?: (f: File) => string } }).javDesktop;
+    if (dp && typeof dp.filePath === "function") {
+      for (const f of items) {
+        try {
+          const p2 = dp.filePath(f);
+          if (p2) f._localPath = p2;
+        } catch { /* 无磁盘路径的合成 File：保持自动下载兜底 */ }
+      }
+    }
+    setFolder(items);
   };
   folderX.onclick = () => { if (!state.busy) clearFolder(); };
 
