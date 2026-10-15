@@ -582,12 +582,11 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 }
 .job-grid {
   display: grid;
-  grid-template-columns: 28px 116px minmax(210px, 1fr) 116px 200px 126px 86px 126px 126px 96px;
+  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 72px 72px 74px;
   gap: 10px;
   align-items: center;
   padding: 11px 16px;
   border-bottom: 1px solid var(--line);
-  min-width: 1300px;
   transition: background 0.15s;
 }
 .job-grid:last-child { border-bottom: none; }
@@ -639,10 +638,9 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 .pg-size:hover, .pg-size:focus { border-color: var(--accent); color: var(--accent); outline: none; }
 .job-head {
   display: grid;
-  grid-template-columns: 28px 116px minmax(210px, 1fr) 116px 200px 126px 86px 126px 126px 96px;
+  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 72px 72px 74px;
   gap: 10px;
   padding: 0 16px 6px;
-  min-width: 1300px;
   font-size: 10.5px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
