@@ -4090,32 +4090,85 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
-  // 「应用到所有服务」：当前表单 fan-out 到全部已注册服务端（并行 putConfig，逐端独立成败）
+  // 「应用到所有服务」：先逐目标拉取现配置做字段级 diff，确认后才 fan-out 覆盖（并行 putConfig，逐端独立成败）。
+  // 确认交互放在发请求前的同步步骤：先取齐 diff 数据 → 渲染确认页 → 点确认直接 fan-out，中间不触发
+  // 设置重渲染（重渲染回第一 tab 的走查坑）；取消/关窗零请求。
   async function applyConfigToAll(name: string) {
     const values = collectCfgValues();
     if (!values) return;
     const targets = state.engines.map((e) => e.name);
     if (targets.length < 2) return;
     const btn = $("cfg-apply-all") as HTMLButtonElement;
-    const prev = btn.textContent;
     btn.disabled = true;
-    btn.textContent = "应用中…";
-    const results = await Promise.allSettled(targets.map((n) => t.putConfig(n, values)));
-    const fails: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === "rejected") fails.push(`${targets[i]}（${(r.reason as Error).message}）`);
-    });
+    btn.textContent = "正在比对差异…";
+    const currents = await Promise.allSettled(targets.map((n) => t.getConfig(n)));
     btn.disabled = false;
-    btn.textContent = prev;
-    if (fails.length === 0) {
-      toast(`已应用到全部 ${targets.length} 个服务（对新提交的任务生效）`, "ok");
-    } else if (fails.length < targets.length) {
-      toast(`已应用到 ${targets.length - fails.length}/${targets.length} 个服务；失败：${fails.join("、")}`, "err");
-    } else {
-      toast(`应用失败：${fails.join("、")}`, "err");
-    }
-    refresh();
-    openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
+    btn.textContent = "应用到所有服务";
+    if (modalBackdrop.hidden) return; // 比对期间弹窗被关：中止，零请求
+    // 字段级 diff：只比本次下发的键（int/float/secret 留空 = 不下发，各端保持现值，不计差异）
+    const normVal = (v: unknown): string =>
+      Array.isArray(v) ? v.join(", ")
+      : typeof v === "boolean" ? (v ? "开" : "关")
+      : v == null ? "" : String(v);
+    const disp = (x: string): string => (x === "" ? "（空）" : x);
+    let html = `<div class="cfg-global-note"><b>即将对以下 ${targets.length} 个服务并行覆盖保存</b>：${targets.map(esc).join("、")}（对新提交的任务生效；表单留空的项不下发，各端保持现值）。</div>`;
+    targets.forEach((n, i) => {
+      const r = currents[i];
+      html += `<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:8px">`;
+      html += `<div style="font-weight:700;margin-bottom:4px"><span class="tag">${i + 1}</span>${esc(n)}</div>`;
+      if (r.status === "rejected") {
+        html += `<div class="muted small">不可达（${esc((r.reason as Error).message)}）：确认后仍会尝试覆盖该端现值</div>`;
+      } else {
+        const cur = new Map<string, ConfigItem>();
+        for (const it of r.value) cur.set(it.path, it);
+        const rows: string[] = [];
+        for (const [path, nv] of Object.entries(values)) {
+          const ci = cur.get(path);
+          if (!ci) {
+            rows.push(`<div style="line-height:1.7">${esc(path)}：<span class="mono" style="word-break:break-all">（该端无此项）</span> <span class="muted">→</span> <span class="mono" style="word-break:break-all">${esc(disp(normVal(nv)))}</span></div>`);
+            continue;
+          }
+          const a = normVal(ci.value), b = normVal(nv);
+          if (a === b) continue;
+          rows.push(`<div style="line-height:1.7">${esc(ci.label)}：<span class="mono" style="word-break:break-all">${esc(disp(a))}</span> <span class="muted">→</span> <span class="mono" style="word-break:break-all">${esc(disp(b))}</span></div>`);
+        }
+        html += rows.length
+          ? rows.join("")
+          : `<div class="muted small">无差异（该端现值与表单一致，保存后不变）</div>`;
+      }
+      html += `</div>`;
+    });
+    html += `
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">确认后按当前表单值覆盖各端现值（Key 类留空不覆盖）；取消则不发送任何请求。</span>
+      <span class="cfg-foot-actions">
+        <button type="button" id="cfg-apply-all-cancel" class="btn">取消</button>
+        <button type="button" id="cfg-apply-all-ok" class="btn btn-primary">确认应用到 ${targets.length} 个服务</button>
+      </span>
+    </div>`;
+    showModal(`应用到所有服务（${targets.length} 个）`);
+    $("modal").classList.add("modal-wide");
+    $("modal-body").innerHTML = html;
+    ($("cfg-apply-all-cancel") as HTMLButtonElement).onclick = () => openSettings(name); // 取消 = 回设置页，零请求
+    ($("cfg-apply-all-ok") as HTMLButtonElement).onclick = async () => {
+      const okBtn = $("cfg-apply-all-ok") as HTMLButtonElement;
+      okBtn.disabled = true;
+      okBtn.textContent = "应用中…";
+      const results = await Promise.allSettled(targets.map((n) => t.putConfig(n, values)));
+      const fails: string[] = [];
+      results.forEach((res, j) => {
+        if (res.status === "rejected") fails.push(`${targets[j]}（${(res.reason as Error).message}）`);
+      });
+      if (fails.length === 0) {
+        toast(`已应用到全部 ${targets.length} 个服务（对新提交的任务生效）`, "ok");
+      } else if (fails.length < targets.length) {
+        toast(`已应用到 ${targets.length - fails.length}/${targets.length} 个服务；失败：${fails.join("、")}`, "err");
+      } else {
+        toast(`应用失败：${fails.join("、")}`, "err");
+      }
+      refresh();
+      openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
+    };
   }
 
   // ---------- 本机目录扫描 ----------

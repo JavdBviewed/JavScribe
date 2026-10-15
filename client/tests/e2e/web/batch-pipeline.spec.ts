@@ -329,6 +329,21 @@ test("e) 服务设置·应用到所有服务：fan-out 双端，Key 类留空 = 
     await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible();
     await page.locator("#cfg-subtitle-lang_tag").fill("en");
     await applyAll.click();
+    // 先出确认页：逐目标字段级差异（mock zh → en；mock2 ja → en），留空的 Key 不在差异内
+    await expect(page.locator("#cfg-apply-all-ok")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#modal-body")).toContainText("ja → en");
+    await expect(page.locator("#modal-body")).toContainText("zh → en");
+    // 取消 = 回设置页，零请求（两端现值不变）
+    await page.locator("#cfg-apply-all-cancel").click();
+    await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
+    await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible({ timeout: 10_000 });
+    expect((await getCfg("mock"))["subtitle.lang_tag"]).toBe("zh");
+    expect((await getCfg("mock2"))["subtitle.lang_tag"]).toBe("ja");
+    // 二次进确认页 → 确认下发
+    await page.locator("#cfg-subtitle-lang_tag").fill("en");
+    await applyAll.click();
+    await expect(page.locator("#cfg-apply-all-ok")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#cfg-apply-all-ok").click();
     await expectToast(page, "已应用到全部 2 个服务");
     // 两端 lang_tag 同步为 en；mock2 的 Key 保留（打码非空）
     expect((await getCfg("mock"))["subtitle.lang_tag"]).toBe("en");
