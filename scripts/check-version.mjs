@@ -5,10 +5,12 @@
 // 历史背景：bump 漏改 web __init__ 已发生 3 次（0.2.30/0.2.33/0.2.39），
 // editable 安装直读源码，__init__ 滞后会让 /api/health 报旧版本、e2e 版本基线错位。
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
-const read = (p) => readFileSync(join(root, p), "utf-8");
+// fileURLToPath：Windows 上 URL .pathname 是 /D:/... 形态，readFileSync 会解析成 D:\D:\...（盘符翻倍）
+const root = dirname(fileURLToPath(import.meta.url));
+const read = (p) => readFileSync(join(root, "..", p), "utf-8");
 
 const vPkg = JSON.parse(read("package.json")).version;
 const vPyproject = (read("web/pyproject.toml").match(/^version = "([^"]+)"/m) || [])[1];
