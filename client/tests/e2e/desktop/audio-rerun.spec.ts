@@ -62,6 +62,8 @@ async function launch(userData: string) {
       JAVSCRIBE_CLIENT_USERDATA: userData,
       JAVSCRIBE_ENGINES: ENGINES,
       JAVSCRIBE_CLIENT_FRAMELESS: "1",
+      // 外链交 /bin/true 秒退（同 helpers.launchApp：防 mime-helper 孤儿持 stdio）
+      BROWSER: "/bin/true",
     },
   });
   const page = await app.firstWindow();
@@ -69,13 +71,17 @@ async function launch(userData: string) {
   return { app, page };
 }
 
-/** UI 单文件派发（默认 mock 引擎），到「提交生成 ✓」为止 */
+/** UI 单文件派发（默认 mock 引擎），到「提交生成 ✓」为止（提交即自动跳任务看板，回派发页断管线终态） */
 async function dispatchFile(page: any, filePath: string) {
   await page.setInputFiles("#file", filePath);
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible({ timeout: 30_000 });
+  // 提交即进任务看板（流程节点已并入任务看板）：等自动跳转后回派发页断言
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await goView(page, "dispatch");
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
+  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
+  await expect(page.locator("#dispatch-status")).toHaveClass(/ok/);
 }
 
 const cacheCount = (userData: string, suffix: string) =>
@@ -161,7 +167,10 @@ test("换服务重跑：仅登记一个服务 → modal 提示无其他在线服
   // 默认单引擎（mock）userData fixture
   await page.setInputFiles("#file", join(FIXTURES, "video-a.mp4"));
   await page.click("#dispatch-go");
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
+  // 提交即进任务看板：等自动跳转，回派发页断管线终态
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await goView(page, "dispatch");
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await goView(page, "jobs");
   const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: "video-a.mp4" }) }).first();
   await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });

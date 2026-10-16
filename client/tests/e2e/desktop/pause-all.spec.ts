@@ -88,10 +88,11 @@ test("暂停所有/继续往返 + 本机管线闸 + 持久化 + 单端离线降�
   ]));
   expect(await healthPaused(request)).toBe(true); // 在线端照旧冻结：离线端不阻塞整体
 
-  // UI 侧降级文案（toast err 列出坏端），随后恢复收尾
+  // 恢复收尾：扇出含离线端 → 走降级分支，toast err 列出坏端（此场景无 ok toast；
+  // 旧断言 .toast.ok 只靠首次继续的 8s 存活旧 toast 假绿，运行变慢即超时红）
   await expect(btn).toHaveText("▶ 继续任务", { timeout: 30_000 });
   await btn.click(); // 继续方向无确认框
-  await expect(page.locator("#toasts .toast.ok").last()).toContainText("已继续");
+  await expect(page.locator("#toasts .toast.err").last()).toContainText("dead：服务离线");
   expect(await healthPaused(request)).toBe(false);
   await expect(btn).toHaveText("⏸ 暂停所有", { timeout: 30_000 });
 });

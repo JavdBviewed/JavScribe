@@ -22,13 +22,16 @@ test("单文件全流程（auto→本机提取）：chip → 三步动画 → �
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
 
-  // 桌面端 fits 恒 true → auto 恒走本机提取（桌面核心语义）
+  // 桌面端 fits 恒 true → auto 恒走本机提取（桌面核心语义）；步骤名在管线启动时即就位
   await expect(page.locator("#step-upload .step-name")).toHaveText("本地提音轨");
   await expect(page.locator("#step-extract .step-name")).toHaveText("上传音频");
-  await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 30_000 });
+  // 提交即进任务看板（流程节点已并入任务看板）：等自动跳转，回派发页看三步终态
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await goView(page, "dispatch");
+  await expect(page.locator("#step-upload.done")).toBeVisible();
   await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ MB/ })).toBeVisible();
-  await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#step-extract.done")).toBeVisible();
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 
@@ -72,7 +75,10 @@ test("写回落盘：getResultData → writeSrt IPC → srt 内容断言", async
   await page.setInputFiles("#file", fx("video-a.mp4"));
   await page.selectOption("#engine-select", "mock");
   await page.click("#dispatch-go");
-  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible({ timeout: 30_000 });
+  // 提交即进任务看板：等自动跳转，回派发页取任务号
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await goView(page, "dispatch");
+  await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();
   const meta = (await page.locator("#meta-dispatch").textContent()) || "";
   const jid = (meta.match(/任务 (\S+)/) || [])[1];
   expect(jid).toBeTruthy();
@@ -101,9 +107,12 @@ test("整片直传（extract-select=server 逃生通道）：上传视频→提�
   await page.click("#dispatch-go");
   await expect(page.locator("#step-upload .step-name")).toHaveText("上传视频");
   await expect(page.locator("#step-extract .step-name")).toHaveText("提取音频");
-  await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#step-extract.done")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#step-dispatch.done")).toBeVisible({ timeout: 30_000 });
+  // 提交即进任务看板：等自动跳转，回派发页看三步终态
+  await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
+  await goView(page, "dispatch");
+  await expect(page.locator("#step-upload.done")).toBeVisible();
+  await expect(page.locator("#step-extract.done")).toBeVisible();
+  await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 

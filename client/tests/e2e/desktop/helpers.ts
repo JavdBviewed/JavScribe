@@ -137,6 +137,9 @@ export async function launchApp(userData: string, extraEnv: Record<string, strin
       JAVSCRIBE_UPDATE_INTERVAL_S: "3",
       // 外链（target=_blank）交系统浏览器：记录实际交出的 URL 供 t-call openedExternal 断言
       JAVSCRIBE_OPEN_EXTERNAL_CAPTURE: "1",
+      // e2e 容器无浏览器：openExternal→xdg-open 走 /bin/true 秒退，
+      // 避免 xfce4-mime-helper 孤儿进程持 Electron stdio fd 致 app.close() 挂死
+      BROWSER: "/bin/true",
       ...ffmpegEnv(),
       ...extraEnv,
     },
