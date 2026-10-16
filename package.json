@@ -21,7 +21,8 @@
     "test:e2e:desktop": "xvfb-run -a playwright test --config playwright.desktop.config.ts",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "build:release:linux": "pnpm build:desktop && electron-builder --linux",
-    "build:release:win": "pnpm build:desktop && electron-builder --win"
+    "build:release:win": "pnpm build:desktop && electron-builder --win",
+    "check:version": "node scripts/check-version.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
