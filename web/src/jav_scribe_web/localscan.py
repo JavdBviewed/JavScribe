@@ -14,8 +14,8 @@
   scan.video_exts         视频扩展名（无点、小写）
   scan.subtitle_patterns  已有字幕判定后缀（带点，".zh.srt"）
   scan.recurse            是否进入子目录
-  scan.has_sub_tokens     疑似已压字幕标记（文件名 token 整词命中，小写）
-  scan.no_sub_tokens      疑似无字幕标记（同上；默认 ["c"]）
+  scan.has_sub_tokens     疑似已压字幕标记（文件名 token 整词命中，小写；默认 ["c"]）
+  scan.no_sub_tokens      疑似无字幕标记（同上；默认 []）
   subtitle.skip_embedded  不参与普通目录扫描；普通扫描不读取视频内容，
                           内嵌字幕检查必须由用户后续主动发起。
   subtitle.embedded_langs 仅供主动内嵌字幕检查展示（norm_language 归一）
@@ -64,10 +64,10 @@ DEFAULT_SCAN_CFG: dict[str, Any] = {
         # has_sub_tokens    疑似已压字幕标记：文件名 token 整词命中（大小写不敏感）→ 已压字幕版
         # no_sub_tokens     疑似无字幕标记：命中显示「无字幕（名）」信息标
         #                   双列表同时命中 → 无字幕优先（保守）。
-        #                   默认 c=无字幕：JAV 命名里独立 C（不粘番号、不粘 CD 集数）= 无字幕版
+        #                   默认 c=已内含字幕：JAV 命名里独立 C（不粘番号、不粘 CD 集数）= 已压字幕版
         "min_size_mb": 200,
-        "has_sub_tokens": [],
-        "no_sub_tokens": ["c"],
+        "has_sub_tokens": ["c"],
+        "no_sub_tokens": [],
     },
     "subtitle": {
         "skip_embedded": "target",

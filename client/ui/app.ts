@@ -2795,8 +2795,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         ? cc.scan_subtitle_patterns.map((x) => (String(x).toLowerCase().startsWith(".") ? String(x).toLowerCase() : "." + String(x).toLowerCase())).filter(Boolean)
         : [...LOCAL_SUB_PATTERNS],
       min_size_mb: typeof cc.scan_min_size_mb === "number" ? cc.scan_min_size_mb : 200,
-      has_sub_tokens: Array.isArray(cc.scan_has_sub_tokens) ? cc.scan_has_sub_tokens : [],
-      no_sub_tokens: Array.isArray(cc.scan_no_sub_tokens) ? cc.scan_no_sub_tokens : ["c"],
+      has_sub_tokens: Array.isArray(cc.scan_has_sub_tokens) ? cc.scan_has_sub_tokens : ["c"],
+      no_sub_tokens: Array.isArray(cc.scan_no_sub_tokens) ? cc.scan_no_sub_tokens : [],
     };
   }
 
@@ -4939,7 +4939,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const SCAN_KEYS = ["scan_video_exts", "scan_subtitle_patterns", "scan_recurse",
       "scan_min_size_mb", "scan_has_sub_tokens", "scan_no_sub_tokens"] as const;
     const hasScan = !!cc && SCAN_KEYS.some((k) => k in cc);
-    let scanVals = { exts: "", pats: "", recurse: true, min: 200, hasTok: "", noTok: "c" };
+    let scanVals = { exts: "", pats: "", recurse: true, min: 200, hasTok: "c", noTok: "" };
     if (cc && hasScan) {
       scanVals = {
         exts: (cc.scan_video_exts || []).join(","),
@@ -5015,10 +5015,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           <span class="cfg-lab">忽略小于（MB）${helpIcon("低于该大小的文件仍会列出但不默认选中（可显式勾选提交）。0 = 不按大小过滤。默认 200。")}</span>
           <input id="cc-scan-minsize" type="number" min="0" step="10" value="${scanVals.min}" spellcheck="false" autocomplete="off"></div>
         <div class="cfg-row ccfg-row" data-base="${esc(scanVals.hasTok)}">
-          <span class="cfg-lab">疑似已压字幕标记${helpIcon("文件名 token（按 - _ . 空格等分隔）整词命中即视为已压字幕版，命中才默认不选。逗号分隔，如 c、chs；大小写不敏感。空 = 不识别。")}</span>
+          <span class="cfg-lab">疑似已压字幕标记${helpIcon("文件名 token（按 - _ . 空格等分隔）整词命中即视为已压字幕版（已内含字幕），命中才默认不选。逗号分隔，如 c、chs；大小写不敏感。默认 c。空 = 不识别。")}</span>
           <input id="cc-scan-has-tokens" class="mono" type="text" placeholder="空 = 不识别" value="${esc(scanVals.hasTok)}" spellcheck="false" autocomplete="off"></div>
         <div class="cfg-row ccfg-row" data-base="${esc(scanVals.noTok)}">
-          <span class="cfg-lab">疑似无字幕标记${helpIcon("文件名 token 整词命中即显示「无字幕（名）」信息标（只提示、不拦截）。逗号分隔，如 c；大小写不敏感。默认 c。空 = 不识别。")}</span>
+          <span class="cfg-lab">疑似无字幕标记${helpIcon("文件名 token 整词命中即显示「无字幕（名）」信息标（只提示、不拦截）。逗号分隔，如 c；大小写不敏感。空 = 不识别。")}</span>
           <input id="cc-scan-no-tokens" class="mono" type="text" placeholder="空 = 不识别" value="${esc(scanVals.noTok)}" spellcheck="false" autocomplete="off"></div>
       </div>
       <div class="ccfg-foot">

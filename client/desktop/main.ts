@@ -553,8 +553,8 @@ const DESKTOP_SCAN_DEFAULTS = {
   subtitle_patterns: [...LOCAL_SUB_PATTERNS],
   recurse: true,
   min_size_mb: 200,
-  has_sub_tokens: [] as string[],
-  no_sub_tokens: ["c"],
+  has_sub_tokens: ["c"],
+  no_sub_tokens: [] as string[],
 };
 // 文件名 token 切分：连续字母数字段（- 空格 _ . [ ] 等分隔均切开）；整词相等匹配
 // 天然排除粘番号（SSIS-123C）、CD 集数（CD1/1CD）、词内词（Uncut/CUT）。

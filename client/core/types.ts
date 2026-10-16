@@ -59,9 +59,9 @@ export interface ClientConfig {
   scan_recurse?: boolean;
   /** 忽略小于该值（MB）：列表显示但不默认选中，0=不按大小过滤；缺省 200 */
   scan_min_size_mb?: number;
-  /** 疑似已压字幕标记：文件名 token（整词、大小写不敏感）命中即视为已压字幕版；缺省空 */
+  /** 疑似已压字幕标记：文件名 token（整词、大小写不敏感）命中即视为已压字幕版（已内含字幕）；缺省 ["c"] */
   scan_has_sub_tokens?: string[];
-  /** 疑似无字幕标记：文件名 token 命中显示「无字幕（名）」信息标；缺省 ["c"] */
+  /** 疑似无字幕标记：文件名 token 命中显示「无字幕（名）」信息标；缺省空 */
   scan_no_sub_tokens?: string[];
 }
 

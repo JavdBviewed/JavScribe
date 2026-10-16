@@ -82,7 +82,7 @@ def test_cfg_from_items_merges_defaults() -> None:
     assert base == copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
     sc = localscan._scan_cfg(base)
     assert len(sc["exts"]) >= 10 and ".srt" in sc["pats"] and sc["recurse"] is True
-    assert sc["min_size_mb"] == 200 and sc["has_sub_tokens"] == [] and sc["no_sub_tokens"] == ["c"]
+    assert sc["min_size_mb"] == 200 and sc["has_sub_tokens"] == ["c"] and sc["no_sub_tokens"] == []
 
     cfg = localscan.cfg_from_items([
         {"path": "scan.video_exts", "value": ["mkv"]},
@@ -209,13 +209,13 @@ def test_scan_min_size_and_name_tokens() -> None:
         cfg = copy.deepcopy(localscan.DEFAULT_SCAN_CFG)
         cfg["subtitle"]["skip_embedded"] = "off"
 
-        # 默认：c=疑似无字幕 ⇒ 仅信息标（带命中 token），不触发确认
+        # 默认：c=疑似已压字幕 ⇒ 已内含字幕（名），默认不选
         by = {i["name"]: i for i in localscan.scan_dir(d, cfg)["items"]}
         assert len(by) == 3 and all(i["too_small"] for i in by.values())
         c = by["SSIS-123-C.mp4"]
-        assert c["name_no_sub"] is True and c["name_sub"] is False
-        assert c["name_no_sub_token"] == "c" and c["name_sub_token"] is None
-        assert c["has_subtitle"] is False and c["subtitle_status"] == "none"
+        assert c["name_sub"] is True and c["name_no_sub"] is False
+        assert c["name_sub_token"] == "c" and c["name_no_sub_token"] is None
+        assert c["has_subtitle"] is True and c["subtitle_status"] == "named"
 
         # 阈值 1MB：只有 1KB 的过小
         cfg["scan"]["min_size_mb"] = 1
@@ -291,7 +291,7 @@ def test_scan_is_metadata_only_and_skips_embedded_probe() -> None:
         assert by["movie.mp4"]["has_subtitle"] is True
         assert by["movie.mp4"]["embedded_langs"] == []
         assert by["movie.mp4"]["probe_failed"] is False
-        assert by["ABF-330-C.mkv"]["name_no_sub"] is True
+        assert by["ABF-330-C.mkv"]["name_sub"] is True
         assert by["ABF-330-C.mkv"]["embedded_checked"] is False
 
 
@@ -371,7 +371,7 @@ def test_local_scan_api_rules_and_errors() -> None:
             body = r.json()
             assert body["rules"] == "defaults" and body["mapped"] is False
             assert [it["name"] for it in body["items"]] == ["a.mp4", "b.mkv"]
-            assert body["has_sub_tokens"] == [] and body["no_sub_tokens"] == ["c"]
+            assert body["has_sub_tokens"] == ["c"] and body["no_sub_tokens"] == []
 
             # 客户端设置扫描段生效（部分合并：只发扩展名，其余保持默认）
             r = client.put("/api/client-config", json={"scan_video_exts": "mkv"})
@@ -438,7 +438,7 @@ def test_local_scan_api_client_cfg_overrides() -> None:
         (media / "big.mp4").write_bytes(b"x" * 3 * 1024 * 1024)
         client = TestClient(build_app(store, _poller))
         with client:
-            # 默认 200MB 全过小；c 整词命中 no_sub；粘番号 123C 不命中
+            # 默认 200MB 全过小；c 整词命中 has_sub；粘番号 123C 不命中
             r = client.get(
                 "/api/scan/local", params={"engine": "车间A", "path": str(media)})
             assert r.status_code == 200, r.text
@@ -446,8 +446,8 @@ def test_local_scan_api_client_cfg_overrides() -> None:
             assert body["min_size_mb"] == 200 and body["rules"] == "defaults"
             by = {it["name"]: it for it in body["items"]}
             assert all(it["too_small"] for it in by.values())
-            assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
-            assert by["SSIS-123-C.mp4"]["name_no_sub_token"] == "c"
+            assert by["SSIS-123-C.mp4"]["name_sub"] is True
+            assert by["SSIS-123-C.mp4"]["name_sub_token"] == "c"
             assert by["SSIS-123C.mp4"]["name_sub"] is False
             assert by["SSIS-123C.mp4"]["name_no_sub"] is False
 
@@ -461,9 +461,9 @@ def test_local_scan_api_client_cfg_overrides() -> None:
             by = {it["name"]: it for it in body["items"]}
             assert by["big.mp4"]["too_small"] is False
             assert by["SSIS-123-C.mp4"]["too_small"] is True
-            assert by["SSIS-123-C.mp4"]["name_no_sub"] is True
+            assert by["SSIS-123-C.mp4"]["name_sub"] is True
 
-            # PUT 覆盖：c → 疑似已压字幕（空串 = 关无字幕方向）
+            # PUT 覆盖：显式置 c → 疑似已压字幕（与内置默认同向，验证 PUT 通道）
             r = client.put(
                 "/api/client-config",
                 json={"scan_has_sub_tokens": "c", "scan_no_sub_tokens": ""},

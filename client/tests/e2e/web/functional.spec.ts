@@ -27,8 +27,8 @@ const SCAN_RULES_DEFAULTS = {
   scan_subtitle_patterns: ".zh.srt,.srt",
   scan_recurse: true,
   scan_min_size_mb: 200,
-  scan_has_sub_tokens: "",
-  scan_no_sub_tokens: "c",
+  scan_has_sub_tokens: "c",
+  scan_no_sub_tokens: "",
 };
 
 let req: APIRequestContext;
@@ -283,7 +283,7 @@ test("scan：本地扫描目录三项（1 个有字幕）；Windows 路径 400�
   expect((await rn.json()).detail).toContain("路径不存在");
 });
 
-test("scan：文件名标记规则——默认独立 C → 无字幕（名）→ 客户端设置改已压字幕标记 → 重扫标记（名）", async ({ page }) => {
+test("scan：文件名标记规则——默认独立 C → 标记（名）→ 客户端设置改无字幕标记 → 重扫无字幕（名）", async ({ page }) => {
   const dir = path.join(os.tmpdir(), `javweb-scan-token-${process.pid}-${Date.now()}`);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
@@ -294,29 +294,31 @@ test("scan：文件名标记规则——默认独立 C → 无字幕（名）→
     await page.goto("/");
     await waitForEngineOnline(page);
     await waitForEngineKey(page, "mock");
-    // 默认 no_sub_tokens=["c"]：文件名独立 C（不粘番号）→「无字幕（名）」信息标（只提示、不拦截）
+    // 默认 has_sub_tokens=["c"]：文件名独立 C（不粘番号）→「标记（名）」已内含字幕，默认不选
     await page.locator("#scan-path").fill(dir);
     await page.click("#scan-go");
     await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(".scan-name")).toHaveCount(1);
-    const noTag = page.locator(".subtag", { hasText: "无字幕（名）" });
-    await expect(noTag).toHaveCount(1);
-    await expect(noTag).toHaveAttribute("title", /标记 c/);
-    // 客户端设置：疑似已压字幕标记 = c，清空疑似无字幕标记
+    const tag = page.locator(".subtag", { hasText: "标记（名）" });
+    await expect(tag).toHaveCount(1);
+    await expect(tag).toHaveAttribute("title", /标记 c/);
+    await expect(page.locator("#scan-count")).toContainText("已选 0 / 1");
+    // 客户端设置：清空疑似已压字幕标记，疑似无字幕标记 = c，关大小过滤（夹具 <200MB 才可默认勾选）
     await goTab(page, "ccfg");
     await expect(page.locator("#cc-scan-has-tokens")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("#cc-scan-exts")).toHaveValue(/mp4/, { timeout: 10_000 }); // 等引擎 /config 异步预填完成
-    await page.locator("#cc-scan-has-tokens").fill("c");
-    await page.locator("#cc-scan-no-tokens").fill("");
+    await page.locator("#cc-scan-has-tokens").fill("");
+    await page.locator("#cc-scan-no-tokens").fill("c");
+    await page.locator("#cc-scan-minsize").fill("0");
     await page.locator("#cc-scan-save").click();
     await expect(page.locator("#toasts .toast.ok", { hasText: "扫描规则已保存（对之后的扫描生效）" })).toBeVisible({ timeout: 10_000 });
-    // 重扫：C 改命中已压字幕 →「标记（名）」，默认不选
+    // 重扫：C 改命中无字幕标记 →「无字幕（名）」信息标（只提示、不拦截），默认勾选
     await goTab(page, "dispatch");
     await page.click("#scan-go");
     await expect(page.locator("#scan-table table")).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator(".subtag", { hasText: "标记（名）" })).toHaveCount(1);
-    await expect(page.locator(".subtag", { hasText: "无字幕（名）" })).toHaveCount(0);
-    await expect(page.locator("#scan-count")).toContainText("已选 0 / 1");
+    await expect(page.locator(".subtag", { hasText: "无字幕（名）" })).toHaveCount(1);
+    await expect(page.locator(".subtag", { hasText: "标记（名）" })).toHaveCount(0);
+    await expect(page.locator("#scan-count")).toContainText("已选 1 / 1");
   } finally {
     rmSync(dir, { recursive: true, force: true });
     // UI 保存整卡 6 键落盘 → 还原内置默认
