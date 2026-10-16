@@ -25,6 +25,8 @@ export interface ExtractHooks {
   onStart?: () => void;
   /** 主任务中止检查（池入口闸：true=放弃，不起 ffmpeg） */
   isAborted?: () => boolean;
+  /** 池出队闸（主任务暂停）：拿到槽后等放行再起 ffmpeg；保持期间被取消由 isAborted 收口 */
+  waitReady?: () => Promise<void>;
 }
 export type ExtractOpts = ExtractHooks | ExtractProgress;
 
@@ -81,8 +83,13 @@ function ensure(): Promise<FFmpegLike> {
   return loading ?? Promise.reject(new Error("ffmpeg.wasm 未加载"));
 }
 
-function runOne(f: File, hooks?: ExtractHooks) {
-  if (hooks?.isAborted?.()) return Promise.reject(new ExtractAbortError());
+async function runOne(f: File, hooks?: ExtractHooks) {
+  if (hooks?.isAborted?.()) throw new ExtractAbortError();
+  // 池出队闸：主任务「暂停」保持（行显「已暂停」）；保持期间被取消则入口拒绝
+  if (hooks?.waitReady) {
+    await hooks.waitReady();
+    if (hooks.isAborted?.()) throw new ExtractAbortError();
+  }
   const onProgress = hooks?.onProgress;
   return ensure().then((ff) => {
     const ext = /\.([a-z0-9]{1,8})$/i.exec(f.name);

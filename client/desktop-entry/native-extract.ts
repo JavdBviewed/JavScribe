@@ -33,6 +33,11 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
   const run = async (): Promise<Blob> => {
     // 池拿到槽、执行前：中止闸（主任务取消）→ 不起 ffmpeg
     if (o?.isAborted?.()) throw new ExtractAbortError();
+    // 池出队闸：主任务「暂停」保持（行显「已暂停」）；保持期间被取消则入口拒绝
+    if (o?.waitReady) {
+      await o.waitReady();
+      if (o?.isAborted?.()) throw new ExtractAbortError();
+    }
     const localPath = (f as File & { _localPath?: string })._localPath || desktop.filePath(f);
     activeExtracts.set(localPath || f.name, { id });
     try {
