@@ -16,7 +16,8 @@ const vPkg = JSON.parse(read("package.json")).version;
 const vPyproject = (read("web/pyproject.toml").match(/^version = "([^"]+)"/m) || [])[1];
 const vInit = (read("web/src/jav_scribe_web/__init__.py").match(/__version__ = "([^"]+)"/) || [])[1];
 const lockText = read("web/uv.lock");
-const m = lockText.match(/name = "jav-scribe-web"\nversion = "([^"]+)"/);
+// \r?\n：Windows CI 的 autocrlf 会把 uv.lock checkout 成 CRLF
+const m = lockText.match(/name = "jav-scribe-web"\r?\nversion = "([^"]+)"/);
 const vLock = m ? m[1] : null;
 
 const sources = [
