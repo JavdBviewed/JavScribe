@@ -2068,7 +2068,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     btn.classList.toggle("on", pausedAll);
     const label = pausedAll ? "▶ 继续任务" : "⏸ 暂停所有";
     if (btn.textContent !== label) btn.textContent = label;
-    if (state.busy) btn.disabled = true;
+    btn.disabled = state.busy; // busy 结束后必须复位，否则按钮永久禁用（P2-2 补漏）
   }
 
   ($("job-pause-all") as HTMLButtonElement).onclick = async () => {
