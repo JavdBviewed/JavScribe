@@ -1665,7 +1665,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         canOp && servedGroup && hasFailed
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="retry" title="重试本主任务中失败的子任务">&#8635; 重试失败</button>` : "",
         canOp && !allTerminal
-          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="cancel" title="取消主任务：未开始子任务全部取消，运行中不受影响">&#10006; 取消</button>` : "",
+          ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="cancel" title="取消主任务：未开始子任务立即取消；在跑子任务跑完当前阶段后中止，不再提交服务">&#10006; 取消</button>` : "",
         canClear
           ? `<button type="button" class="dl-btn batch-op batch-clear" data-bid="${esc(g.bid)}" data-bact="clear" title="清除该过期主任务记录（仅本地记录，子任务已过期）">&#10005; 清除</button>` : "",
       ].join("");
@@ -3760,7 +3760,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     polish: "生成后再用大模型复核一遍（可选）",
     emby: "生成后自动刷新 Emby 媒体库",
     jasna: "识别前先对音轨降噪修复",
-    scan: "服务端「扫描目录」的判定规则",
+    scan: "已迁至「客户端设置 · 扫描规则」，此处仅兼容说明",
     storage: "服务端临时缓存的清理周期",
   };
   // enum 选项的中文展示（提交值仍是原始值）
@@ -3968,11 +3968,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     </div>`;
     for (const g of orderedGroups) {
       const list = groups[g];
+      // scan 组：新客户端扫描规则已整体归位「客户端设置 · 扫描规则」（本机 client config），
+      // 服务端 scan.* 仅留兼容旧客户端/直连 API，不再被任何新版客户端读取——
+      // 渲染为指引说明而非可编辑控件，避免「改了没生效」的误导（10-08 归位线的遗留口子）
+      const bodyHtml = g === "scan"
+        ? `<div class="set-note">扫描规则（视频扩展名 / 已有字幕判定 / 递归 / 忽略小于 / 文件名标记）已统一在 <b>「客户端设置 · 扫描规则」</b> 维护（保存在本机，桌面端离线也可用）。<br>服务端的 <span class="mono">scan.*</span> 配置新版客户端不再读取，仅保留给旧版客户端 / 直连 API 兼容，无需在此调整。</div>`
+        : list.map(configFieldHtml).join("");
       html += `
       <div class="cfg-tab-pane" data-pane="${esc(g)}" role="tabpanel" hidden>
         <section class="cfg-sec" data-sec="${esc(g)}">
           <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
-          <div class="cfg-sec-body">${list.map(configFieldHtml).join("")}</div>
+          <div class="cfg-sec-body">${bodyHtml}</div>
         </section>
       </div>`;
     }

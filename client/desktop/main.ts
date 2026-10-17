@@ -2078,6 +2078,18 @@ function upFeedBase(): string {
 
 /** 应用「更新代理」到 Electron 全局会话：electron.net 通道（updater 清单/下载 + 本模块 API 请求）走该代理。
  *  留空 = direct:// 直连。仅打包形态应用（dev 形态 updater 禁用，避免影响开发网络）。 */
+/** 当前安装形态是否启用 auto-update 通道：electron-updater 在 Linux 恒实例化 AppImageUpdater，
+ *  其 isUpdaterActive 仅在 APPIMAGE 环境变量存在（真 AppImage 运行）时为 true；win=nsis 恒 true。
+ *  deb/裸目录（linux-unpacked）等非 AppImage 形态 = 无通道 → 更新入口按 disabled 处理（同 dev 形态）。
+ *  isUpdaterActive 为库内部 API（4.x–6.x 稳定存在）；取不到时按启用处理，由 doUpdateCheck 兜底自愈。 */
+function upIsActive(): boolean {
+  try {
+    return (autoUpdater as unknown as { isUpdaterActive?: () => boolean }).isUpdaterActive?.() === true;
+  } catch {
+    return true;
+  }
+}
+
 function upApplyProxy(): void {
   if (!app.isPackaged) return;
   try {
@@ -2192,6 +2204,11 @@ async function doUpdateCheck(): Promise<void> {
     upSet({ status: "disabled" });
     return;
   }
+  if (!upIsActive()) {
+    // 菜单「检查更新…」/IPC 手动触发也走这里：无通道时明确落 error（带指引），不留 checking
+    upSet({ status: "error", error: "当前安装形态不支持应用内自动更新（如 Linux deb/裸目录）。请到 GitHub Releases 下载最新版。" });
+    return;
+  }
   if (upState.status === "checking") return;
   upSet({ status: "checking" });
   await upEnsureFeed(); // 动态 feed 解析（钩子/镜像/默认三种路径；内部全捕获不抛，自身有界）
@@ -2207,7 +2224,14 @@ async function doUpdateCheck(): Promise<void> {
   autoUpdater
     .checkForUpdates()
     .catch((e: Error) => upSet({ status: "error", error: e?.message || String(e) }))
-    .finally(() => clearTimeout(watchdog));
+    .finally(() => {
+      // checkForUpdates 未发任何终止事件即 settle（isUpdaterActive=false 等 no-op 路径）：
+      // 状态机会永久滞留 checking —— 显式落 error 兜底
+      if (upState.status === "checking") {
+        upSet({ status: "error", error: "更新检查不可用：当前安装形态未启用自更新通道。请到 GitHub Releases 下载最新版。" });
+      }
+      clearTimeout(watchdog);
+    });
 }
 
 function initUpdater(): void {
@@ -2215,6 +2239,12 @@ function initUpdater(): void {
   if (!app.isPackaged) {
     upState = { status: "disabled" };
     return; // dev 形态：不接 electron-updater（无 app-update.yml，避免噪声日志）
+  }
+  if (!upIsActive()) {
+    // 无 auto-update 通道（linux deb/unpacked 等）：不排程自动检查，更新入口整体隐藏（同 dev 形态）
+    console.warn("[update] 当前安装形态无自更新通道（如 linux deb/裸目录），自更新入口隐藏");
+    upState = { status: "disabled" };
+    return;
   }
   upIgnored = upLoadSettings().ignored_versions;
   upApplyProxy(); // 启动即应用持久化代理（早于 3s 延迟检查）

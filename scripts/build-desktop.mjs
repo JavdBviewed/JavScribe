@@ -5,7 +5,7 @@
 //   ③ esbuild main.ts → main.cjs、preload.ts → preload.cjs（--external:electron）
 //   ④ 写 dist-desktop/package.json（app.getVersion() 依赖）
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import esbuild from "esbuild";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,6 +90,10 @@ const REWRITES = [
   ['用上方表单添加，或用环境变量 <span class="mono">JAV_ENGINES="名称=URL"</span> 预置',
    '用上方表单添加，或用环境变量 <span class="mono">JAVSCRIBE_ENGINES="名称=URL"</span> 预置'],
   ["<script src=\"/lib/ffmpeg.js\"></script>\n", ""],
+  // demo 试听：web 形态 /demo/ 由 publicDir(vendor) 提供；桌面 publicDir 关闭，
+  // 绝对路径在 file:// 下解析到磁盘根必 404 → 改相对路径 + 构建后补拷 vendor/demo
+  ["<audio id=\"demo-audio\" preload=\"auto\" src=\"/demo/ja-hello.mp3\"></audio>",
+   "<audio id=\"demo-audio\" preload=\"auto\" src=\"./demo/ja-hello.mp3\"></audio>"],
   // 临时 html 位于 client/（比 client/ui/ 高一层），入口相对路径随之变化
   ['<script type="module" src="../web-entry/main.ts"></script>',
    '<script type="module" src="./desktop-entry/main.ts"></script>'],
@@ -130,6 +134,8 @@ const emitted = resolve(ROOT, "client/dist-desktop/index-desktop.html");
 if (existsSync(emitted)) renameSync(emitted, resolve(ROOT, "client/dist-desktop/index.html"));
 rmSync(OUT_HTML, { force: true });
 rmSync(FAV_TMP, { force: true });
+// demo 试听资产补拷（publicDir:false 的显式例外：只拷 demo，ffmpeg.wasm 仍不进桌面端）
+cpSync(resolve(ROOT, "client/vendor/demo"), resolve(ROOT, "client/dist-desktop/demo"), { recursive: true });
 for (const [entry, out] of [
   ["client/desktop/main.ts", "client/dist-desktop/main.cjs"],
   ["client/desktop/preload.ts", "client/dist-desktop/preload.cjs"],
