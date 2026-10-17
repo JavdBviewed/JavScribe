@@ -147,10 +147,15 @@ class _Gate:
     公平性（v0.2.13）：多服务同时排队时，空槽优先给在途（held）最少的
     等待服务，同服务内 FIFO——防止一个服务的长队列独占全部槽位、
     让另一个服务 GPU 全程空转（如 127 的 87 条先跑完、158 的 88 条干等）。
+
+    AUTO（v0.2.44）：auto 任务无固定服务——提取期以 auto_key 占槽（只计
+    总量闸）；派发时刻解析出真实服务后 rekey 迁槽跟随；等待期按已知真实
+    服务的最少在途评估（派发时必绑最轻者），不与显式长队列抢跑。
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, auto_key: str = "") -> None:
         self._limit = max(1, int(limit))
+        self._auto_key = auto_key
         self._held: dict[str, str] = {}  # task_id -> 服务名
         self._waiters: dict[str, set[str]] = {}  # 服务名 -> 等待中的 task_id
         self._cv = asyncio.Condition()
@@ -177,7 +182,18 @@ class _Gate:
         return len(self._held)
 
     def _load(self, engine: str) -> int:
+        if self._auto_key and engine == self._auto_key:
+            return self._auto_load()
         return sum(1 for e in self._held.values() if e == engine)
+
+    def _auto_load(self) -> int:
+        """AUTO 无固定服务：派发时刻必绑最轻真实服务 → 公平口径按「已知
+        真实服务（占槽值/等待组并集）的最少在途」评估；未知真实服务时为 0。"""
+        real = {e for e in self._held.values() if e and e != self._auto_key}
+        real.update(k for k in self._waiters if k != self._auto_key)
+        if not real:
+            return 0
+        return min(sum(1 for e in self._held.values() if e == s) for s in real)
 
     def _min_waiter_load(self) -> int:
         loads = [self._load(e) for e in self._waiters if self._waiters[e]]
@@ -186,6 +202,18 @@ class _Gate:
     def rehold(self, task_id: str, engine: str = "") -> None:
         """工作台重启恢复在途任务时认领槽位（启动期同步调用，尚无等待者）。"""
         self._held[task_id] = engine
+
+    def rekey(self, task_id: str, engine: str) -> None:
+        """AUTO 派发解析出真实服务后的槽位迁移：此后该服务在途计数/公平判定/
+        负载快照（_auto_candidates）均按真实服务走；不迁移则服务队列深度
+        被低估直到回写终态（重启 rehold 才自愈的旧缺口）。"""
+        if task_id not in self._held or self._held[task_id] == engine:
+            return
+        self._held[task_id] = engine
+        try:
+            asyncio.get_running_loop().create_task(self._wake())
+        except RuntimeError:
+            pass
 
     async def acquire(self, task_id: str, get_engine) -> None:
         """get_engine 每次唤醒重读：排队期间任务被「改派」时，等待登记与公平
@@ -673,7 +701,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
     _client_cfg_path = Path(data_dir) / CLIENT_CONFIG_NAME
     _client_cfg = _load_client_config(_client_cfg_path)
     _local_limiter = _Limiter(_client_cfg["extract_workers"])
-    _gate = _Gate(_client_cfg["queue_cap"])
+    _gate = _Gate(_client_cfg["queue_cap"], auto_key=AUTO)
     app.state.gate = _gate  # 测试/排障白盒：观测在途槽占用
     # 全局暂停闸：set()=未暂停。暂停时新任务停在闸前（不占槽、不提取），
     # 运行中任务跑完；重启后状态随 client_config.json 恢复
@@ -1277,6 +1305,7 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
                 task.error = str(ex.detail)
                 return
             _save_uploads_state()
+            _gate.rekey(task.id, task.engine)  # 槽位键跟随解析出的真实服务
         entry = store.get(task.engine)
         assert entry is not None
         task.phase = "dispatching"

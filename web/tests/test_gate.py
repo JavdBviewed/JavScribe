@@ -163,4 +163,85 @@ if __name__ == "__main__":
     test_gate_fairness_prevents_starvation()
     test_gate_fairness_converges_balanced()
     test_gate_set_limit_wakes()
+    test_gate_rekey_follows_dispatch()
+    test_gate_rekey_noop()
+    test_gate_auto_waiter_scores_by_lightest_real_service()
     print("test_gate: ALL OK")
+
+
+def test_gate_rekey_follows_dispatch() -> None:
+    """AUTO 派发解析：槽位键迁到真实服务，per-service 在途/公平立即跟随。"""
+
+    async def scenario() -> None:
+        g = _Gate(2)
+        await g.acquire("a1", lambda: "auto")  # 提取期：auto 占位占槽
+        g.rekey("a1", "svc-a")  # 派发时刻解析出 svc-a
+        assert g.held_count() == 1
+
+        order: list[str] = []
+
+        async def wait_and_record(tid: str, eng: str) -> None:
+            await g.acquire(tid, lambda: eng)
+            order.append(eng)
+
+        ta = asyncio.create_task(wait_and_record("w-a", "svc-a"))
+        tb = asyncio.create_task(wait_and_record("w-b", "svc-b"))
+        await asyncio.sleep(0.05)
+        assert order == ["svc-b"], (
+            f"空槽应给更轻的 svc-b（rekey 后槽计入 svc-a 在途），实际: {order}"
+        )
+        g.release("a1")
+        await asyncio.wait_for(ta, 1.0)
+        assert order.count("svc-a") == 1
+        tb.cancel()
+        await asyncio.gather(ta, tb, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_gate_rekey_noop() -> None:
+    """rekey 未持槽/同名是空操作；无事件循环同步调用不抛（启动期语义）。"""
+    g = _Gate(1)
+    g.rekey("ghost", "svc-a")
+    assert g.held_count() == 0
+    g.rehold("a", "auto")
+    g.rekey("a", "svc-a")
+    assert g.held_count() == 1
+    g.rekey("a", "svc-a")  # 同名 no-op
+
+
+def test_gate_auto_waiter_scores_by_lightest_real_service() -> None:
+    """AUTO 等待任务按「已知真实服务最少在途」评估：同载不抢显式队列，
+    真实服务更轻时才拿槽（v0.2.44 公平口径）。"""
+
+    async def scenario() -> None:
+        g = _Gate(2, auto_key="auto")
+        await g.acquire("a1", lambda: "svc-a")
+        await g.acquire("b1", lambda: "svc-b")  # 两服务同载，满员
+
+        order: list[str] = []
+
+        async def wait_and_record(tid: str, eng: str) -> None:
+            await g.acquire(tid, lambda: eng)
+            order.append(eng)
+
+        ta = asyncio.create_task(wait_and_record("w-a", "svc-a"))
+        tb = asyncio.create_task(wait_and_record("w-auto", "auto"))
+        await asyncio.sleep(0.05)
+        assert order == [], "满员不应消费"
+
+        # 同载：AUTO 评估负载 = min(1,1)=1 与 svc-a 打平 → 无抢跑优先，
+        # 空槽归先登记的 svc-a 等待者
+        g.release("a1")
+        await asyncio.sleep(0.05)
+        assert order == ["svc-a"], f"同载时 AUTO 不应抢显式队列: {order}"
+
+        # svc-b 放行 → AUTO 评估负载 = min(svc-a:1, svc-b:0)=0 → 拿槽
+        g.release("b1")
+        await asyncio.sleep(0.05)
+        assert order == ["svc-a", "auto"], f"真实服务更轻时 AUTO 应拿槽: {order}"
+
+        ta.cancel()
+        await asyncio.gather(ta, tb, return_exceptions=True)
+
+    asyncio.run(scenario())
