@@ -98,6 +98,8 @@ export const desktopTransport: Transport = {
   },
 
   addEngine: (name, url, apiKey) => call("addEngine", name, url, apiKey || ""),
+  updateEngine: (oldName, name, url, apiKey) => call("updateEngine", oldName, name, url, apiKey || ""),
+  getEngineKey: (name) => call<{ api_key: string }>("getEngineKey", name),
   deleteEngine: (name) => call("deleteEngine", name),
   putEngineKey: (name, apiKey) => call("putEngineKey", name, apiKey),
   // 「参与自动均衡」开关：desktop 形态本地持久化（main EngineStore；auto 解析在客户端侧）
@@ -205,6 +207,9 @@ export const desktopTransport: Transport = {
   listBatches: () => call<BatchRecord[]>("listBatches"),
   // 手动清除单条主任务记录（main 进程 batches.json；孤儿行「清除」入口）
   batchClear: (batchId) => call<{ ok: boolean }>("batchClear", batchId),
+  // 写回登记镜像（B）：main 进程磁盘同步镜像（renderer localStorage 异步落盘，SIGKILL 丢最后一次写入）
+  saveWriteBackMirror: (json) => { void call("saveWriteBackMirror", json); },
+  loadWriteBackMirror: async () => (await call<string>("loadWriteBackMirror")) || null,
   // 全局暂停/继续（桌面形态）：本机管线闸 + 全部已登记服务队列扇出，单端失败逐条降级不 throw
   pauseAll: (paused) => call<PauseAllResult>("pauseAll", String(paused)),
   // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）

@@ -582,7 +582,8 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 }
 .job-grid {
   display: grid;
-  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 72px 72px 74px;
+  min-width: 1100px;
+  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 124px 124px minmax(74px, max-content);
   gap: 10px;
   align-items: center;
   padding: 11px 16px;
@@ -638,7 +639,8 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 .pg-size:hover, .pg-size:focus { border-color: var(--accent); color: var(--accent); outline: none; }
 .job-head {
   display: grid;
-  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 72px 72px 74px;
+  min-width: 1100px;
+  grid-template-columns: 28px 92px minmax(120px, 1fr) 92px 132px 76px 64px 124px 124px minmax(74px, max-content);
   gap: 10px;
   padding: 0 16px 6px;
   font-size: 10.5px;
@@ -1127,6 +1129,9 @@ footer {
 }
 #engine-form .modal-body input { width: 100%; }
 .eng-add-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 2px; }
+/* 编辑服务态：复制地址/复制 Key/查看 Key 行（添加态 hidden） */
+.eng-edit-copies { display: flex; gap: 8px; margin-top: 12px; }
+.eng-edit-copies[hidden] { display: none; }
 
 /* ---------- 目录浏览弹窗（web 形态「浏览」按钮；desktop 形态走原生对话框不渲染此 UI） ---------- */
 #dir-backdrop {

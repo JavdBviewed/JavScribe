@@ -304,6 +304,11 @@
           <span class="field-label">API Key（可选）</span>
           <input id="engine-key" type="password" placeholder="服务端设置了 JAVSCRIBE_API_KEY 时必填" maxlength="128">
         </label>
+        <div id="engine-edit-copies" class="eng-edit-copies" hidden>
+          <button type="button" class="btn btn-small" id="engine-copy-url" title="复制该服务地址到剪贴板">复制地址</button>
+          <button type="button" class="btn btn-small" id="engine-copy-key" title="复制该服务 API Key 到剪贴板">复制 Key</button>
+          <button type="button" class="btn btn-small" id="engine-key-reveal" title="显示/隐藏 API Key">查看 Key</button>
+        </div>
         <div class="eng-add-actions">
           <button type="submit" id="engine-add-submit" class="btn btn-primary">添加服务</button>
           <button type="button" id="engine-add-cancel" class="btn">取消</button>

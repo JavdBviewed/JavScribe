@@ -52,6 +52,11 @@ export interface Transport {
   listEngines(): Promise<Engine[]>;
   /** 添加引擎；重名异址等 400 会 throw */
   addEngine(name: string, url: string, apiKey?: string): Promise<void>;
+  /** 更新引擎（改名/改址/改 key）；成功返回后 UI 需自行 remap 写回登记/pending 行的服务名。
+   *  仅 desktop 形态实现（本地 engines.json）；web 未实现 → UI 隐藏编辑入口 */
+  updateEngine?(oldName: string, name: string, url: string, apiKey: string): Promise<void>;
+  /** 读取本地登记的 API Key（编辑弹窗预填/查看）；仅 desktop 形态实现 */
+  getEngineKey?(name: string): Promise<{ api_key: string }>;
   /** 删除引擎（幂等：不存在不抛） */
   deleteEngine(name: string): Promise<void>;
   /** 登记/更新 API Key */
@@ -88,6 +93,11 @@ export interface Transport {
   listBatches?(): Promise<BatchRecord[]>;
   /** 手动清除单条主任务记录（看板孤儿行「清除」入口）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
   batchClear?(batchId: string): Promise<{ ok: boolean }>;
+  /** 写回登记镜像（desktop）：main 进程把登记 JSON 同步落盘（renderer localStorage 异步落盘，
+   *  SIGKILL 丢最后一次写入）；fire-and-forget 不 throw；web 形态未实现，登记仅走 localStorage */
+  saveWriteBackMirror?(json: string): void;
+  /** 读写回登记镜像（启动兜底：localStorage 丢失时合并灌回内存）；未实现 / 无镜像返回 null */
+  loadWriteBackMirror?(): Promise<string | null>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */

@@ -100,12 +100,14 @@ class EngineStore {
     fs.renameSync(tmp, this._path);
   }
 
-  private _upsert(name: string, url: string, apiKey: string | null): void {
-    this._engines.set(name, {
+  private _upsert(name: string, url: string, apiKey: string | null): EngineEntry {
+    const entry: EngineEntry = {
       name,
       url: normUrl(url),
       api_key: apiKey === null ? (this._engines.get(name)?.api_key ?? "") : apiKey.trim(),
-    });
+    };
+    this._engines.set(name, entry);
+    return entry;
   }
 
   all(): EngineEntry[] { return [...this._engines.values()]; }
@@ -121,6 +123,23 @@ class EngineStore {
     this._upsert(name, url, apiKey || "");
     this._save();
     return this._engines.get(name)!;
+  }
+
+  /** 更新（改名/改址/改 key）：成功返回 entry；旧名不存在 / 新名称或地址非法 / 新名已被占用 → null；
+   *  「参与均衡」状态保留不改（UI 另有开关） */
+  update(oldName: string, name: string, url: string, apiKey: string): EngineEntry | null {
+    oldName = (oldName || "").trim();
+    name = (name || "").trim();
+    url = (url || "").trim();
+    const e = this._engines.get(oldName);
+    if (!e) return null;
+    if (!name || !isUrl(url)) return null;
+    if (name !== oldName && this._engines.has(name)) return null;
+    const entry = this._upsert(name, url, apiKey);
+    entry.enabled = e.enabled; // _upsert 是整条覆盖，回写保留的均衡态
+    if (name !== oldName) this._engines.delete(oldName);
+    this._save();
+    return entry;
   }
 
   setApiKey(name: string, key: string): EngineEntry | null {
@@ -1240,7 +1259,7 @@ function registerIpc(): void {
   });
   ipcMain.on("win-close", () => win?.close());
   ipcMain.handle("t-call", async (_ev, args: { method: string; args?: unknown[] }) => {
-    const [a0, a1, a2] = (args?.args || []) as string[];
+    const [a0, a1, a2, a3] = (args?.args || []) as string[];
     try {
       switch (args?.method) {
         case "getHealth": {
@@ -1292,6 +1311,32 @@ function registerIpc(): void {
           const e = store.setEnabled(String(a0 || ""), a1 === "true");
           if (!e) return { ok: false, error: "服务不存在" };
           return { ok: true };
+        }
+        case "updateEngine": {
+          // 编辑服务（改名/改址/改 key）；改名时 remap 主任务记录 batches.json 的服务名 key，
+          // 让「父任务-子任务」对账按新名继续命中（render 侧写回登记/ pending 行由 UI 自行 remap）
+          const old = String(a0 || "").trim();
+          const e = store.update(old, String(a1 || ""), String(a2 || ""), String(a3 || ""));
+          if (!e) return { ok: false, error: "服务不存在，或新名称/地址非法，或新名称已被其他服务占用" };
+          if (e.name !== old) {
+            let touched = false;
+            for (const rec of Object.values(batches)) {
+              const svc = rec.services;
+              if (!svc || !(old in svc) || !svc[old]?.length) continue;
+              svc[e.name] = [...(svc[e.name] || []), ...svc[old]];
+              delete svc[old];
+              touched = true;
+            }
+            if (touched) batchesSave();
+          }
+          lastSnap = null;
+          return { ok: true };
+        }
+        case "getEngineKey": {
+          // 读取本地登记的 API Key（编辑弹窗预填/查看用；key 只在本机 engines.json）
+          const e = store.get(String(a0 || ""));
+          if (!e) return { ok: false, error: "服务不存在" };
+          return { ok: true, data: { api_key: e.api_key } };
         }
         case "refreshEngines": {
           // 手动重探测所有服务在线状态/版本/运行任务数：绕过 3s TTL 单飞快照
@@ -1635,6 +1680,20 @@ function registerIpc(): void {
           batchCap();
           batchesSave();
           return { ok: true };
+        }
+        // 写回登记镜像（10-17-javscribe-0242-batch-bugs B）：renderer localStorage 异步落盘，
+        // SIGKILL 丢最后一次写入 → renderer 每次保存同步镜像到 main 磁盘，启动丢失时以此兜底
+        case "saveWriteBackMirror": {
+          wbMirrorSave(String(a0 || "{}"));
+          return { ok: true };
+        }
+        case "loadWriteBackMirror": {
+          try {
+            return { ok: true, data: wbMirrorPath && fs.existsSync(wbMirrorPath)
+              ? fs.readFileSync(wbMirrorPath, "utf-8") : "" };
+          } catch {
+            return { ok: true, data: "" };
+          }
         }
         // 全局暂停/继续（桌面版）：本机管线闸立即生效（持久化）+ 扇出所有已登记服务队列
         //（单服务失败逐条降级不 throw；离线按最近快照预判，与工作台 /api/pause 文案对齐）
@@ -2829,6 +2888,25 @@ function batchesSave(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 写回登记镜像（10-17-javscribe-0242-batch-bugs B）：renderer localStorage 异步落盘（LevelDB），
+// SIGKILL 丢最后一次写入 → renderer 每次 saveWriteBackStore 由 main 进程同步镜像 writeback.json
+//（userData）；启动时 renderer localStorage 丢失则合并读回此文件兜底（正常退出 localStorage
+// 完整，此文件仅是镜像）。消费/剪枝同样过 saveWriteBackStore，镜像与内存最终一致。
+// ---------------------------------------------------------------------------
+const WB_MIRROR_FILE = "writeback.json";
+let wbMirrorPath = "";
+
+function wbMirrorSave(raw: string): void {
+  if (!wbMirrorPath) return;
+  try {
+    fs.mkdirSync(path.dirname(wbMirrorPath), { recursive: true });
+    fs.writeFileSync(wbMirrorPath, raw);
+  } catch (e) {
+    console.error("[writeback-mirror] 镜像写入失败:", (e as Error).message);
+  }
+}
+
 /** 派发登记：扫描提交成功 / 上传 201 受理 → services[engine] += job_id；label 仅空补 */
 function batchUpsert(id: string, label: string, service: string, jobId: string): void {
   if (!id || !jobId) return;
@@ -3223,6 +3301,7 @@ app.whenReady().then(() => {
   watchLoad();
   batchesPath = path.join(app.getPath("userData"), BATCH_FILE);
   batchesLoad();
+  wbMirrorPath = path.join(app.getPath("userData"), WB_MIRROR_FILE);
   void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）

@@ -14,6 +14,10 @@ test("1440px 无横滚；1024px 前四列不横滚", async ({ page, request }) =
   const row = list.locator(".job-row").first();
   await expect(row).toBeVisible();
 
+  // 显式 1440x1000 内容：本机 Xvfb 默认屏幕 1280x1024，Chromium 会把窗口钳制到屏幕宽，
+  // 环境视口不等于测试意图的 1440 → 显式 setViewportSize 保证断言与环境屏幕无关
+  //（Electron 下走 webContents 尺寸，可超屏幕，walk 同口径）
+  await page.setViewportSize({ width: 1440, height: 1000 });
   // 1440px：表体不产生横滚
   const w1440 = await list.evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
   expect(w1440.sw, "1440px 视口任务表不应横滚").toBeLessThanOrEqual(w1440.cw);

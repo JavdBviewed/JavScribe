@@ -128,6 +128,124 @@ const state: AppState = {
 // 经典脚本时代顶层 const 是全局词法绑定，模块化后显式挂 window（无其它行为影响）
 (window as unknown as { state: AppState }).state = state;
 
+// ---------- 写回登记持久化（10-17-javscribe-0242-batch-bugs B） ----------
+// 背景：writeBackJobs / watchWriteBack 原是纯内存态，客户端重启即丢登记 →
+// 批量提交后关过客户端，子任务完成时重启首见的 done 行无登记 → pickWriteBackRows
+// 永不命中 → 字幕永不写回，只能人工逐个下载。
+// 策略：localStorage 持久化；启动读回；refresh 对账「登记超宽限期且服务/pending 行
+// 均不可见」（job 已从服务端窗口过期）→ 丢弃（过期 job 本就不可下载）。
+const WB_STORE_KEY = "javweb_writeback_v1";
+const WB_PRUNE_GRACE_MS = 10 * 60 * 1000; // 新登记宽限：服务行可能尚未轮到轮询
+const wbAt = new Map<string, number>(); // key -> 登记时刻（剪枝宽限用）
+function loadWriteBackStore(): void {
+  try {
+    const raw = localStorage.getItem(WB_STORE_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw) as { jobs?: [string, { info?: unknown; at?: number }][]; forced?: string[] };
+    for (const [k, e] of d.jobs || []) {
+      const info = e?.info as WriteBackInfo | undefined;
+      if (k && info && typeof info.engine === "string" && typeof info.videoName === "string") {
+        info.dirHandle = null; // 目录句柄不可序列化；desktop 写回走 videoPath
+        state.writeBackJobs.set(k, info);
+        wbAt.set(k, Number(e?.at) || Date.now());
+      }
+    }
+    for (const k of d.forced || []) if (typeof k === "string") state.watchWriteBack.add(k);
+  } catch { /* 登记损坏按空处理，refresh 剪枝兜底 */ }
+}
+// desktop：main 进程磁盘镜像钩子（initApp 注入；renderer localStorage 异步落盘，SIGKILL 丢最后一次写入）
+let wbMirrorSave: ((json: string) => void) | null = null;
+function saveWriteBackStore(): void {
+  let json = "";
+  try {
+    json = JSON.stringify({
+      jobs: [...state.writeBackJobs.keys()].map((k) => [k, { info: state.writeBackJobs.get(k), at: wbAt.get(k) || Date.now() }]),
+      forced: [...state.watchWriteBack],
+    });
+    localStorage.setItem(WB_STORE_KEY, json);
+  } catch { /* 持久化失败不影响内存登记（本会话仍有效） */ }
+  if (json) { try { wbMirrorSave?.(json); } catch { /* 镜像失败不影响内存登记 */ } }
+}
+// 预登记（10-17-javscribe-0242-batch-bugs B 收口）：派发时刻（上传请求发出前）先按临时键
+// engine|pre|<视频名> 持久化登记；job 真实受理后再 rekey 为正式键 engine|job_id（真实登记点
+// 先 rekey 后 registerWriteBack 覆盖 info）；若中间客户端被杀，重启后 refresh 的
+// bindPreRegistrations 按 serve 真行（job_id + 视频名）补 rekey。点完生成 1s 内关客户端
+// 首文件登记不再丢失。
+// 安全：正式键不含 |pre|，pickWriteBackRows 永不命中 pre 键提前写回；未获得 job 的 pre 键
+// （派发失败/取消）永不进 prune live 集，10 分钟宽限后自然剪除。
+function preKeyOf(engine: string, videoName: string): string {
+  return engine + "|pre|" + videoName;
+}
+function rekeyWriteBack(oldKey: string, newKey: string): void {
+  if (oldKey === newKey || !state.writeBackJobs.has(oldKey)) return;
+  const info = state.writeBackJobs.get(oldKey)!;
+  state.writeBackJobs.set(newKey, info);
+  wbAt.set(newKey, wbAt.get(oldKey) || Date.now());
+  state.writeBackJobs.delete(oldKey);
+  wbAt.delete(oldKey);
+  if (state.watchWriteBack.has(oldKey)) {
+    state.watchWriteBack.delete(oldKey);
+    state.watchWriteBack.add(newKey);
+  }
+}
+// 预登记绑定：refresh 每轮、prune 之前调。serve 真行（带 job_id）视频名在 file（本地上传 /
+// mock）或 label（生产 opus hash 行）→ 临时键 rekey 为 engine|job_id（强制写回集随迁）。
+function bindPreRegistrations(rows: readonly { engine: string; job_id?: string | null; file?: string | null; label?: string | null }[]): void {
+  let changed = false;
+  for (const k of [...state.writeBackJobs.keys()]) {
+    const i = k.indexOf("|pre|");
+    if (i < 0) continue;
+    const engine = k.slice(0, i);
+    const videoName = k.slice(i + 5); // "|pre|" 长度
+    const row = rows.find((r) => r.job_id && r.engine === engine
+      && ((r.file && r.file === videoName) || (r.label && r.label === videoName)));
+    if (!row) continue;
+    rekeyWriteBack(k, engine + "|" + row.job_id);
+    changed = true;
+  }
+  if (changed) saveWriteBackStore();
+}
+function pruneWriteBackStore(): void {
+  const live = new Set<string>();
+  for (const r of state._jobs) if (r.job_id) live.add(r.engine + "|" + r.job_id);
+  for (const p of state._pending.values()) if (p.row.job_id) live.add(p.row.engine + "|" + p.row.job_id);
+  const now = Date.now();
+  let changed = false;
+  for (const k of [...state.writeBackJobs.keys()]) {
+    if (live.has(k)) continue;
+    if (now - (wbAt.get(k) || now) < WB_PRUNE_GRACE_MS) continue;
+    state.writeBackJobs.delete(k);
+    state.watchWriteBack.delete(k);
+    wbAt.delete(k);
+    changed = true;
+  }
+  if (changed) saveWriteBackStore();
+}
+// 写回登记兜底（10-17-javscribe-0242-batch-bugs B）：renderer localStorage 异步落盘，SIGKILL 丢
+// 最后一次写入 → 启动读 main 进程磁盘镜像（writeback.json）合并灌回内存（内存已有 key 优先）。
+// 须在 initApp 内调（transport 就绪后才走 IPC）；正常退出 localStorage 完整，合并为空操作。
+async function hydrateWriteBackMirror(t: Transport): Promise<void> {
+  if (typeof t.loadWriteBackMirror !== "function") return;
+  try {
+    const raw = await t.loadWriteBackMirror();
+    if (!raw) return;
+    const d = JSON.parse(raw) as { jobs?: [string, { info?: unknown; at?: number }][]; forced?: string[] };
+    let added = 0;
+    for (const [k, e] of d.jobs || []) {
+      const info = e?.info as WriteBackInfo | undefined;
+      if (!k || state.writeBackJobs.has(k)) continue;
+      if (!info || typeof info.engine !== "string" || typeof info.videoName !== "string") continue;
+      info.dirHandle = null; // 目录句柄不可序列化；desktop 写回走 videoPath
+      state.writeBackJobs.set(k, info);
+      wbAt.set(k, Number(e?.at) || Date.now());
+      added++;
+    }
+    for (const k of d.forced || []) if (typeof k === "string") state.watchWriteBack.add(k);
+    if (added) saveWriteBackStore(); // 回填 localStorage，后续会话不再依赖镜像
+  } catch { /* 镜像损坏/缺失按无处理，refresh 剪枝兜底 */ }
+}
+loadWriteBackStore();
+
 const PLANE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
 
 const STATUS_ZH: Record<string, string> = {
@@ -202,6 +320,9 @@ function jav(): JavExtractAPI | undefined {
 }
 
 export function initApp(t: Transport, platform: PlatformAdapter): void {
+  // 写回登记镜像（B）：注入 main 磁盘镜像钩子 + 启动兜底读回（SIGKILL 丢 localStorage 最后一次写入）
+  wbMirrorSave = (json) => { t.saveWriteBackMirror?.(json); };
+  void hydrateWriteBackMirror(t);
   // ---------- 静态表单元素句柄（HTML 固定节点，轮询不重建，取一次即可） ----------
   const engineSelect = $("engine-select") as HTMLSelectElement;
   const engineName = $("engine-name") as HTMLInputElement;
@@ -329,7 +450,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 控制无本地源场景（web 形态 / desktop 拖入文件）既有行为，本线不改 web 语义。
   function registerWriteBack(key: string, info: WriteBackInfo): void {
     state.writeBackJobs.set(key, info);
+    wbAt.set(key, Date.now());
     if (platform.kind === "desktop" && info.videoPath) state.watchWriteBack.add(key);
+    saveWriteBackStore();
   }
 
   // ---------- 完成后写回源目录（auto-save）：running→done 即时分支 + reconcile 对账兜底触发 ----------
@@ -344,6 +467,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (!state.autoSave && !state.watchWriteBack.has(key)) return;
     state.writeBackJobs.delete(key);
     state.watchWriteBack.delete(key);
+    wbAt.delete(key);
+    saveWriteBackStore();
     if (platform.canWriteBack(info)) doWriteBack(r, info);
     else autoDownloadSrt(r, info.videoName);
   }
@@ -400,6 +525,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       renderEngines(engines);
       state._jobs = jobs;
       state._summary = summary;
+      bindPreRegistrations(jobs); // 预登记绑定：serve 真行可见 → 临时键 rekey 为正式键
+      pruneWriteBackStore(); // 写回登记剪枝：job 已过期消失且超宽限 → 丢弃
       reconcilePending(); // S4：行接管 pending 记账（行到终态即释 cap 槽）
       reconcilePendingRows(); // 行优先：serve 真行可见 → 同 job_id 的 pending 行让位删除（不双行）
       if (ccRaw) {
@@ -779,6 +906,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <span class="lamp"></span>
       <h3>${esc(e.name)}</h3>
       <button type="button" class="icon-btn set" data-name="${esc(e.name)}" title="服务设置">&#9881;</button>
+      ${typeof t.updateEngine === "function" ? `<button type="button" class="icon-btn edit" data-name="${esc(e.name)}" title="编辑服务（改名称/地址/Key，可复制）">&#9998;</button>` : ""}
       <button type="button" class="icon-btn del" data-name="${esc(e.name)}" title="删除服务">&#10005;</button>
     </div>
     <div class="eng-url mono">
@@ -895,6 +1023,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         (bal as HTMLInputElement).checked = !on;
         toast(ex instanceof Error ? ex.message : "设置失败", "err");
       }
+      return;
+    }
+    const edit = target.closest<HTMLElement>(".edit");
+    if (edit) {
+      if (typeof t.updateEngine !== "function") return; // web 形态无本地引擎登记（理论分支）
+      void engineEditOpen(edit.dataset.name || "");
       return;
     }
     const del = target.closest<HTMLElement>(".del");
@@ -2101,8 +2235,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const oldInfo = state.writeBackJobs.get(eng + "|" + jid);
       if (oldInfo) {
         state.writeBackJobs.set(eng + "|" + d.jobId, oldInfo);
+        wbAt.set(eng + "|" + d.jobId, Date.now());
         // 强制写回标记随重跑迁移（否则本地源任务点「重试/重新生成」后新 job_id 丢标记 → F1 复发）
-        if (state.watchWriteBack.has(eng + "|" + jid)) state.watchWriteBack.add(eng + "|" + d.jobId);
+        if (state.watchWriteBack.has(eng + "|" + jid)) {
+          state.watchWriteBack.delete(eng + "|" + jid);
+          state.watchWriteBack.add(eng + "|" + d.jobId);
+        }
+        saveWriteBackStore();
       }
       toast(isErrRetry
         ? `「${name}」已重新入队 → 任务 ${d.jobId}`
@@ -2300,15 +2439,81 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const engineAddBackdrop = $("engine-add-backdrop") as HTMLDivElement | null;
   const engineAddSubmit = $("engine-add-submit") as HTMLButtonElement | null;
 
+  // 编辑态：null=「添加服务」；非 null=「编辑服务」（复用同一弹窗，预填 + 复制/查看 Key）
+  let engineEditMode: { oldName: string } | null = null;
+
+  function engineEditResetUi(): void {
+    engineEditMode = null;
+    engineForm.reset();
+    engineKey.type = "password";
+    ($("engine-add-title") as HTMLElement).textContent = "添加字幕服务";
+    const revealBtn = $("engine-key-reveal") as HTMLButtonElement | null;
+    if (revealBtn) revealBtn.textContent = "查看 Key";
+    if (engineAddSubmit) engineAddSubmit.textContent = "添加服务";
+    const copies = $("engine-edit-copies") as HTMLElement | null;
+    if (copies) copies.hidden = true;
+  }
+
   function engineAddClose(): void {
+    engineEditResetUi();
     if (engineAddBackdrop) engineAddBackdrop.hidden = true;
   }
 
   function engineAddOpen(): void {
     if (!engineAddBackdrop) return;
+    engineEditResetUi();
     engineAddBackdrop.hidden = false;
     engineName.focus();
     engineName.select();
+  }
+
+  /** 编辑服务：预填名称/地址/Key（Key 走 getEngineKey 本地登记），切编辑态文案 */
+  async function engineEditOpen(name: string): Promise<void> {
+    if (!engineAddBackdrop || typeof t.updateEngine !== "function") return;
+    const eng = (state.engines || []).find((e) => e.name === name);
+    if (!eng) return;
+    engineEditMode = { oldName: name };
+    engineForm.reset();
+    engineName.value = eng.name;
+    engineUrl.value = eng.url;
+    engineKey.value = "";
+    if (typeof t.getEngineKey === "function") {
+      try { engineKey.value = (await t.getEngineKey(name)).api_key; } catch { /* 读不到按空预填 */ }
+    }
+    ($("engine-add-title") as HTMLElement).textContent = "编辑服务";
+    if (engineAddSubmit) engineAddSubmit.textContent = "保存修改";
+    const copies = $("engine-edit-copies") as HTMLElement | null;
+    if (copies) copies.hidden = false;
+    engineAddBackdrop.hidden = false;
+    engineName.focus();
+    engineName.select();
+  }
+
+  /** 服务改名联动（B 联动）：写回登记/watch/勾选 key 前缀、pending 子行、最近使用服务。
+   *  写回登记不 remap → 改名后旧名 key 对不上新快照行，重启后写回静默失效（与 B 同根因） */
+  function remapEngineName(oldName: string, newName: string): void {
+    if (oldName === newName) return;
+    const prefix = oldName + "|";
+    const remapKey = (k: string): string => (k.startsWith(prefix) ? newName + k.slice(prefix.length) : k);
+    for (const [k, info] of [...state.writeBackJobs]) {
+      const nk = remapKey(k);
+      if (nk === k) continue;
+      state.writeBackJobs.delete(k);
+      state.writeBackJobs.set(nk, { ...info, engine: newName });
+      const at = wbAt.get(k);
+      if (at != null) { wbAt.set(nk, at); wbAt.delete(k); }
+    }
+    for (const k of [...state.watchWriteBack]) {
+      const nk = remapKey(k);
+      if (nk !== k) { state.watchWriteBack.delete(k); state.watchWriteBack.add(nk); }
+    }
+    for (const k of [...state.selected]) {
+      const nk = remapKey(k);
+      if (nk !== k) { state.selected.delete(k); state.selected.add(nk); }
+    }
+    for (const p of state._pending.values()) if (p.row.engine === oldName) p.row.engine = newName;
+    if (localStorage.getItem("javweb_engine") === oldName) localStorage.setItem("javweb_engine", newName);
+    saveWriteBackStore();
   }
 
   ($("engine-add-btn") as HTMLButtonElement | null)?.addEventListener("click", engineAddOpen);
@@ -2345,6 +2550,23 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (ev.key === "Escape" && engineAddBackdrop && !engineAddBackdrop.hidden) engineAddClose();
   });
 
+  // 编辑态：复制地址 / 复制 Key / 显示-隐藏 Key（仅 desktop 编辑态可用，web 形态该行隐藏）
+  ($("engine-copy-url") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+    const ok = await copyText(engineUrl.value.trim());
+    toast(ok ? "服务地址已复制" : "复制失败，请手动选择复制", ok ? "ok" : "err");
+  });
+  ($("engine-copy-key") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+    const key = engineKey.value.trim();
+    if (!key) { toast("该服务未登记 API Key", "err"); return; }
+    const ok = await copyText(key);
+    toast(ok ? "API Key 已复制" : "复制失败，请手动选择复制", ok ? "ok" : "err");
+  });
+  ($("engine-key-reveal") as HTMLButtonElement | null)?.addEventListener("click", () => {
+    const reveal = engineKey.type === "password";
+    engineKey.type = reveal ? "text" : "password";
+    ($("engine-key-reveal") as HTMLButtonElement).textContent = reveal ? "隐藏 Key" : "查看 Key";
+  });
+
   engineForm.onsubmit = async (ev) => {
     ev.preventDefault();
     const name = engineName.value.trim();
@@ -2352,8 +2574,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const api_key = engineKey.value.trim();
     if (engineAddSubmit) engineAddSubmit.disabled = true;
     try {
-      await t.addEngine(name, url, api_key);
-      engineForm.reset();
+      if (engineEditMode) {
+        const oldName = engineEditMode.oldName;
+        await t.updateEngine!(oldName, name, url, api_key);
+        remapEngineName(oldName, name); // 写回登记/ pending 行/勾选/主任务(batches) 联动改键
+        toast(`服务「${name}」已更新`, "ok");
+      } else {
+        await t.addEngine(name, url, api_key);
+      }
+      engineEditResetUi();
       engineAddClose();
       refresh();
     } catch (e) {
@@ -3182,9 +3411,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     updateGo();
     localStorage.setItem("javweb_engine", engine);
     preparePipeline();
+    // 预登记：上传请求发出前先持久化登记（job 受理后 ok 分支 rekey 正式键）
+    registerWriteBack(preKeyOf(engine, file.name), {
+      engine, videoName: file.name, dirHandle: state._fsFileDir || null,
+      videoPath: (file as FolderFile)._localPath || null,
+    });
     dispatchTracked(file, engine).then(([ok, d]) => {
       if (ok) {
         const up = d as UploadStatus;
+        rekeyWriteBack(preKeyOf(engine, file.name), engine + "|" + up.job_id);
         registerWriteBack(engine + "|" + up.job_id, {
           engine, videoName: file.name, dirHandle: state._fsFileDir || null,
           videoPath: (file as FolderFile)._localPath || null,
@@ -3258,6 +3493,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         const real = realName; // 收窄为 string（闭包内使用需 const）
         const idx = started++;
         const file = queue[idx];
+        // 预登记：子行已建、即将提交 → 临时键先持久化（受理后 rekey 正式键）
+        registerWriteBack(preKeyOf(real, file.name), {
+          engine: real, videoName: file.name, dirHandle: file._dirHandle || null,
+          videoPath: file._localPath || null,
+        });
         if (rowFirst) {
           pend[idx].dispatched = true; // 取消/暂停记账：链已派发（含随后进提取池等槽）
           pend[idx].row.engine = real; // auto 解析出的真实服务回填子行
@@ -3273,6 +3513,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             okN++;
             const up = d as UploadStatus;
             if (up.job_id) {
+              rekeyWriteBack(preKeyOf(real, file.name), real + "|" + up.job_id);
               registerWriteBack(real + "|" + up.job_id, {
                 engine: real, videoName: file.name, dirHandle: file._dirHandle || null,
                 videoPath: file._localPath || null,
@@ -3719,6 +3960,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         Object.defineProperty(audio, "size", { value: audioBytes, configurable: true });
         audio._javOpusPath = opusPath;
         audio._javOpusSize = audioBytes;
+        // 预登记：上传请求发出前先持久化登记（job 出具后 rekey 正式键）
+        registerWriteBack(preKeyOf(eng, videoName), { engine: eng, videoName, dirHandle: null, videoPath: h.videoPath });
         const d = await t.uploadAudio(upFile, eng, audio, (loaded, total, pct) => {
           prog.textContent = `上传音轨 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`;
         });
@@ -3733,6 +3976,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           else await new Promise((r) => setTimeout(r, 300));
         }
         if (!jobId) throw new Error("提交接受超时（可在任务表查看）");
+        rekeyWriteBack(preKeyOf(eng, videoName), eng + "|" + jobId);
         registerWriteBack(eng + "|" + jobId, {
           engine: eng, videoName, dirHandle: null, videoPath: h.videoPath,
         });
@@ -4753,6 +4997,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           Object.defineProperty(f, "size", { value: it.size, configurable: true });
           f._localPath = it.path;
           preparePipeline("监听");
+          // 预登记：上传请求发出前先持久化登记（受理后 rekey 正式键）
+          registerWriteBack(preKeyOf(engine, it.name), { engine, videoName: it.name, dirHandle: null, videoPath: it.path });
           dispatchTracked(f, engine, "监听 · ").then(([ok, d]) => {
             watchDispatchingPath = null;
             state.busy = false;
@@ -4760,6 +5006,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const up = d as UploadStatus;
             if (ok && up.job_id) {
               const k = engine + "|" + up.job_id;
+              rekeyWriteBack(preKeyOf(engine, it.name), k);
               registerWriteBack(k, { engine, videoName: it.name, dirHandle: null, videoPath: it.path }); // 完成后强制写回影片同目录（不受 autoSave 门控）
               void b.markProcessed(it.path).catch(() => {});
               toast(`监听 · ${it.name} 已提交 → 任务 ${up.job_id}`, "ok");
