@@ -222,3 +222,53 @@ export function pickAutoEngine(
   });
   return pickMin(vramOk) ?? pickMin(cands);
 }
+
+// ---------- auto 批次分发（10-17-javscribe-0243-scan-auto-balance；单测见 client/tests/unit/auto-engine.test.mjs） ----------
+// 背景：「扫描目录」选 auto 时客户端曾 probe 一次把整批钉死单台服务，
+// 与「选择文件夹」per-file 派发时刻均衡不对称。desktop 形态 serve 之间无对等注册表，
+// 分发只能客户端做：提交前按负载把文件摊到候选服务，子批各自 /scan/submit。
+
+/**
+ * auto 批次分发（list-scheduling）：每个文件依次落「本批已分配数」最少的服务；
+ * 平手取输入序靠前者（调用方按在途升序传入、平手注册序 → 整体负载最均）。
+ * 返回每文件的服务名（长度 = n）；空输入/ n<=0 → []。
+ */
+export function distributeToEngines(ordered: readonly string[], n: number): string[] {
+  if (!ordered.length || !Number.isFinite(n) || n <= 0) return [];
+  const assigned = new Array<number>(ordered.length).fill(0);
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    let bi = 0;
+    for (let j = 1; j < assigned.length; j++) if (assigned[j] < assigned[bi]) bi = j;
+    assigned[bi]++;
+    out.push(ordered[bi]);
+  }
+  return out;
+}
+
+const _enc = new TextEncoder();
+
+/**
+ * 路径列表按 JSON 字节切子批（desktop 扫描 auto 分发用）：
+ * 每元素计 UTF-8 字节 + 3（引号/逗号），数组括号预留 2；单批 ≤ maxBytes。
+ * 调用方上限取 900KB：新 serve 16MB / 旧 serve（≤0.2.7）1MB 都兼容，
+ * 杜绝「整批钉死单台 → bad body size (max 1024KB)」复发。
+ */
+export function chunkPathsByBytes(paths: readonly string[], maxBytes: number): string[][] {
+  const out: string[][] = [];
+  if (!paths.length || !Number.isFinite(maxBytes) || maxBytes < 8) return out;
+  let cur: string[] = [];
+  let used = 2; // "[]"
+  for (const p of paths) {
+    const c = _enc.encode(p).length + 3;
+    if (cur.length && used + c > maxBytes) {
+      out.push(cur);
+      cur = [];
+      used = 2;
+    }
+    cur.push(p);
+    used += c;
+  }
+  out.push(cur);
+  return out;
+}

@@ -3,12 +3,12 @@
 // 网络请求全部走 transport 接口（web 形态实现见 transport-web）。
 
 import type { Transport } from "../core/transport";
-import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
+import { LOCAL_SUB_PATTERNS, MIN_FREE_VRAM_GB, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
+import { canStartInFlight, chunkPathsByBytes, CLIENT_CFG_DEFAULTS, countInFlightRows, distributeToEngines, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
 import { TransportError } from "../core/transport";
@@ -2607,7 +2607,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (!engineHint) return;
     const v = engineSelect.value;
     engineHint.textContent = v === "auto"
-      ? "⚖ 自动均衡：每个任务派发时刻按实时负载选最闲服务（推荐）；任务表内可逐条/批量改派"
+      ? "⚖ 自动均衡：派发/提交时刻按实时负载选最闲服务（推荐）；扫描目录提交按在途把文件摊给各服务；任务表内可逐条/批量改派"
       : (v ? `已绑定「${v}」：整批只发该服务、不参与均衡（任务表内可改派）` : "");
   }
 
@@ -3340,6 +3340,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     });
   }
 
+  // 「扫描目录」auto 候选集（desktop 形态，10-17-javscribe-0243）：与 resolveAutoEngine 同口径——
+  // 在线 + 参与均衡 + 已登记 API Key + 空闲显存充足（无数据不过滤；全过滤回退全量）；
+  // 按在途升序排（stable sort，平手保注册序）→ distributeToEngines 整批摊匀。
+  function autoBalancedCandidates(): Engine[] | null {
+    const pool = state.engines.filter((e) => e.online && e.enabled !== false && e.has_key);
+    if (!pool.length) return null;
+    const vramOk = pool.filter((e) => {
+      const m = state._metrics[e.name];
+      if (!m || !m.ok || !m.metrics) return true; // 无数据视为满足，不过滤
+      const free = freeVramGb(m.metrics.gpu ?? null);
+      return free == null || free >= MIN_FREE_VRAM_GB;
+    });
+    const cands = vramOk.length ? vramOk : pool;
+    return [...cands].sort((a, b) => inFlightOf(a.name) - inFlightOf(b.name));
+  }
+
   function canDispatch(engine: string): boolean {
     return canStartInFlight({ engine, cap: queueCapNow(), inFlight: inFlightOf, engines: state.engines });
   }
@@ -3659,6 +3675,101 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         watchPump();
       },
     );
+  }
+
+  // 「扫描目录」auto（desktop 形态，10-17-javscribe-0243）：serve 单 job 多文件无 per-file auto、
+  // serve 间无对等注册表 → 客户端做 list-scheduling：按在途负载把文件摊到候选服务，按服务分组、
+  // 按 JSON 字节切子批（单批上限 900KB：兼容新 serve 16MB / 旧 serve 1MB，杜绝 bad body size），
+  // 同一主任务 batch_id 顺序提交；400 not-found 组进 overflow 按候选序重试，候选耗尽回退本机提取
+  // 上传（desktop 扫描恒为客户端本机磁盘，回退必可用）。决策纯函数在 core/concurrency（单测）。
+  const SCAN_SUB_BATCH_MAX_BYTES = 900 * 1024;
+  async function submitScanAutoDesktop(files: string[], batch: { id: string; label: string }) {
+    const cands = autoBalancedCandidates();
+    if (!cands) {
+      toast("自动均衡没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
+      return;
+    }
+    // 摊位：候选已按在途升序（平手注册序）→ 每文件落本批分配数最少的服务
+    const assign = distributeToEngines(cands.map((e) => e.name), files.length);
+    const bySvc = new Map<string, string[]>();
+    for (let i = 0; i < files.length; i++) {
+      const svc = assign[i];
+      const arr = bySvc.get(svc);
+      if (arr) arr.push(files[i]);
+      else bySvc.set(svc, [files[i]]);
+    }
+    let okN = 0;
+    let skippedN = 0;
+    const used = new Set<string>();
+    const errors: string[] = [];
+    let overflow: string[] = []; // 400 not-found：该服务读不到这些路径 → 换下一候选
+    const failed = new Set<string>(); // 本批已 400 的服务，重试 pass 跳过（同 serve 重复 400）
+    for (const [svc, group] of bySvc) {
+      for (const chunk of chunkPathsByBytes(group, SCAN_SUB_BATCH_MAX_BYTES)) {
+        try {
+          const d = await t.submitScan(svc, chunk, undefined, batch);
+          okN += d.files || 0;
+          skippedN += d.skipped?.length || 0;
+          used.add(svc);
+        } catch (e) {
+          if (e instanceof TransportError && e.code === "not-found") {
+            overflow.push(...chunk);
+            failed.add(svc);
+          } else {
+            errors.push(`${svc}: ${(e as Error).message}`);
+          }
+        }
+      }
+    }
+    // 重试 pass：400 的文件按候选序试未 400 过的服务
+    if (overflow.length) {
+      let retry = overflow;
+      overflow = [];
+      for (const cand of cands) {
+        if (failed.has(cand.name) || !retry.length) continue;
+        const remain: string[] = [];
+        for (const chunk of chunkPathsByBytes(retry, SCAN_SUB_BATCH_MAX_BYTES)) {
+          try {
+            const d = await t.submitScan(cand.name, chunk, undefined, batch);
+            okN += d.files || 0;
+            skippedN += d.skipped?.length || 0;
+            used.add(cand.name);
+          } catch (e) {
+            if (e instanceof TransportError && e.code === "not-found") {
+              remain.push(...chunk);
+              failed.add(cand.name);
+            } else {
+              errors.push(`${cand.name}: ${(e as Error).message}`);
+            }
+          }
+        }
+        retry = remain;
+      }
+      overflow = retry;
+    }
+    if (overflow.length) {
+      // 候选耗尽 → 本机提取回退（复用主任务 batch；该函数自己清扫描 UI 并跑队列）
+      toast(`${overflow.length} 项所有候选服务都读不到，已改为本机提取后上传（自动均衡分发）`, "");
+      dispatchLocalScanPaths("auto", overflow, batch);
+      return;
+    }
+    // 清扫描 UI（与 scanSubmit 成功路径同口径）
+    state.scanItems = [];
+    state.scanChecked = new Set();
+    state.lastScan = null;
+    state.scanPage = 0;
+    state.scanFilter = "all";
+    $("scan-pager").hidden = true;
+    $("scan-results").hidden = true;
+    $("scan-submit").hidden = true;
+    $("scan-table").innerHTML = "";
+    const notes: string[] = [];
+    if (okN > 0) notes.push(`已入队 ${okN} 项（自动均衡：摊给 ${used.size} 台服务）`);
+    if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
+    notes.push(...errors);
+    toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
+    refresh();
+    webShowView("jobs");
   }
 
   function finishBatch() {
@@ -4853,20 +4964,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const subStatus: Record<string, string> = {};
     for (const i of subItems) subStatus[i.path] = i.subtitle_status || "embedded";
     scanSubmit.disabled = true;
+    // 主任务（batch）：扫描提交恒生成（label=扫描目录名）；声明在 try 外——
+    // 400 回退 catch 里要复用同一 batch（回退不断父任务）
+    const batch = { id: genBatchId(), label: batchLabelForScan() };
     try {
-      // 主任务（batch）：扫描提交恒生成（label=扫描目录名）
-      const batch = { id: genBatchId(), label: batchLabelForScan() };
-      let target = engine;
-      if (engine === "auto") {
-        // 整批落一个服务（serve 侧单任务多文件）：提交前 probe 取一次最闲者
-        const probe = resolveAutoEngine();
-        if (!probe) {
-          toast("自动均衡没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
-          return;
-        }
-        target = probe;
+      if (engine === "auto" && platform.kind === "desktop") {
+        // desktop：serve 单 job 多文件无 auto → 客户端摊给各服务提交（10-17-javscribe-0243）
+        await submitScanAutoDesktop(files, batch);
+        return;
       }
-      const d = await t.submitScan(target, files, subStatus, batch);
+      // web + auto：透传 "auto"——工作台 v0.2.11+ 已支持 per-task auto（派发时刻 pick_engine）；
+      // 旧「客户端提交前 probe 一次、整批钉死单台」废止（10-17-javscribe-0243）
+      const d = await t.submitScan(engine, files, subStatus, batch);
       if (d.skipped && d.skipped.length) {
         const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
         toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
@@ -4894,7 +5003,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         toast(engine === "auto"
           ? "所选服务读不到这些本机路径，已改为本机提取后上传（自动均衡分发）"
           : "所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
-        dispatchLocalScanPaths(engine, files, { id: genBatchId(), label: batchLabelForScan() });
+        dispatchLocalScanPaths(engine, files, batch); // 复用主任务 batch：回退不断父任务（旧 bug：回退另起新 batch）
         return;
       }
       toast((e as Error).message, "err");

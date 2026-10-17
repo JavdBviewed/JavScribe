@@ -19,7 +19,7 @@ try {
   await build({ entryPoints: [tsSrc], bundle: true, format: "cjs", outfile: out, logLevel: "silent" });
   const mod = await import(`file://${out}`);
   const ex = mod.default ?? mod;
-  const { pickAutoEngine, freeVramGb } = ex;
+  const { pickAutoEngine, freeVramGb, distributeToEngines, chunkPathsByBytes } = ex;
   const constsOut = resolve(tmp, "consts.cjs");
   await build({ entryPoints: [resolve(here, "../../core/constants.ts")], bundle: true, format: "cjs", outfile: constsOut, logLevel: "silent" });
   const cmod = await import(`file://${constsOut}`);
@@ -91,6 +91,34 @@ try {
     );
   }
   console.log("ok 5 - online/enabled 过滤、阈值边界、空候选");
+
+  // ---------- distributeToEngines（10-17-javscribe-0243 扫描 auto 分发） ----------
+  assert.deepEqual(distributeToEngines([], 3), [], "空候选 → []");
+  assert.deepEqual(distributeToEngines(["a"], 0), [], "n=0 → []");
+  assert.deepEqual(distributeToEngines(["a"], 3), ["a", "a", "a"], "单候选全落它");
+  assert.deepEqual(distributeToEngines(["a", "b"], 4), ["a", "b", "a", "b"], "双候选均摊、平手输入序在前");
+  assert.deepEqual(distributeToEngines(["a", "b"], 5), ["a", "b", "a", "b", "a"], "奇数多一个给输入序首");
+  assert.deepEqual(distributeToEngines(["a", "b", "c"], 7), ["a", "b", "c", "a", "b", "c", "a"], "三候选 3/2/2");
+  console.log("ok 6 - distributeToEngines 均摊/平手/边界");
+
+  // ---------- chunkPathsByBytes（900KB 子批，兼容新旧 serve 上限） ----------
+  assert.deepEqual(chunkPathsByBytes([], 100), [], "空列表 → []");
+  assert.deepEqual(chunkPathsByBytes(["a"], 8), [["a"]], "maxBytes 脏值（<8）不切也不吞：单元素自成一批".replace("脏值", "过小"));
+  assert.deepEqual(chunkPathsByBytes(["aa", "bbb", "cccccc"], 20), [["aa", "bbb"], ["cccccc"]], "按字节累计切批");
+  assert.deepEqual(chunkPathsByBytes(["中文路径a.mp4", "b.mp4"], 15), [["中文路径a.mp4"], ["b.mp4"]], "非 ASCII 按 UTF-8 字节计（中文=3B/字）");
+  // 上限口径：900KB 路径列表 + JSON 包装开销 < 1MB（旧 serve 上限）
+  {
+    const n = 40000;
+    const paths = Array.from({ length: n }, (_, i) => "/media/jav/tree/视频-" + i + ".mp4");
+    const chunks = chunkPathsByBytes(paths, 900 * 1024);
+    assert.ok(chunks.length > 1, "大批量确实切了多批");
+    for (const c of chunks) {
+      const body = JSON.stringify({ files: c, batch_id: "b1", batch_label: "文件夹扫描 · 测试" });
+      assert.ok(Buffer.byteLength(body, "utf-8") < 1024 * 1024, "单批完整 body < 1MB（旧 serve 不撞 bad body size）");
+    }
+    assert.equal(chunks.flat().length, n, "切批不丢文件");
+  }
+  console.log("ok 7 - chunkPathsByBytes 切批/字节口径/不丢文件");
 
   console.log("auto-engine: all ok");
 } finally {
