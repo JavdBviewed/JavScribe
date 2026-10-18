@@ -35,27 +35,27 @@ test("统一侧边导航：Web 与桌面共用同一组视图按钮", async ({ p
   await expect(page.locator("#nav")).toBeVisible();
   await expect(page.locator("#view-tabs")).toHaveCount(0);
   await expect(tabs).toHaveCount(4);
-  // 顺序（10-08 应用户要求交换）：生成字幕 → 字幕服务 → 字幕任务 → 客户端设置
-  await expect(tabs.nth(0)).toHaveText("生成字幕");
-  await expect(tabs.nth(1)).toHaveText("字幕服务");
+  // 顺序（10-18 应用户要求再交换）：字幕服务 → 生成字幕 → 字幕任务 → 客户端设置
+  await expect(tabs.nth(0)).toHaveText("字幕服务");
+  await expect(tabs.nth(1)).toHaveText("生成字幕");
   await expect(tabs.nth(2)).toContainText("字幕任务");
   await expect(tabs.nth(3)).toHaveText("客户端设置");
-  // 默认视图 = 生成字幕（首页）：view-on + aria-selected 跟随，其余板块隐藏
-  await expect(tabs.nth(0)).toHaveClass(/on/);
-  await expect(tabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  // 默认视图 = 生成字幕（首页）：view-on + aria-selected 跟随，其余板块隐藏（按 data-view 定位，不依赖 nth 序号）
+  await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveClass(/on/);
+  await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
   await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
   // 点击切换：view-on 与 aria-selected 移动
-  await tabs.nth(1).click();
-  await expect(tabs.nth(1)).toHaveClass(/on/);
-  await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await tabs.nth(0).click();
+  await expect(tabs.nth(0)).toHaveClass(/on/);
+  await expect(tabs.nth(0)).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-dispatch")).not.toHaveClass(/view-on/);
   // localStorage 持久化：reload 后仍停在「字幕服务」
   await page.reload();
   await waitForEngineOnline(page);
-  await expect(tabs.nth(1)).toHaveClass(/on/);
+  await expect(tabs.nth(0)).toHaveClass(/on/);
   await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
 });
 
