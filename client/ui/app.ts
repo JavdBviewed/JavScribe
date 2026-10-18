@@ -8,7 +8,7 @@ import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineM
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, chunkPathsByBytes, CLIENT_CFG_DEFAULTS, countInFlightRows, distributeToEngines, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, distributeToEngines, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
 import { TransportError } from "../core/transport";
@@ -251,6 +251,7 @@ const PLANE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="current
 const STATUS_ZH: Record<string, string> = {
   running: "运行中", done: "完成", error: "失败",
   skipped: "跳过", canceled: "已取消", pending: "排队", paused: "已暂停",
+  unsubmitted: "未提交", // F4 占位行（客户端异常退出前已提取未提交）
 };
 
 function fmtDuration(s: number | null | undefined): string {
@@ -508,6 +509,231 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
+
+  // ---------- F4/F5 ghost 行（10-18 修复轮）：pre 占位行 + 丢失在途行 ----------
+  // pre ghost：客户端异常退出后残留的 pre 登记（已提取未上传）→ 可见占位行（「未提交」）+ 重试/取消；
+  //   数据源 = writeBackStore 的 pre 键（localStorage + main 镜像，跨重启存活），refresh 每轮物化，
+  //   登记被 rekey/取消后自动清理。
+  // lost ghost：服务中断（offline→online 迁移轮）后在途 job 消失 → 逐文件失败行（「失败（服务重启丢失）」）+ 重试；
+  //   数据源 = engineJobsSeen（内存快照，仅在线轮更新；客户端重启即失 → 残留风险见 fix-p2.md）。
+  // 两类 ghost 行均为 renderer 本地行（pkey=ghost|... 前缀、job_id=null → 天然不进 serve 指向按钮
+  // 与批量操作），不写 state._jobs / knownJobs（在途封顶 serve-only 不变式不受影响）。
+  interface GhostRow {
+    kind: "pre" | "lost";
+    row: JobRow;
+    preKey?: string;      // kind=pre：写回登记键 engine|pre|<视频名>
+    engine?: string;      // 原引擎
+    jobId?: string;       // kind=lost：原 job_id（写回登记 rekey 用）
+    videoPath?: string | null;
+    sourceKind?: string | null; // kind=lost：最后观测行 source_kind（local=按路径重提；remote=重提取上传）
+    batchId?: string | null;
+    batchLabel?: string | null;
+  }
+  const ghostRows = new Map<string, GhostRow>();        // pkey -> ghost
+  const engineOnlineState = new Map<string, boolean>(); // 首见 undefined → 不判迁移（防首载误判）
+  const engineJobsSeen = new Map<string, Map<string, JobRow[]>>(); // engine -> job_id -> 最后观测行（仅在线轮更新）
+  let offlineEngines = new Set<string>();               // 本轮离线引擎（refresh 每轮刷新）
+
+  /** F5：引擎在线态追踪 + offline→online 迁移对账。
+   * 在线轮 → 刷新该引擎 job 快照；离线轮 → 保留快照（serve 行滞留 stale，无新信息）；
+   * 迁移轮 → 快照中已不在本轮且当时非终态的 job → 逐文件建 lost 行；引擎注销 → 清追踪集。 */
+  function reconcileEngineGhosts(engines: Engine[], jobs: JobRow[]): void {
+    offlineEngines = new Set(engines.filter((e) => !e.online).map((e) => e.name));
+    for (const e of engines) {
+      const live = new Map<string, JobRow[]>();
+      for (const r of jobs) if (r.engine === e.name && r.job_id) {
+        const arr = live.get(String(r.job_id));
+        if (arr) arr.push(r); else live.set(String(r.job_id), [r]);
+      }
+      const prev = engineOnlineState.get(e.name);
+      if (e.online) {
+        const seen = engineJobsSeen.get(e.name);
+        if (prev === false && seen) {
+          for (const [jid, rows] of [...seen]) {
+            if (live.has(jid)) continue;
+            if (rows.every((r) => BATCH_TERMINAL.has(r.status))) continue; // 当时已终态 = 正常过期，非「丢失」
+            createLostGhosts(e.name, jid, rows);
+          }
+        }
+        engineJobsSeen.set(e.name, live);
+      }
+      engineOnlineState.set(e.name, !!e.online);
+    }
+    for (const name of [...engineOnlineState.keys()]) {
+      if (!engines.some((en) => en.name === name)) {
+        engineOnlineState.delete(name);
+        engineJobsSeen.delete(name);
+      }
+    }
+  }
+
+  /** F5：服务重启丢失的在途 job 逐文件建 lost 行。
+   * job_id=null → 天然无服务端按钮（下载/预览/重试/取消均 isServeRow 门控）；
+   * batch_id/label 继承最后观测行 → 进对应主任务组（「重试失败」主任务按钮由批量重试 handler
+   * 的 ghostFailed 分支覆盖）。 */
+  function createLostGhosts(engine: string, jobId: string, rows: JobRow[]): void {
+    const now = Date.now() / 1000;
+    const wbKey = engine + "|" + jobId;
+    let wbTouched = false;
+    for (const r of rows) {
+      const f = r.file || r.label || jobId;
+      const pk = `ghost|lost|${engine}|${jobId}|${f}`;
+      if (ghostRows.has(pk)) continue;
+      ghostRows.set(pk, {
+        kind: "lost",
+        engine,
+        jobId: String(jobId),
+        videoPath: state.writeBackJobs.get(wbKey)?.videoPath ?? null,
+        sourceKind: r.source_kind ?? null,
+        batchId: r.batch_id ?? null,
+        batchLabel: r.batch_label ?? null,
+        row: {
+          engine,
+          job_id: null,
+          file: f,
+          label: r.label || f,
+          status: "error",
+          message: `失败（服务重启丢失）：服务「${engine}」中断时该任务在途，已被服务端丢弃`,
+          created: r.created ?? null,
+          finished: now,
+          source_kind: r.source_kind ?? null,
+          batch_id: r.batch_id ?? null,
+          batch_label: r.batch_label ?? null,
+          pkey: pk,
+        },
+      });
+      // 写回登记重试窗口刷新：原 job 键仍在登记表（剪枝宽限未过）→ 刷 wbAt 续 10min
+      if (state.writeBackJobs.has(wbKey)) { wbAt.set(wbKey, Date.now()); wbTouched = true; }
+    }
+    if (wbTouched) saveWriteBackStore();
+  }
+
+  /** F4：pre 登记 → 占位行（「未提交」）。
+   * 去重：同引擎同名 serve 真行可见（bind 已/将 rekey）或同引擎同名 pending 子行
+   * （会话内失败/取消的显示位）→ 跳过；建行时刷 wbAt：剪枝宽限从建行时刻起算
+   * （否则隔较久重启会被立即剪掉、占位行不可见）。 */
+  function materializePreGhosts(jobs: JobRow[]): void {
+    const now = Date.now();
+    // pre 键已被消费（rekey/用户取消）→ 清理失效占位行
+    for (const [pk, g] of [...ghostRows]) {
+      if (g.kind === "pre" && !state.writeBackJobs.has(g.preKey!)) ghostRows.delete(pk);
+    }
+    for (const k of state.writeBackJobs.keys()) {
+      const i = k.indexOf("|pre|");
+      if (i < 0) continue;
+      const engine = k.slice(0, i);
+      const videoName = k.slice(i + 5); // "|pre|" 长度
+      if (jobs.some((r) => r.job_id && r.engine === engine
+        && ((r.file && r.file === videoName) || (r.label && r.label === videoName)))) continue;
+      if ([...state._pending.values()].some((p) => p.row.engine === engine && p.row.file === videoName)) continue;
+      const pk = "ghost|pre|" + k;
+      if (ghostRows.has(pk)) continue;
+      const info = state.writeBackJobs.get(k)!;
+      ghostRows.set(pk, {
+        kind: "pre",
+        preKey: k,
+        engine,
+        videoPath: info.videoPath || null,
+        row: {
+          engine,
+          job_id: null,
+          file: videoName,
+          label: videoName,
+          status: "unsubmitted",
+          progress: 0,
+          position: "未提交",
+          phase_detail: "未提交",
+          message: "客户端异常退出前未提交服务：音轨已提取未上传，可重试或取消",
+          created: (wbAt.get(k) || now) / 1000,
+          finished: null,
+          pkey: pk,
+        },
+      });
+      wbAt.set(k, now); // 宽限从建行时刻起算（10min）
+      saveWriteBackStore();
+    }
+  }
+
+  /** F4/F5 ghost 行重试核心：{ok, error}。
+   * 路由：lost + 本地源（扫描/watch）+ 原引擎在线 + 路径是视频 → 逐文件 /scan/submit 回原引擎
+   * （F3 路径，写回登记随之；not-found → 落本机链）；
+   * pre / 远端源 / 原引擎离线 → File+_localPath → dispatchTracked（重提取音轨+上传）。
+   * 成功 → 写回登记 rekey/刷新 + 删 ghost 行。 */
+  async function ghostRetryCore(g: GhostRow): Promise<{ ok: boolean; error?: string }> {
+    const vp = g.videoPath;
+    if (!vp) return { ok: false, error: "该任务无本机路径，无法重试" };
+    const name = g.row.file || "";
+    const origOnline = !!g.engine && state.engines.some((e) => e.name === g.engine && e.online);
+    const engine = origOnline ? g.engine! : (resolveAutoEngine() || "");
+    if (!engine) return { ok: false, error: "没有可用服务：全部离线，或都没有勾选「参与均衡」" };
+    const batch = g.batchId ? { id: g.batchId, label: g.batchLabel || "" } : undefined;
+    if (g.kind === "lost" && g.sourceKind === "local" && origOnline && VIDEO_EXT_RE.test(name)) {
+      const r = await submitScanFile(g.engine!, vp, batch);
+      if (r.kind === "ok") {
+        if (r.jobId) {
+          rekeyWriteBack(g.engine! + "|" + g.jobId, g.engine! + "|" + r.jobId);
+          registerWriteBack(g.engine! + "|" + r.jobId,
+            { engine: g.engine!, videoName: name, dirHandle: null, videoPath: vp });
+        }
+        removeGhost(g);
+        return { ok: true };
+      }
+      if (r.kind === "error") return { ok: false, error: r.message };
+      // not-found：服务读不到路径 → 落下面本机链
+    }
+    const f = new File([new Blob()], name) as FolderFile;
+    f._localPath = vp;
+    try {
+      const [ok, d] = await dispatchTracked(f, engine, "", batch);
+      if (!ok) return { ok: false, error: String((d as { error?: string }).error || "派发失败") };
+      const up = d as UploadStatus;
+      if (up.job_id) {
+        const newKey = engine + "|" + up.job_id;
+        rekeyWriteBack(g.kind === "pre" ? g.preKey! : (g.engine! + "|" + g.jobId), newKey);
+        registerWriteBack(newKey, { engine, videoName: name, dirHandle: null, videoPath: vp });
+      }
+      removeGhost(g);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
+  function removeGhost(g: GhostRow): void {
+    if (g.row.pkey) ghostRows.delete(g.row.pkey);
+    schedulePendingRender(); // 删 ghost 行即时重渲（不等 5s 轮询）
+  }
+
+  async function ghostRetryUi(btn: HTMLButtonElement): Promise<void> {
+    const g = ghostRows.get(btn.dataset.gkey || "");
+    if (!g) { refresh(); return; }
+    btn.disabled = true;
+    btn.textContent = "重试中…";
+    try {
+      const r = await ghostRetryCore(g);
+      toast(r.ok ? `「${g.row.file}」已重新提交` : `重试失败：${r.error}`, r.ok ? "ok" : "err");
+    } catch (e) {
+      toast(`重试失败：${(e as Error).message}`, "err");
+    }
+    refresh();
+  }
+
+  function ghostCancelUi(btn: HTMLButtonElement): void {
+    const g = ghostRows.get(btn.dataset.gkey || "");
+    if (!g || g.kind !== "pre") return;
+    const name = g.row.file || "";
+    if (!window.confirm(`确认丢弃「${name}」？
+该文件的音轨提取结果将丢弃，不再提交生成字幕。`)) return;
+    const k = g.preKey!;
+    state.writeBackJobs.delete(k);
+    state.watchWriteBack.delete(k);
+    wbAt.delete(k);
+    saveWriteBackStore();
+    ghostRows.delete(g.row.pkey!);
+    toast(`已丢弃「${name}」（不再生成字幕）`, "ok");
+    renderJobs(state._jobs);
+  }
+
   async function refresh() {
     try {
       const [health, engines, jobs, summary, ccRaw, batches] = await Promise.all([
@@ -527,6 +753,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       state._summary = summary;
       bindPreRegistrations(jobs); // 预登记绑定：serve 真行可见 → 临时键 rekey 为正式键
       pruneWriteBackStore(); // 写回登记剪枝：job 已过期消失且超宽限 → 丢弃
+      reconcileEngineGhosts(engines, jobs); // F5：引擎在线态迁移对账（offline→online：在途 job 消失 → lost 行）
+      materializePreGhosts(jobs); // F4：残留 pre 登记 → 可见占位行（未提交）
       reconcilePending(); // S4：行接管 pending 记账（行到终态即释 cap 槽）
       reconcilePendingRows(); // 行优先：serve 真行可见 → 同 job_id 的 pending 行让位删除（不双行）
       if (ccRaw) {
@@ -1072,6 +1300,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const isRun = j.status === "running";
     // 行优先 pending 子行：排队未开始给单行「取消」；ETA 由阶段文案自带（不重复算，防跨阶段串味）
     const isPendingRow = j.dispatch_pending === true;
+    // F4/F5 ghost 行（pre 占位 / lost 在途丢失）：renderer 本地行，无 job_id，按钮走独立 ghost- 类
+    const isGhost = typeof j.pkey === "string" && j.pkey.startsWith("ghost|");
     const pendQueued = isPendingRow && !j.job_id && j.status === "pending";
     // 尚未拿到 job_id 的 pending 行不参与勾选：服务侧还不认识它，
     // 批量操作（暂停/取消/重试/改派）按 _jobs 取行，选了也是空操作（口径同 _filteredKeys）
@@ -1107,8 +1337,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const labelMain = !!j.label && !j.label.startsWith("文件夹扫描")
       && labBase !== j.file && VIDEO_EXT_RE.test(labBase);
     const primary = labelMain ? labBase : (j.file || "");
-    // 跳过行优先显示 message（含已存在字幕的完整路径）
-    const sub = j.status === "skipped" && j.message ? j.message
+    // 跳过行优先显示 message（含已存在字幕的完整路径）；ghost 行恒显 message（状态说明）
+    const sub = isGhost ? (j.message || "")
+      : j.status === "skipped" && j.message ? j.message
       : (!labelMain && j.message) ? j.message : "";
     const dl = j.status === "done" && j.job_id
       ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
@@ -1132,6 +1363,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 他端标记：他端客户端提交的服务任务（字幕不落回本机；服务端操作仍可用）
     const srcTag = j.local === false
       ? `<span class="src-tag" title="该任务由其他客户端提交：可看进度并做服务端操作（暂停/继续/重试/取消/下载 srt）；源视频不在本机，字幕不会自动落回本机磁盘">他端</span>`
+      : "";
+    // F5.1：离线引擎的非终态 serve 行 → 「服务离线」标注（行=服务最后在线时的观测状态；复用 .wb-tag 不加新类）
+    const offTag = isServeRow && offlineEngines.has(j.engine) && !j.paused
+      && j.status !== "done" && j.status !== "skipped" && j.status !== "error" && j.status !== "canceled"
+      ? `<span class="wb-tag" title="服务离线：该行是服务最后在线时的观测状态，进度不再更新；服务恢复后任务仍在则自动续显，已消失则落「失败（服务重启丢失）」行">服务离线</span>`
       : "";
     const jobActive = isServeRow && state._jobActive.get(retryKey) === true;
     // 跳过（服务行）：删旧字幕重新生成
@@ -1173,7 +1409,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
       : "";
     // 换服务重跑（仅 desktop）：终态行复用本地音轨缓存向其他服务提交新任务
-    const rerunBtn = (platform.kind === "desktop" && j.file && !isPendingRow
+    const rerunBtn = (platform.kind === "desktop" && j.file && !isPendingRow && !isGhost
       && (j.status === "done" || j.status === "error" || j.status === "skipped"))
       ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
       : "";
@@ -1181,19 +1417,27 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const pendCancel = pendQueued
       ? `<button type="button" class="dl-btn pend-cancel" data-pkey="${esc(key)}" title="取消该子任务（尚未开始，不会提交服务）">&#10006; 取消</button>`
       : "";
+    // F4/F5 ghost 行按钮：重试（重新提交）/ 取消（丢弃 pre 登记）——独立类，不撞通用 .retry/.cancel handler
+    const gGhost = isGhost ? ghostRows.get(key) : undefined;
+    const gRetry = isGhost && gGhost?.videoPath
+      ? `<button type="button" class="dl-btn ghost-retry" data-gkey="${esc(key)}" title="重试：重新提交该文件（按路径重提服务，或重新提取音轨上传）">&#8635; 重试</button>`
+      : "";
+    const gCancel = isGhost && j.pkey!.startsWith("ghost|pre|")
+      ? `<button type="button" class="dl-btn ghost-cancel" data-gkey="${esc(key)}" title="丢弃该登记：放弃此文件的字幕生成">&#10006; 取消</button>`
+      : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, cancel, pendCancel, srcTag, createdAt, finishedAt].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, offTag, cancel, pendCancel, gRetry, gCancel, srcTag, createdAt, finishedAt].join("\u0001");
     const html = `
-      <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""}${pendNoJob ? " disabled" : ""} aria-label="勾选任务（批量操作）"></label>
+      <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""}${pendNoJob || isGhost ? " disabled" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-      <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}</div>
+      <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}${offTag}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
       <div class="job-cell mono cell-pos">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
       <div class="job-cell mono cell-created">${esc(createdAt) || "—"}</div>
       <div class="job-cell mono cell-finished${j.status === "done" && finishedAt ? " is-done" : ""}">${esc(finishedAt) || "—"}</div>
-      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${pendCancel}${cancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${pendCancel}${cancel}${gRetry}${gCancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -1324,14 +1568,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function pendingRank(r: JobRow): number {
     if (r.status === "running") return 0;
     if (r.dispatch_pending && !BATCH_TERMINAL.has(r.status)) return 0;
+    if (r.status === "unsubmitted") return 1; // F4 占位行：终态不抢置顶
     return 1;
   }
 
-  /** serve 行 + pending 行合并（口径同 job-rows：活跃优先 → created 降序；同批 pending 保队列正序） */
+  function ghostRowsList(): JobRow[] {
+    return [...ghostRows.values()].map((g) => g.row);
+  }
+
+  /** serve 行 + pending 行 + ghost 行合并（口径同 job-rows：活跃优先 → created 降序；同批 pending 保队列正序） */
   function mergePendingRows(rows: JobRow[]): JobRow[] {
     const pend = pendingRows();
-    if (!pend.length) return rows;
-    const out = rows.concat(pend);
+    const ghosts = ghostRowsList();
+    if (!pend.length && !ghosts.length) return rows;
+    const out = rows.concat(pend, ghosts);
     out.sort((a, b) => pendingRank(a) - pendingRank(b) || (b.created || 0) - (a.created || 0));
     return out;
   }
@@ -1682,7 +1932,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const filtered = visibleRows(rows2);
     // 全选/批量操作只覆盖可操作的行：未入队的 pending 子行走行内「取消」（无 serve 任务可寻址）
     state._filteredKeys = filtered
-      .filter((j) => !(j.dispatch_pending && !j.job_id))
+      .filter((j) => !(j.dispatch_pending && !j.job_id)
+        && !(typeof j.pkey === "string" && j.pkey.startsWith("ghost|"))) // F4/F5 ghost 行 renderer 本地，批量操作不可寻址
       .map(jobKey);
 
     // 顶层条目：普通行 + 主任务（batch）组（组位置=首个子行出现处；组按 1 条计页）。
@@ -1847,6 +2098,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (r.status === "skipped") return "skipped";
     if (r.status === "error" || r.status === "canceled") return "failed";
     if (r.status === "paused" || r.paused) return "paused";
+    if (r.status === "unsubmitted") return "failed"; // F4 占位行：待用户动作（重试/取消）的终态，归失败桶便查找
     if (!r.job_id) {
       // 本机管线行（无 job_id）：按 phase 细分
       if (r.phase === "extracting") return "extracting";
@@ -2076,10 +2328,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       btn.disabled = true;
       try {
         if (act === "retry") {
-          // 重试失败子任务：serve 行→retryJob；本机行（task_id）→rerunLocal
+          // 重试失败子任务：serve 行→retryJob；本机行（task_id）→rerunLocal；
+          // F5：lost ghost 行（服务重启丢在途 job、无 job_id 可寻址）→ 逐文件重新提交
           const failed = (state._jobs || []).filter(
             (j) => j.batch_id === bid && (j.status === "error" || j.status === "canceled"));
-          if (!failed.length) { toast("该主任务没有可重试的失败子任务", "err"); return; }
+          const ghostFailed = [...ghostRows.values()].filter(
+            (g) => (g.batchId || "") === bid && g.row.status === "error");
+          if (!failed.length && !ghostFailed.length) { toast("该主任务没有可重试的失败子任务", "err"); return; }
           let n = 0;
           for (const j of failed) {
             try {
@@ -2088,6 +2343,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               else continue;
               n++;
             } catch (_e2) { /* 单个失败继续：结果在任务行可见 */ }
+          }
+          for (const g of ghostFailed) {
+            try { if ((await ghostRetryCore(g)).ok) n++; } catch (_e2) { /* 单个失败继续 */ }
           }
           toast(n ? `已重新提交 ${n} 个失败子任务` : "重试失败（子任务已过期或不可重试）", n ? "ok" : "err");
         } else if (t.batchOp) {
@@ -2194,6 +2452,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       refresh();
       return;
     }
+    // F4/F5 ghost 行：重试（重新提交）/ 取消（丢弃 pre 登记）——独立类，先于通用 .retry/.cancel 判定
+    const gr = (ev.target as HTMLElement).closest(".ghost-retry") as HTMLButtonElement | null;
+    if (gr && !gr.disabled) { void ghostRetryUi(gr); return; }
+    const gc = (ev.target as HTMLElement).closest(".ghost-cancel") as HTMLButtonElement | null;
+    if (gc && !gc.disabled) { void ghostCancelUi(gc); return; }
     const rb = (ev.target as HTMLElement).closest(".rerun") as HTMLButtonElement | null;
     if (rb && !rb.disabled) {
       if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
@@ -3641,6 +3904,58 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     );
   }
 
+  // 清扫描 UI（三处统一入口：400 回退 / auto 提交 / scanSubmit 成功路径）
+  function clearScanUi(): void {
+    state.scanItems = [];
+    state.scanChecked = new Set();
+    state.lastScan = null;
+    state.scanPage = 0;
+    state.scanFilter = "all";
+    $("scan-pager").hidden = true;
+    $("scan-results").hidden = true;
+    $("scan-submit").hidden = true;
+    $("scan-table").innerHTML = "";
+  }
+
+  // F3（10-18-javscribe-client-realmachine-round2）：单文件单 job 提交（serve /scan/submit）。
+  // 写回登记逐文件成立（registerWriteBack 带 videoPath → desktop 进强制写回集，完成后写回影片旁）：
+  // 成功先登 pre 键、job 受理再 rekey 正式键；400 not-found=服务确未受理，删 pre 登记防残留；
+  // 网络错误=响应丢失、服务可能已受理，保留 pre 登记由 bindPreRegistrations 后续补 rekey。
+  type ScanFileResult =
+    | { kind: "ok"; jobId: string; okFiles: number; skipped: string[] }
+    | { kind: "not-found" }
+    | { kind: "error"; message: string };
+  async function submitScanFile(
+    engine: string,
+    path: string,
+    batch?: { id: string; label: string },
+    subStatus?: Record<string, string>,
+  ): Promise<ScanFileResult> {
+    const name = path.split(/[\\/]/).pop() || path;
+    const preKey = preKeyOf(engine, name);
+    registerWriteBack(preKey, { engine, videoName: name, dirHandle: null, videoPath: path });
+    try {
+      const d = await t.submitScan(engine, [path], subStatus && subStatus[path] ? { [path]: subStatus[path] } : undefined, batch);
+      const jobId = d.jobId || "";
+      if (jobId) {
+        rekeyWriteBack(preKey, engine + "|" + jobId);
+        registerWriteBack(engine + "|" + jobId, { engine, videoName: name, dirHandle: null, videoPath: path });
+      }
+      return { kind: "ok", jobId, okFiles: d.files || 0, skipped: d.skipped || [] };
+    } catch (e) {
+      if (e instanceof TransportError && e.code === "not-found") {
+        // 服务确未受理 → 删 pre 登记防残留
+        state.writeBackJobs.delete(preKey);
+        state.watchWriteBack.delete(preKey);
+        wbAt.delete(preKey);
+        saveWriteBackStore();
+        return { kind: "not-found" };
+      }
+      // 响应丢失、服务可能已受理 → 保留 pre 登记
+      return { kind: "error", message: (e as Error).message };
+    }
+  }
+
   // 「扫描目录」400 回退：所选服务读不到本机路径（浏览器电脑的盘符路径）→ 本机提取后上传
   function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string }) {
     const queue: FolderFile[] = files.map((p) => {
@@ -3651,15 +3966,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return f;
     });
     // 清扫描 UI（回退后任务由任务看板跟踪）
-    state.scanItems = [];
-    state.scanChecked = new Set();
-    state.lastScan = null;
-    state.scanPage = 0;
-    state.scanFilter = "all";
-    $("scan-pager").hidden = true;
-    $("scan-results").hidden = true;
-    $("scan-submit").hidden = true;
-    $("scan-table").innerHTML = "";
+    clearScanUi();
     runDispatchQueue(
       queue,
       engine,
@@ -3677,12 +3984,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     );
   }
 
-  // 「扫描目录」auto（desktop 形态，10-17-javscribe-0243）：serve 单 job 多文件无 per-file auto、
-  // serve 间无对等注册表 → 客户端做 list-scheduling：按在途负载把文件摊到候选服务，按服务分组、
-  // 按 JSON 字节切子批（单批上限 900KB：兼容新 serve 16MB / 旧 serve 1MB，杜绝 bad body size），
-  // 同一主任务 batch_id 顺序提交；400 not-found 组进 overflow 按候选序重试，候选耗尽回退本机提取
-  // 上传（desktop 扫描恒为客户端本机磁盘，回退必可用）。决策纯函数在 core/concurrency（单测）。
-  const SCAN_SUB_BATCH_MAX_BYTES = 900 * 1024;
+  // 「扫描目录」auto（desktop 形态，10-17-javscribe-0243；10-18 F3 改逐文件提交）：serve 单 job
+  // 多文件无 per-file auto、serve 间无对等注册表 → 客户端做 list-scheduling：按在途负载把文件摊到
+  // 候选服务（distributeToEngines，决策纯函数在 core/concurrency，单测），同一主任务 batch_id 提交。
+  // F3：逐文件提交（单文件 job）——serve /jobs/<id>/result 只回第一个文件的 srt，多文件 job 的
+  // job 级取数必写错文件；逐文件后写回登记/取数/幂等预检按文件成立，负载画像与回退上传路径一致
+  // （concurrency=1 时行为等价）。旧 900KB 字节子批切块随之废止。400 not-found 文件进 overflow
+  // 按候选序重试，候选耗尽回退本机提取上传（desktop 扫描恒为客户端本机磁盘，回退必可用）。
   async function submitScanAutoDesktop(files: string[], batch: { id: string; label: string }) {
     const cands = autoBalancedCandidates();
     if (!cands) {
@@ -3705,19 +4013,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     let overflow: string[] = []; // 400 not-found：该服务读不到这些路径 → 换下一候选
     const failed = new Set<string>(); // 本批已 400 的服务，重试 pass 跳过（同 serve 重复 400）
     for (const [svc, group] of bySvc) {
-      for (const chunk of chunkPathsByBytes(group, SCAN_SUB_BATCH_MAX_BYTES)) {
-        try {
-          const d = await t.submitScan(svc, chunk, undefined, batch);
-          okN += d.files || 0;
-          skippedN += d.skipped?.length || 0;
+      for (const p of group) {
+        const r = await submitScanFile(svc, p, batch);
+        if (r.kind === "ok") {
+          okN += r.okFiles;
+          skippedN += r.skipped.length;
           used.add(svc);
-        } catch (e) {
-          if (e instanceof TransportError && e.code === "not-found") {
-            overflow.push(...chunk);
-            failed.add(svc);
-          } else {
-            errors.push(`${svc}: ${(e as Error).message}`);
-          }
+        } else if (r.kind === "not-found") {
+          overflow.push(p);
+          failed.add(svc);
+        } else {
+          errors.push(`${svc}: ${r.message}`);
         }
       }
     }
@@ -3728,19 +4034,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       for (const cand of cands) {
         if (failed.has(cand.name) || !retry.length) continue;
         const remain: string[] = [];
-        for (const chunk of chunkPathsByBytes(retry, SCAN_SUB_BATCH_MAX_BYTES)) {
-          try {
-            const d = await t.submitScan(cand.name, chunk, undefined, batch);
-            okN += d.files || 0;
-            skippedN += d.skipped?.length || 0;
+        for (const p of retry) {
+          const r = await submitScanFile(cand.name, p, batch);
+          if (r.kind === "ok") {
+            okN += r.okFiles;
+            skippedN += r.skipped.length;
             used.add(cand.name);
-          } catch (e) {
-            if (e instanceof TransportError && e.code === "not-found") {
-              remain.push(...chunk);
-              failed.add(cand.name);
-            } else {
-              errors.push(`${cand.name}: ${(e as Error).message}`);
-            }
+          } else if (r.kind === "not-found") {
+            remain.push(p);
+            failed.add(cand.name);
+          } else {
+            errors.push(`${cand.name}: ${r.message}`);
           }
         }
         retry = remain;
@@ -3753,16 +4057,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       dispatchLocalScanPaths("auto", overflow, batch);
       return;
     }
-    // 清扫描 UI（与 scanSubmit 成功路径同口径）
-    state.scanItems = [];
-    state.scanChecked = new Set();
-    state.lastScan = null;
-    state.scanPage = 0;
-    state.scanFilter = "all";
-    $("scan-pager").hidden = true;
-    $("scan-results").hidden = true;
-    $("scan-submit").hidden = true;
-    $("scan-table").innerHTML = "";
+    clearScanUi();
     const notes: string[] = [];
     if (okN > 0) notes.push(`已入队 ${okN} 项（自动均衡：摊给 ${used.size} 台服务）`);
     if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
@@ -4968,34 +5263,57 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 400 回退 catch 里要复用同一 batch（回退不断父任务）
     const batch = { id: genBatchId(), label: batchLabelForScan() };
     try {
-      if (engine === "auto" && platform.kind === "desktop") {
-        // desktop：serve 单 job 多文件无 auto → 客户端摊给各服务提交（10-17-javscribe-0243）
-        await submitScanAutoDesktop(files, batch);
+      if (platform.kind === "desktop") {
+        if (engine === "auto") {
+          // desktop auto：serve 单 job 多文件无 auto → 客户端摊给各服务提交（10-17-javscribe-0243）
+          await submitScanAutoDesktop(files, batch);
+          return;
+        }
+        // desktop 指定引擎（F3）：逐文件提交 + 逐文件写回登记——serve /jobs/<id>/result 只回
+        // 第一个文件的 srt，多文件 job 会把写回写错文件；逐文件后按文件写回成立
+        let okN = 0;
+        let skippedN = 0;
+        const errors: string[] = [];
+        const overflow: string[] = [];
+        for (const p of files) {
+          const r = await submitScanFile(engine, p, batch, subStatus);
+          if (r.kind === "ok") {
+            okN += r.okFiles;
+            skippedN += r.skipped.length;
+          } else if (r.kind === "not-found") {
+            overflow.push(p);
+          } else {
+            errors.push(r.message);
+          }
+        }
+        if (overflow.length) {
+          toast("所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
+          dispatchLocalScanPaths(engine, overflow, batch); // 复用主任务 batch：回退不断父任务
+          return;
+        }
+        clearScanUi();
+        const notes: string[] = [];
+        if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
+        if (okN > 0) notes.push(`已入队 ${okN} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`);
+        notes.push(...errors);
+        toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
+        refresh();
+        webShowView("jobs"); // 提交即进任务看板
         return;
       }
-      // web + auto：透传 "auto"——工作台 v0.2.11+ 已支持 per-task auto（派发时刻 pick_engine）；
-      // 旧「客户端提交前 probe 一次、整批钉死单台」废止（10-17-javscribe-0243）
+      // web：原样透传（含 "auto"——工作台 v0.2.11+ 已支持 per-task auto，派发时刻 pick_engine）
       const d = await t.submitScan(engine, files, subStatus, batch);
       if (d.skipped && d.skipped.length) {
         const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
         toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
       }
       if (d.files > 0) {
+        // web 分支：desktop 路径已在上方 return，这里恒为 web 文案
         toast(d.jobId
           ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
-          : platform.kind === "desktop"
-            ? `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`
-            : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进`, "ok");
+          : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进`, "ok");
       }
-      state.scanItems = [];
-      state.scanChecked = new Set();
-      state.lastScan = null;
-      state.scanPage = 0;
-      state.scanFilter = "all";
-      $("scan-pager").hidden = true;
-      $("scan-results").hidden = true;
-      $("scan-submit").hidden = true;
-      $("scan-table").innerHTML = "";
+      clearScanUi();
       refresh();
       webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
