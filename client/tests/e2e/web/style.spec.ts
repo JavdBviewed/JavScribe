@@ -108,33 +108,35 @@ test("任务看板：已完成 + 分页器", async ({ page }) => {
   await shot(page, "style-08-jobs-pager", { element: "#sec-jobs" });
 });
 
-test("设置弹窗：未登记 Key 表单", async ({ page }) => {
+test("服务端设置（设置 tab pane）：未登记 Key 表单", async ({ page }) => {
   await addEngine(req, { name: "nokey", url: "http://127.0.0.1:8301" });
-  await goTab(page, "engines");
-  await page.locator('article.eng[data-name="nokey"] .icon-btn.set').waitFor({ timeout: 15_000 });
-  await page.click('article.eng[data-name="nokey"] .icon-btn.set');
+  // 等 5s 看板把新引擎拉进 state.engines（ccfg 激活即重渲染，之后再进页下拉框才有 nokey）
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { state?: { engines?: { name: string }[] } }).state?.engines?.some((e) => e.name === "nokey") ?? false), { timeout: 20_000 })
+    .toBe(true);
+  // 0246 A：卡片齿轮已删 → 设置 tab 服务端 pane 选 nokey 服务
+  await goTab(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  await expect(page.locator('#srv-sel option[value="nokey"]')).toHaveCount(1, { timeout: 15_000 }); // option 在折叠 select 内恒 hidden，断 DOM 存在
+  await page.selectOption("#srv-sel", "nokey");
   await expect(page.locator("#key-input")).toBeVisible({ timeout: 5_000 });
   await page.locator("#key-input").fill("");
   await freezeForShot(page, req);
-  await shot(page, "style-09-settings-keyless", { element: "#modal" });
+  await shot(page, "style-09-settings-keyless", { element: "#srv-body" });
 });
 
-test("设置弹窗：配置表单（tab 布局：总览 + 设置组两列）", async ({ page }) => {
-  await goTab(page, "engines");
-  await page.click('article.eng .icon-btn.set');
+test("服务端设置（设置 tab pane）：叠放表单（就绪总览 + 设置组）", async ({ page }) => {
+  // 0246 A：弹窗 + 内层 tab 已删 → 设置 tab 服务端 pane 叠放布局（首服务动态取，不硬编码）
+  await goTab(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  const firstEngine = await page.locator("#srv-sel option").nth(1).getAttribute("value");
+  await page.selectOption("#srv-sel", firstEngine);
   await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 10_000 });
-  // 展开弹窗内部滚动，整表单入帧
-  await page.evaluate(() => { const b = document.getElementById("modal-body"); if (b) b.style.maxHeight = "none"; });
   // 等组件就绪自检行渲染完成（异步 /ready 拉取），保证快照确定性
-  await expect(page.locator("#modal .ready-row").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#srv-body .ready-row").first()).toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(200);
   await freezeForShot(page, req);
-  await shot(page, "style-10-settings-form", { fullPage: true });
-  // 切「字幕」tab：设置组 pane 两列布局入帧
-  await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
-  await page.waitForTimeout(150);
-  await freezeForShot(page, req);
-  await shot(page, "style-10b-settings-tab-subtitle", { fullPage: true });
+  await shot(page, "style-10-settings-form", { element: ".cc-pane[data-pane='server']" });
 });
 
 test("扫描结果表（字幕标记行）", async ({ page }) => {

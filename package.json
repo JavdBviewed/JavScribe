@@ -1,40 +1,13 @@
 {
   "name": "jav-scribe-client",
   "desktopName": "JavScribeClient",
-  "version": "0.2.45",
+  "version": "0.2.46",
   "packageManager": "pnpm@10.17.0",
   "author": "JavdBviewed",
   "private": true,
   "description": "JavScribe Client — 共享前端（web 形态 + Electron 桌面端）",
   "repository": "https://github.com/JavdBviewed/JavScribe",
   "type": "module",
-  "scripts": {
-    "build:web": "vite build",
-    "sync:static": "node scripts/sync-static.mjs",
-    "build:web:all": "pnpm build:web && pnpm sync:static",
-    "preview": "vite preview",
-    "test:unit:client": "node client/tests/unit/srt-sanitize.test.mjs && node client/tests/unit/srt.test.mjs && node client/tests/unit/sub-embed.test.mjs && node client/tests/unit/concurrency.test.mjs && node client/tests/unit/job-rows.test.mjs && node client/tests/unit/folder-scan.test.mjs && node client/tests/unit/writeback.test.mjs && node client/tests/unit/auto-engine.test.mjs",
-    "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed",
-    "typecheck": "tsc --noEmit",
-    "build:desktop": "node scripts/build-desktop.mjs",
-    "test:e2e:desktop": "xvfb-run -a playwright test --config playwright.desktop.config.ts",
-    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
-    "build:release:linux": "pnpm build:desktop && electron-builder --linux",
-    "build:release:win": "pnpm build:desktop && electron-builder --win",
-    "check:version": "node scripts/check-version.mjs"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "@types/node": "^26.4.1",
-    "electron": "^44.2.0",
-    "electron-builder": "^26.15.3",
-    "electron-updater": "^6.8.9",
-    "esbuild": "^0.28.2",
-    "playwright": "^1.63.0",
-    "typescript": "^7.0.2",
-    "vite": "^8.2.2"
-  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",

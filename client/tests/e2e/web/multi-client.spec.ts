@@ -122,7 +122,7 @@ test("他端任务全部消失：来源条自动收起，筛选复位「全部�
   );
 });
 
-test("服务端级操作提示：暂停所有 tooltip + 服务设置弹窗横幅", async ({ page }) => {
+test("服务端级操作提示：暂停所有 tooltip + 服务端设置横幅", async ({ page }) => {
   // 无在途任务时按钮隐藏 → seed 一个排队任务让「暂停所有」出现
   await mockSeed(req, { n: 1, status: "pending" });
   await page.goto("/");
@@ -134,13 +134,14 @@ test("服务端级操作提示：暂停所有 tooltip + 服务设置弹窗横幅
   await expect(btn).toBeVisible({ timeout: 15_000 });
   await expect(btn).toHaveAttribute("title", /服务端级操作/);
 
-  // 服务设置弹窗：顶部服务端级设置横幅（客户端设置卡片除外说明）
-  await goTab(page, "engines");
-  await page.locator('button.set[data-name="mock"]').click();
-  await expect(page.locator("#modal .cfg-global-note")).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("#modal .cfg-global-note")).toContainText("所有连接该服务的客户端");
-  // 客户端设置已迁出弹窗（独立「客户端设置」tab）：弹窗内不再有客户端卡片，例外文案同步移除
-  await expect(page.locator("#modal .cfg-sec-client")).toHaveCount(0);
-  await expect(page.locator("#modal #ccfg-save")).toHaveCount(0);
-  await expect(page.locator("#modal .cfg-global-note")).not.toContainText("下方「客户端设置」卡片例外");
+  // 服务端设置（0246 A：卡片弹窗改为设置 tab pane）：顶部服务端级设置横幅
+  await goTab(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  await page.selectOption("#srv-sel", "mock");
+  await expect(page.locator("#srv-body .cfg-global-note")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#srv-body .cfg-global-note")).toContainText("所有连接该服务的客户端");
+  // 客户端设置在本页「客户端」子 tab：服务端 pane 内无客户端卡片，例外文案同步移除
+  await expect(page.locator("#srv-body .cfg-sec-client")).toHaveCount(0);
+  await expect(page.locator("#srv-body #ccfg-save")).toHaveCount(0);
+  await expect(page.locator("#srv-body .cfg-global-note")).not.toContainText("下方「客户端设置」卡片例外");
 });

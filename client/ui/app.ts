@@ -852,7 +852,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // web 壳顶部视图 tab 钩子：desktop 形态恒空操作（桌面用侧边栏）
   let webShowView: (v: "dispatch" | "jobs" | "engines" | "ccfg") => void = () => {};
 
-  // 文件夹监听「客户端设置 tab」钩子：桌面形态由 watch 块接线（与派单页监听面板同一数据源）；web 形态恒 null
+  // 文件夹监听「设置 → 客户端」钩子：桌面形态由 watch 块接线（与派单页监听面板同一数据源）；web 形态恒 null
   let ccWatchCtl: {
     state(): WatchState | null;
     set(on: boolean, path: string): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
@@ -1133,7 +1133,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     <div class="eng-top">
       <span class="lamp"></span>
       <h3>${esc(e.name)}</h3>
-      <button type="button" class="icon-btn set" data-name="${esc(e.name)}" title="服务设置">&#9881;</button>
       ${typeof t.updateEngine === "function" ? `<button type="button" class="icon-btn edit" data-name="${esc(e.name)}" title="编辑服务（改名称/地址/Key，可复制）">&#9998;</button>` : ""}
       <button type="button" class="icon-btn del" data-name="${esc(e.name)}" title="删除服务">&#10005;</button>
     </div>
@@ -1267,8 +1266,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       refresh();
       return;
     }
-    const set = target.closest<HTMLElement>(".set");
-    if (set) openSettings(set.dataset.name || "");
   };
 
   // ---------- 任务行（按任务 key 就地更新：进度/ETA/位置只改文字与条宽，不重排行节点，扫光与过渡不中断） ----------
@@ -3337,7 +3334,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     updateGo();
   };
 
-  // ---------- 选择文件夹（本地过滤 + 待选表，规则统一消费「客户端设置 · 扫描规则」） ----------
+  // ---------- 选择文件夹（本地过滤 + 待选表，规则统一消费「设置 → 客户端 → 扫描规则」） ----------
   function folderRules(): FolderScanRules {
     // 与「扫描目录」同源：client config 的 scan_* 键；未设置过 = 内置默认
     const cc = state.ccfg || ({} as ClientConfig);
@@ -3397,7 +3394,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       vids.push({ file: f, ...meta });
     }
     if (!vids.length) {
-      toast("该文件夹里没有支持的视频文件（可到「客户端设置 · 扫描规则」调整扩展名）", "err");
+      toast("该文件夹里没有支持的视频文件（可到「设置 → 客户端 → 扫描规则」调整扩展名）", "err");
       return;
     }
     state.folderFiles = vids;
@@ -3416,10 +3413,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return `<span class="tag subtag" title="同目录字幕：${esc(v.sub_name || "")}">外部 srt</span>`;
     }
     if (v.sub_status === "named") {
-      return `<span class="tag subtag" title="文件名含标记 ${esc(v.sub_token || "")}，按规则视为已压字幕（可在「客户端设置 · 扫描规则」改判）">标记（名）</span>`;
+      return `<span class="tag subtag" title="文件名含标记 ${esc(v.sub_token || "")}，按规则视为已压字幕（可在「设置 → 客户端 → 扫描规则」改判）">标记（名）</span>`;
     }
     if (v.no_sub_token) {
-      return `<span class="tag subtag ok" title="文件名含标记 ${esc(v.no_sub_token)}，按规则视为无字幕版（可在「客户端设置 · 扫描规则」改判）">无字幕（名）</span>`;
+      return `<span class="tag subtag ok" title="文件名含标记 ${esc(v.no_sub_token)}，按规则视为无字幕版（可在「设置 → 客户端 → 扫描规则」改判）">无字幕（名）</span>`;
     }
     return '<span class="muted" title="本地不检查内嵌字幕轨">未检查</span>';
   }
@@ -4410,7 +4407,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     polish: "生成后再用大模型复核一遍（可选）",
     emby: "生成后自动刷新 Emby 媒体库",
     jasna: "识别前先对音轨降噪修复",
-    scan: "已迁至「客户端设置 · 扫描规则」，此处仅兼容说明",
+    scan: "已迁至「设置 → 客户端 → 扫描规则」，此处仅兼容说明",
     storage: "服务端临时缓存的清理周期",
   };
   // enum 选项的中文展示（提交值仍是原始值）
@@ -4524,12 +4521,179 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   modalBackdrop.addEventListener("click", (ev) => { if (ev.target === modalBackdrop) hideModal(); });
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hideModal(); });
 
-  function openSettings(name: string) {
-    showModal(`「${name}」服务设置`);
-    $("modal").classList.add("modal-wide"); // 仅服务设置加宽一倍（其他复用 #modal 的弹窗不受影响）
+  // ---------- 服务端设置（设置页 · 服务端子 tab，10-18-javscribe-0246 A） ----------
+  // 通用组：所有服务端语义一致的组（fan-out 到所有端）；infer/jasna 为单端专属（模型/设备因端而异），
+  // scan 组已弃用（新版客户端读本机 client config），均不进通用表单。
+  const COMMON_GROUPS = new Set(["subtitle", "vad", "polish", "emby", "storage"]);
+
+  // 共享表单渲染器：single = 单服务端（全组 + 组件就绪总览 + 保存设置）；common = 通用（仅通用组，
+  // 取值参考某在线已登记 Key 的服务端，保存到所有服务）。同一时刻 DOM 只有一份表单，控件按 id 全局取。
+  function renderCfgForm(target: HTMLElement, mode: "common" | "single", name: string, items: ConfigItem[]): void {
+    const allGroups: Record<string, ConfigItem[]> = {};
+    for (const it of items) {
+      const g = it.path.split(".")[0];
+      (allGroups[g] = allGroups[g] || []).push(it);
+    }
+    const orderedGroups = [
+      ...Object.keys(GROUP_ZH).filter((k) => allGroups[k]),
+      ...Object.keys(allGroups).filter((k) => !(k in GROUP_ZH)),
+    ];
+    const groups = mode === "single"
+      ? allGroups
+      : Object.fromEntries(orderedGroups.filter((g) => COMMON_GROUPS.has(g)).map((g) => [g, allGroups[g]]));
+    // common 模式只收通用键（collectCfgValues 按 state.cfgItems 遍历取控件）
+    state.cfgItems = mode === "single" ? items : items.filter((i) => COMMON_GROUPS.has(i.path.split(".")[0]));
     const e = (state.engines || []).find((x) => x.name === name);
-    const body = $("modal-body");
-    if (!e || !e.has_key) {
+    let html = "";
+    if (e) {
+      html += `
+      <div class="cfg-meta">
+        <span class="cfg-lamp${e.online ? " on" : " off"}"></span>
+        <span class="cfg-meta-name">${esc(e.name)}</span>
+        <a class="cfg-meta-url mono" href="${esc(e.url)}" target="_blank" rel="noopener" title="打开服务端页面">${esc(e.url)}</a>
+        <span class="cfg-meta-tags">
+          <span class="tag">${esc(e.device || "—")}</span>
+          <span class="tag" title="服务 /health 上报版本">v${esc(e.version || "—")}</span>
+          ${serveUpBadge(e)}
+          <span class="tag${e.jobs_running ? " hot" : ""}">${e.jobs_running ? `运行 ${e.jobs_running}` : "队列空闲"}</span>
+        </span>
+      </div>`;
+    }
+    if (mode === "common") {
+      html += `<div class="cfg-meta-ref muted small">取值参考：${esc(name)}（在线且已登记 Key 的服务端）；保存时下发到所有服务端。</div>`;
+      html += `<div class="cfg-global-note"><b>通用设置</b>：一份配置下发到<b>所有服务端</b>（影响所有连接的客户端，对新提交的任务生效）。单端专属项（推理引擎 / 音频修复）不在这里，选具体服务单独设置。</div>`;
+    } else {
+      html += `<div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）。</div>`;
+    }
+    // 组内叠放（不再分 tab）：单服务 = 全组 + 组件就绪置顶；通用 = 仅通用组；scan 组 = 兼容说明不渲控件
+    if (mode === "single") {
+      html += `
+    <section class="cfg-sec cfg-sec-ready" data-sec="ready">
+      <h4 class="cfg-sec-title">组件就绪<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
+      <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
+    </section>`;
+    }
+    for (const g of orderedGroups) {
+      if (!(g in groups)) continue;
+      const list = groups[g];
+      // scan 组：新客户端扫描规则已整体归位「设置 → 客户端 → 扫描规则」（本机 client config），
+      // 服务端 scan.* 仅留兼容旧客户端/直连 API，不再被任何新版客户端读取——
+      // 渲染为指引说明而非可编辑控件，避免「改了没生效」的误导
+      const bodyHtml = g === "scan"
+        ? `<div class="set-note">扫描规则（视频扩展名 / 已有字幕判定 / 递归 / 忽略小于 / 文件名标记）已统一在 <b>「设置 → 客户端 → 扫描规则」</b> 维护（保存在本机，桌面端离线也可用）。<br>服务端的 <span class="mono">scan.*</span> 配置新版客户端不再读取，仅保留给旧版客户端 / 直连 API 兼容，无需在此调整。</div>`
+        : list.map(configFieldHtml).join("");
+      html += `
+      <section class="cfg-sec" data-sec="${esc(g)}">
+        <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
+        <div class="cfg-sec-body">${bodyHtml}</div>
+      </section>`;
+    }
+    const hasSecret = state.cfgItems.some((i) => i.type === "secret");
+    html += `
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">保存后对新提交的任务生效${hasSecret ? "；Key 类留空 = 保持不变" : ""}</span>
+      <span id="cfg-dirty" class="muted small">无改动</span>
+      <span class="cfg-foot-actions">
+        <button type="button" id="cfg-reset" class="btn" hidden>重置改动</button>
+        ${mode === "single"
+          ? `<button type="button" id="cfg-save" class="btn btn-primary">保存设置</button>`
+          : `<button type="button" id="cfg-apply-all" class="btn btn-primary" title="把当前表单值下发到全部服务端（逐端保存；Key 类留空 = 各端保持现值，不覆盖）">保存到所有服务</button>`}
+      </span>
+    </div>`;
+    target.innerHTML = html;
+    if (mode === "single") loadReadiness(name);
+    // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（叠放布局无 tab，无圆点）
+    target.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+      const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
+      if (!ctl) return;
+      const sync = (): void => {
+        const cur = ctl instanceof HTMLInputElement && ctl.type === "checkbox"
+          ? JSON.stringify(ctl.checked)
+          : JSON.stringify(ctl.value);
+        row.classList.toggle("dirty", cur !== (row.dataset.base ?? ""));
+        const n = target.querySelectorAll(".cfg-row.dirty").length;
+        const d = $("cfg-dirty");
+        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        const r = $("cfg-reset");
+        if (r) r.hidden = n === 0;
+      };
+      ctl.addEventListener("input", sync);
+      ctl.addEventListener("change", sync);
+      if (ctl.type === "checkbox" && GATE_SEC[row.dataset.path || ""]) {
+        ctl.addEventListener("change", () => applyGating(target));
+      }
+    });
+    applyGating(target);
+    ($("cfg-reset") as HTMLButtonElement).onclick = () => {
+      target.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
+        const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
+        if (!ctl) return;
+        const base = JSON.parse(row.dataset.base ?? '""') as boolean | string;
+        if (ctl.type === "checkbox") ctl.checked = base === true;
+        else ctl.value = base === true ? "true" : base === false ? "false" : String(base);
+        ctl.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    const saveBtn = $("cfg-save") as HTMLButtonElement | null;
+    if (saveBtn) saveBtn.onclick = () => saveConfig(name);
+    const applyAll = $("cfg-apply-all") as HTMLButtonElement | null;
+    if (applyAll) applyAll.onclick = () => applyCommonToAll();
+  }
+
+  // 服务端子 tab 面板：__all__ = 通用（一份 fan-out 所有端）；具体服务名 = 单端配置（含 API Key 登记）
+  // 服务端 pane 渲染代际：切服务/切 pane 时自增，过期异步（getConfig 晚到）不得覆盖新表单
+  let srvSeq = 0;
+  function renderSrv(value: string): void {
+    const body = $("srv-body");
+    if (!body) return;
+    if (value === "__all__") renderSrvPaneCommon();
+    else renderSrvPaneSingle(value);
+  }
+
+  function setSrvNote(text: string): void {
+    const n = $("srv-note");
+    if (n) n.textContent = text;
+  }
+
+  function renderSrvPaneCommon(): void {
+    const seq = ++srvSeq;
+    const body = $("srv-body");
+    if (!body) return;
+    const engines = state.engines || [];
+    if (!engines.length) {
+      body.innerHTML = '<div class="set-note"><div class="set-note-title">还没有服务端</div>先到「字幕服务」页添加服务，再在这里配置通用设置。</div>';
+      setSrvNote("");
+      return;
+    }
+    // 取值参考：第一个在线且已登记 Key 的服务端，否则第一个（表单值来源，不代表下发目标）
+    const ref = engines.find((e) => e.online && e.has_key) || engines[0];
+    setSrvNote(`通用设置 = 一份配置下发到所有服务端；保存前逐端差异确认。取值参考「${ref.name}」。`);
+    body.innerHTML = '<div class="muted small">加载设置中…</div>';
+    t.getConfig(ref.name)
+      .then((items) => { if (seq === srvSeq) renderCfgForm(body, "common", ref.name, items); })
+      .catch((err: Error) => {
+        if (seq !== srvSeq) return;
+        body.innerHTML = `
+        <div class="set-note err">
+          <div class="set-note-title">无法读取服务端设置</div>
+          ${esc(err.message)}
+        </div>
+        <div class="muted small">提示：若 Key 不正确，先在具体服务里把 Key 清空（保存空值）再重填；若提示版本过旧，请升级该服务端的 JavScribe。</div>`;
+      });
+  }
+
+  function renderSrvPaneSingle(name: string): void {
+    const seq = ++srvSeq;
+    const body = $("srv-body");
+    if (!body) return;
+    const e = (state.engines || []).find((x) => x.name === name);
+    if (!e) {
+      body.innerHTML = '<div class="set-note"><div class="set-note-title">服务不存在或已删除</div>请重新选择服务端。</div>';
+      setSrvNote("");
+      return;
+    }
+    setSrvNote(`仅修改「${name}」这一个服务端的配置。`);
+    if (!e.has_key) {
       body.innerHTML = `
       <div class="set-note">
         <div class="set-note-title">该服务尚未登记 API Key</div>
@@ -4550,7 +4714,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           await t.putEngineKey(name, ($("key-input") as HTMLInputElement).value.trim());
           toast("API Key 已保存", "ok");
           await refresh(); // 等 has_key 落地，否则下面又按 keyless 渲染
-          openSettings(name);
+          renderSrvPaneSingle(name);
         } catch (e2) {
           toast((e2 as Error).message, "err");
         }
@@ -4558,10 +4722,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ($("key-input") as HTMLInputElement).focus();
       return;
     }
-    body.innerHTML = '<div class="muted">加载设置中…</div>';
+    body.innerHTML = '<div class="muted small">加载设置中…</div>';
     t.getConfig(name)
-      .then((items) => renderConfigForm(name, items))
+      .then((items) => { if (seq === srvSeq) renderCfgForm(body, "single", name, items); })
       .catch((err: Error) => {
+        if (seq !== srvSeq) return;
         body.innerHTML = `
         <div class="set-note err">
           <div class="set-note-title">无法读取服务端设置</div>
@@ -4571,141 +4736,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       });
   }
 
-  function renderConfigForm(name: string, items: ConfigItem[]) {
-    state.cfgItems = items;
-    const e = (state.engines || []).find((x) => x.name === name);
-    const groups: Record<string, ConfigItem[]> = {};
-    for (const it of items) {
-      const g = it.path.split(".")[0];
-      (groups[g] = groups[g] || []).push(it);
-    }
-    const body = $("modal-body");
-    let html = "";
-    if (e) {
-      html += `
-      <div class="cfg-meta">
-        <span class="cfg-lamp${e.online ? " on" : " off"}"></span>
-        <span class="cfg-meta-name">${esc(e.name)}</span>
-        <a class="cfg-meta-url mono" href="${esc(e.url)}" target="_blank" rel="noopener" title="打开服务端页面">${esc(e.url)}</a>
-        <span class="cfg-meta-tags">
-          <span class="tag">${esc(e.device || "—")}</span>
-          <span class="tag" title="服务 /health 上报版本">v${esc(e.version || "—")}</span>
-          ${serveUpBadge(e)}
-          <span class="tag${e.jobs_running ? " hot" : ""}">${e.jobs_running ? `运行 ${e.jobs_running}` : "队列空闲"}</span>
-        </span>
-      </div>`;
-    }
-    html += `
-    <div class="cfg-global-note"><b>服务端级设置</b>：以下改动作用于服务端本身，影响<b>所有连接该服务的客户端</b>（对新提交的任务生效）。</div>`;
-    // tab 分类：总览（组件就绪）+ 各设置组；组顺序 = GROUP_ZH 既定顺序，未知组（服务端新增）排末尾兜底
-    const orderedGroups = [
-      ...Object.keys(GROUP_ZH).filter((k) => groups[k]),
-      ...Object.keys(groups).filter((k) => !(k in GROUP_ZH)),
-    ];
-    const tabBtnHtml = (key: string, label: string, on: boolean): string =>
-      `<button type="button" class="cfg-tab${on ? " on" : ""}" role="tab" data-pane="${esc(key)}" aria-selected="${on ? "true" : "false"}">${esc(label)}<i class="cfg-tab-dot" hidden></i></button>`;
-    html += '<div class="cfg-tabs" role="tablist" id="cfg-tabs">';
-    html += tabBtnHtml("ready", "总览", true);
-    for (const g of orderedGroups) html += tabBtnHtml(g, GROUP_ZH[g] || g, false);
-    html += "</div>";
-    // 总览 pane = 组件就绪自检卡片（serve 0.2.6+ GET /ready）：打开弹窗即拉取一次
-    html += `
-    <div class="cfg-tab-pane" data-pane="ready" role="tabpanel">
-      <section class="cfg-sec cfg-sec-ready" data-sec="ready">
-        <h4 class="cfg-sec-title">组件就绪${`<span class="cfg-sec-desc">模型 / 引擎 / GPU / 磁盘等是否就绪</span>`}${helpIcon("服务端各组件与模型的就绪自检（serve v0.2.6+）。仅本地检查（文件存在性/命令探测），不探测 LLM、Emby 等网络连通性；连通性由任务级失败体现。旧版服务无此接口，显示升级提示。")}</h4>
-        <div class="ready-body" id="ready-body"><div class="muted small">检查中…</div></div>
-      </section>
-    </div>`;
-    for (const g of orderedGroups) {
-      const list = groups[g];
-      // scan 组：新客户端扫描规则已整体归位「客户端设置 · 扫描规则」（本机 client config），
-      // 服务端 scan.* 仅留兼容旧客户端/直连 API，不再被任何新版客户端读取——
-      // 渲染为指引说明而非可编辑控件，避免「改了没生效」的误导（10-08 归位线的遗留口子）
-      const bodyHtml = g === "scan"
-        ? `<div class="set-note">扫描规则（视频扩展名 / 已有字幕判定 / 递归 / 忽略小于 / 文件名标记）已统一在 <b>「客户端设置 · 扫描规则」</b> 维护（保存在本机，桌面端离线也可用）。<br>服务端的 <span class="mono">scan.*</span> 配置新版客户端不再读取，仅保留给旧版客户端 / 直连 API 兼容，无需在此调整。</div>`
-        : list.map(configFieldHtml).join("");
-      html += `
-      <div class="cfg-tab-pane" data-pane="${esc(g)}" role="tabpanel" hidden>
-        <section class="cfg-sec" data-sec="${esc(g)}">
-          <h4 class="cfg-sec-title">${esc(GROUP_ZH[g] || g)}${GROUP_DESC[g] ? `<span class="cfg-sec-desc">${esc(GROUP_DESC[g])}</span>` : ""}</h4>
-          <div class="cfg-sec-body">${bodyHtml}</div>
-        </section>
-      </div>`;
-    }
-    const hasSecret = items.some((i) => i.type === "secret");
-    html += `
-    <div class="cfg-foot">
-      <span class="cfg-foot-note">保存后对新提交的任务生效${hasSecret ? "；Key 类留空 = 保持不变" : ""}</span>
-      <span id="cfg-dirty" class="muted small">无改动</span>
-      <span class="cfg-foot-actions">
-        <button type="button" id="cfg-reset" class="btn" hidden>重置改动</button>
-        <button type="button" id="cfg-apply-all" class="btn" hidden title="把当前表单值应用到全部已注册服务（逐端保存；Key 类留空 = 各端保持现值，不覆盖）"></button>
-        <button type="button" id="cfg-save" class="btn btn-primary">保存设置</button>
-      </span>
-    </div>`;
-    body.innerHTML = html;
-    loadReadiness(name);
-    // tab 切换：全部 pane 常驻 DOM 仅显隐（输入值/dirty 态保留）；未保存项在所属 tab 上点圆点
-    const cfgTabs = Array.from(body.querySelectorAll<HTMLButtonElement>(".cfg-tab"));
-    const cfgPanes = Array.from(body.querySelectorAll<HTMLElement>(".cfg-tab-pane"));
-    const syncCfgTabDots = (): void => {
-      for (const p of cfgPanes) {
-        const dot = body.querySelector<HTMLElement>(
-          `.cfg-tab[data-pane="${CSS.escape(p.dataset.pane || "")}"] .cfg-tab-dot`);
-        if (dot) dot.hidden = p.querySelectorAll<HTMLElement>(".cfg-row.dirty").length === 0;
-      }
-    };
-    const showCfgPane = (key: string): void => {
-      for (const tb of cfgTabs) {
-        const on = (tb.dataset.pane || "") === key;
-        tb.classList.toggle("on", on);
-        tb.setAttribute("aria-selected", on ? "true" : "false");
-      }
-      for (const p of cfgPanes) p.hidden = (p.dataset.pane || "") !== key;
-    };
-    for (const tb of cfgTabs) tb.onclick = () => showCfgPane(tb.dataset.pane || "ready");
-    // 改动追踪：控件当前值与初始快照比较，差异行标 .dirty（标签前圆点 + 描边高亮）
-    body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
-      const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
-      if (!ctl) return;
-      const sync = (): void => {
-        const cur = ctl instanceof HTMLInputElement && ctl.type === "checkbox"
-          ? JSON.stringify(ctl.checked)
-          : JSON.stringify(ctl.value);
-        row.classList.toggle("dirty", cur !== (row.dataset.base ?? ""));
-        const n = body.querySelectorAll(".cfg-row.dirty").length;
-        const d = $("cfg-dirty");
-        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
-        const r = $("cfg-reset");
-        if (r) r.hidden = n === 0;
-        syncCfgTabDots();
-      };
-      ctl.addEventListener("input", sync);
-      ctl.addEventListener("change", sync);
-      if (ctl.type === "checkbox" && GATE_SEC[row.dataset.path || ""]) {
-        ctl.addEventListener("change", () => applyGating(body));
-      }
-    });
-    applyGating(body);
-    ($("cfg-reset") as HTMLButtonElement).onclick = () => {
-      body.querySelectorAll<HTMLElement>(".cfg-row").forEach((row) => {
-        const ctl = row.querySelector<HTMLInputElement | HTMLSelectElement>("input, select");
-        if (!ctl) return;
-        const base = JSON.parse(row.dataset.base ?? '""') as boolean | string;
-        if (ctl.type === "checkbox") ctl.checked = base === true;
-        else ctl.value = base === true ? "true" : base === false ? "false" : String(base);
-        ctl.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    };
-    ($("cfg-save") as HTMLButtonElement).onclick = () => saveConfig(name);
-    // 「应用到所有服务」：仅多服务时出现（单服务 = 保存即全部）
-    const applyAll = $("cfg-apply-all") as HTMLButtonElement;
-    applyAll.textContent = "应用到所有服务";
-    applyAll.hidden = state.engines.length < 2;
-    applyAll.onclick = () => applyConfigToAll(name);
-  }
-
-  // 组件就绪自检：拉取 /ready 渲染卡片；旧服务(unsupported)/离线(unreachable)降级为提示，不 throw
+  // 组件就绪自检：拉取 /ready 渲染卡片；旧服务(unsupported)/离线(unreachable)降级为提示，不 throw；旧服务(unsupported)/离线(unreachable)降级为提示，不 throw
   async function loadReadiness(name: string): Promise<void> {
     const box = $("ready-body");
     if (!box) return;
@@ -4830,28 +4861,30 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     try {
       await t.putConfig(name, values);
       toast("服务设置已保存（对新提交的任务生效）", "ok");
-      refresh();
-      openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
+      await refresh();
+      // 重新拉取：敏感项回到打码、改动追踪归零（设置页内重渲，不再开弹窗）
+      const sel = $("srv-sel") as HTMLSelectElement | null;
+      if (sel && sel.value) renderSrv(sel.value);
+      else renderSrvPaneSingle(name);
     } catch (e) {
       toast((e as Error).message, "err");
     }
   }
 
-  // 「应用到所有服务」：先逐目标拉取现配置做字段级 diff，确认后才 fan-out 覆盖（并行 putConfig，逐端独立成败）。
-  // 确认交互放在发请求前的同步步骤：先取齐 diff 数据 → 渲染确认页 → 点确认直接 fan-out，中间不触发
-  // 设置重渲染（重渲染回第一 tab 的走查坑）；取消/关窗零请求。
-  async function applyConfigToAll(name: string) {
+  // 「保存到所有服务」（设置页 · 服务端 · 通用）：先逐目标拉取现配置做字段级 diff，确认后才 fan-out
+  // 覆盖（并行 putConfig，逐端独立成败）。确认交互放在发请求前的同步步骤：先取齐 diff 数据 →
+  // 渲染确认弹窗（#modal）→ 点确认直接 fan-out；取消 = 只关弹窗，页内表单不回退，零请求。
+  async function applyCommonToAll(): Promise<void> {
     const values = collectCfgValues();
     if (!values) return;
-    const targets = state.engines.map((e) => e.name);
-    if (targets.length < 2) return;
+    const targets = (state.engines || []).map((e) => e.name);
+    if (!targets.length) return;
     const btn = $("cfg-apply-all") as HTMLButtonElement;
     btn.disabled = true;
     btn.textContent = "正在比对差异…";
     const currents = await Promise.allSettled(targets.map((n) => t.getConfig(n)));
     btn.disabled = false;
-    btn.textContent = "应用到所有服务";
-    if (modalBackdrop.hidden) return; // 比对期间弹窗被关：中止，零请求
+    btn.textContent = "保存到所有服务";
     // 字段级 diff：只比本次下发的键（int/float/secret 留空 = 不下发，各端保持现值，不计差异）
     const normVal = (v: unknown): string =>
       Array.isArray(v) ? v.join(", ")
@@ -4893,10 +4926,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         <button type="button" id="cfg-apply-all-ok" class="btn btn-primary">确认应用到 ${targets.length} 个服务</button>
       </span>
     </div>`;
-    showModal(`应用到所有服务（${targets.length} 个）`);
+    showModal(`保存到所有服务（${targets.length} 个）`);
     $("modal").classList.add("modal-wide");
     $("modal-body").innerHTML = html;
-    ($("cfg-apply-all-cancel") as HTMLButtonElement).onclick = () => openSettings(name); // 取消 = 回设置页，零请求
+    ($("cfg-apply-all-cancel") as HTMLButtonElement).onclick = () => hideModal(); // 取消 = 只关弹窗，页内表单不回退
     ($("cfg-apply-all-ok") as HTMLButtonElement).onclick = async () => {
       const okBtn = $("cfg-apply-all-ok") as HTMLButtonElement;
       okBtn.disabled = true;
@@ -4913,13 +4946,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       } else {
         toast(`应用失败：${fails.join("、")}`, "err");
       }
-      refresh();
-      openSettings(name); // 重新拉取：敏感项回到打码、改动追踪归零
+      await refresh();
+      hideModal();
+      const sel = $("srv-sel") as HTMLSelectElement | null;
+      if (sel && sel.value) renderSrv(sel.value);
     };
   }
 
   // ---------- 本机目录扫描 ----------
-  // 扫描规则统一在「客户端设置 · 扫描规则」维护（本机 client config 落盘）；面板不再放规则控件。
+  // 扫描规则统一在「设置 → 客户端 → 扫描规则」维护（本机 client config 落盘）；面板不再放规则控件。
   let scanPollTimer: number | null = null;
   const stopScanPoll = () => { if (scanPollTimer != null) { window.clearInterval(scanPollTimer); scanPollTimer = null; } };
   const scanStatusLabel: Record<string, string> = {
@@ -5115,7 +5150,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (!items.length) {
       $("scan-table").innerHTML = state.scanItems.length
         ? '<div class="muted small">该分类下没有文件，可切到上方其它 tab</div>'
-        : '<div class="muted small">没有找到符合条件的视频文件。可到「客户端设置 · 扫描规则」调整扩展名'
+        : '<div class="muted small">没有找到符合条件的视频文件。可到「设置 → 客户端 → 扫描规则」调整扩展名'
           + (platform.kind === "web"
             ? "；要处理浏览器电脑上的文件夹请用上方「选择文件夹」"
             : "；路径需被所选服务可读（本地服务可填 D:\\Videos 等本机路径）") + "）</div>";
@@ -5134,11 +5169,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const subCell = i.subtitle_status === "external"
               ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span><button type="button" class="srt-pv" data-srt="${esc(i.subtitle ? siblingOf(i.path, i.subtitle) : "")}" title="预览字幕内容">预览</button>`
               : i.subtitle_status === "named"
-              ? `<span class="tag subtag" title="文件名含标记 ${esc(i.name_sub_token || "")}，按规则视为已压字幕（可在「客户端设置 · 扫描规则」改判）">标记（名）</span>`
+              ? `<span class="tag subtag" title="文件名含标记 ${esc(i.name_sub_token || "")}，按规则视为已压字幕（可在「设置 → 客户端 → 扫描规则」改判）">标记（名）</span>`
               : i.subtitle_status === "embedded"
               ? `<span class="tag subtag warn" title="普通扫描不会读取视频内容；如需确认内嵌字幕，请单独发起检查">内嵌字幕（需单独检查）</span>`
               : i.name_no_sub
-              ? `<span class="tag subtag ok" title="文件名含标记 ${esc(i.name_no_sub_token || "")}，按规则视为无字幕版（可在「客户端设置 · 扫描规则」改判）">无字幕（名）</span>`
+              ? `<span class="tag subtag ok" title="文件名含标记 ${esc(i.name_no_sub_token || "")}，按规则视为无字幕版（可在「设置 → 客户端 → 扫描规则」改判）">无字幕（名）</span>`
               : '<span class="muted" title="普通扫描不会读取视频内容">未检查</span>';
             return `
             <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
@@ -5637,7 +5672,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     renderUpSidebar();
   }
 
-  // ---------- 客户端设置 tab（本机工作台并发 + 桌面专属：更新设置 / 文件夹监听） ----------
+  // ---------- 设置 tab（客户端/服务端 子 tab：本机并发 + 桌面专属卡；服务端 = 通用/单端配置） ----------
   // 每次激活重渲染（与服务设置弹窗一致：每次打开取最新值）；ccViewSeq 丢弃过期异步结果
   function ccWatchStatusText(st: WatchState | null): string {
     if (!st) return "监听未启用";
@@ -5732,7 +5767,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (!scanVals.exts) scanVals.exts = VIDEO_EXTS.join(",");
       if (!scanVals.pats) scanVals.pats = LOCAL_SUB_PATTERNS.join(",");
     }
-    let html = '<div class="cc-cards">';
+    // 设置页 = 客户端 / 服务端两个子 tab（10-18-javscribe-0246 A）：服务端 pane 懒渲染（首次切入才拉配置）
+    let html = `
+    <div class="cc-subtabs" role="tablist">
+      <button type="button" class="cfg-tab on" role="tab" data-cctab="client" aria-selected="true">客户端</button>
+      <button type="button" class="cfg-tab" role="tab" data-cctab="server" aria-selected="false">服务端</button>
+    </div>
+    <div class="cc-pane" data-pane="client">
+    <div class="cc-cards">`;
     if (cc) {
       html += `
     <section class="cfg-sec cc-card" data-sec="ccfg-concurrency">
@@ -5814,8 +5856,42 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </div>
     </section>`;
     }
-    html += "</div>";
+    html += "</div>"; // cc-cards
+    html += `
+    </div> // cc-pane client
+    <div class="cc-pane" data-pane="server" hidden>
+      <div class="srv-bar">
+        <span class="srv-bar-label">服务端</span>
+        <select id="srv-sel">
+          <option value="__all__">* 所有服务（通用设置）</option>
+          ${state.engines.map((e) => `<option value="${esc(e.name)}">${esc(e.name)}（${e.online ? "在线" : "离线"} · v${esc(e.version || "—")}）</option>`).join("")}
+        </select>
+      </div>
+      <div class="srv-note muted small" id="srv-note"></div>
+      <div id="srv-body"><div class="muted small">（服务端设置懒加载：首次切入本 tab 时拉取）</div></div>
+    </div>`;
     body.innerHTML = html;
+    // 设置子 tab 切换：pane 显隐；服务端首次切入才懒渲染（避免无谓 getConfig）
+    const ccSubTabs = Array.from(body.querySelectorAll<HTMLButtonElement>(".cc-subtabs .cfg-tab"));
+    const ccPaneEls = Array.from(body.querySelectorAll<HTMLElement>(".cc-pane"));
+    let srvRendered = false;
+    for (const tb of ccSubTabs) {
+      tb.onclick = () => {
+        const isClient = (tb.dataset.cctab || "") === "client";
+        for (const x of ccSubTabs) {
+          x.classList.toggle("on", x === tb);
+          x.setAttribute("aria-selected", x === tb ? "true" : "false");
+        }
+        for (const p of ccPaneEls) p.hidden = (p.dataset.pane || "client") !== (isClient ? "client" : "server");
+        if (!isClient && !srvRendered) {
+          srvRendered = true;
+          const sel = $("srv-sel") as HTMLSelectElement | null;
+          if (sel) renderSrv(sel.value);
+        }
+      };
+    }
+    const srvSel = $("srv-sel") as HTMLSelectElement | null;
+    if (srvSel) srvSel.onchange = () => renderSrv(srvSel.value);
     // 并发卡：改动追踪 + 独立保存（原弹窗卡片语义原样迁移）
     if (cc) {
       const rows = Array.from(body.querySelectorAll<HTMLElement>(".cc-card[data-sec=ccfg-concurrency] .ccfg-row"));

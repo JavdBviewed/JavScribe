@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-TYwgLUdC.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-C-SZU8wY.css">
+  <script type="module" crossorigin src="/assets/index-DmzqcKvB.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-zg8HMn-m.css">
 </head>
 <body>
 <header>
@@ -34,7 +34,7 @@
     <button type="button" class="view-tab" data-view="engines" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01" stroke-width="2.2"/></svg><span>字幕服务</span></button>
     <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
     <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="nav-badge" class="nav-badge" hidden>0</span></button>
-    <button type="button" class="view-tab" data-view="ccfg" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="1.9" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="17" r="1.9" fill="currentColor" stroke="none"/></svg><span>客户端设置</span></button>
+    <button type="button" class="view-tab" data-view="ccfg" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="1.9" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="17" r="1.9" fill="currentColor" stroke="none"/></svg><span>设置</span></button>
   </nav>
   <div class="nav-up" id="nav-up" hidden>
     <label class="nav-up-auto" title="启用后启动时自动检查新版本（只检查，不自动下载）"><input type="checkbox" id="up-auto"><span>自动更新</span></label>
@@ -164,7 +164,7 @@
         <button id="scan-browse" class="btn" type="button" title="选择运行 JavScribe 的机器上的目录">浏览目录</button>
         <button id="scan-go" class="btn btn-primary" disabled>开始扫描</button>
       </div>
-      <div class="muted small" id="scan-rules-hint">扫描规则（视频扩展名 / 已有字幕判定 / 递归 / 忽略小于 / 文件名标记）统一在「客户端设置 · 扫描规则」维护。</div>
+      <div class="muted small" id="scan-rules-hint">扫描规则（视频扩展名 / 已有字幕判定 / 递归 / 忽略小于 / 文件名标记）统一在「设置 → 客户端 → 扫描规则」维护。</div>
       <div id="scan-task-status" class="scan-task-status" hidden role="status" aria-live="polite">
         <div class="scan-task-main"><span class="scan-task-dot" aria-hidden="true"></span><span id="scan-task-text"></span></div>
         <div class="scan-task-actions">
@@ -265,7 +265,7 @@
   </section>
   <section id="sec-ccfg">
     <div class="sec-head">
-      <div class="sec-title"><span class="kicker">Client</span><h2>客户端设置</h2></div>
+      <div class="sec-title"><span class="kicker">Settings</span><h2>设置</h2></div>
     </div>
     <div id="cc-body" class="cc-body"><div class="muted small">加载中…</div></div>
   </section>
@@ -306,6 +306,11 @@
           <span class="field-label">API Key（可选）</span>
           <input id="engine-key" type="password" placeholder="服务端设置了 JAVSCRIBE_API_KEY 时必填" maxlength="128">
         </label>
+        <div id="engine-edit-copies" class="eng-edit-copies" hidden>
+          <button type="button" class="btn btn-small" id="engine-copy-url" title="复制该服务地址到剪贴板">复制地址</button>
+          <button type="button" class="btn btn-small" id="engine-copy-key" title="复制该服务 API Key 到剪贴板">复制 Key</button>
+          <button type="button" class="btn btn-small" id="engine-key-reveal" title="显示/隐藏 API Key">查看 Key</button>
+        </div>
         <div class="eng-add-actions">
           <button type="submit" id="engine-add-submit" class="btn btn-primary">添加服务</button>
           <button type="button" id="engine-add-cancel" class="btn">取消</button>

@@ -316,31 +316,30 @@ test("e) 服务设置·应用到所有服务：fan-out 双端，Key 类留空 = 
   };
   expect((await getCfg("mock2"))["subtitle.lang_tag"]).toBe("ja");
 
-  await goTab(page, "engines");
-  // applyAll 显隐只在弹窗渲染时按 state.engines 判一次：先等页面 poller 刷到双服务卡
+  // 0246 A：卡片齿轮已删 → 设置 tab 服务端 pane；先等页面 poller 刷到双服务卡（fan-out 目标 = 全部引擎）
+  await goTab(page, "ccfg");
   await expect(page.locator("article.eng")).toHaveCount(2, { timeout: 15_000 });
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
   try {
-    await page.locator('button.set[data-name="mock"]').click();
-    // 双服务 → 按钮出现；改 lang_tag（mock 现值 zh → en）；polish Key 留空 = 不发送
+    // #srv-sel 默认 __all__ → 通用表单（取值参考 = 第一个在线且已登记 Key 的服务，即 mock）；
+    // getConfig 异步，#cfg-apply-all / #cfg-subtitle-lang_tag 需带 timeout 等出现
     const applyAll = page.locator("#cfg-apply-all");
     await expect(applyAll).toBeVisible({ timeout: 15_000 });
-    // lang_tag 在「字幕」tab 页（弹窗默认激活总览），先切页再填
-    await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
-    await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible();
+    await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible({ timeout: 15_000 });
+    // 改 lang_tag（mock 现值 zh → en）；polish Key 留空 = 不发送
     await page.locator("#cfg-subtitle-lang_tag").fill("en");
     await applyAll.click();
     // 先出确认页：逐目标字段级差异（mock zh → en；mock2 ja → en），留空的 Key 不在差异内
     await expect(page.locator("#cfg-apply-all-ok")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("#modal-body")).toContainText("ja → en");
     await expect(page.locator("#modal-body")).toContainText("zh → en");
-    // 取消 = 回设置页，零请求（两端现值不变）
+    // 取消 = 只关弹窗，页内表单不回退（值保持 en），零请求（两端现值不变）
     await page.locator("#cfg-apply-all-cancel").click();
-    await page.locator('#cfg-tabs .cfg-tab[data-pane="subtitle"]').click();
-    await expect(page.locator("#cfg-subtitle-lang_tag")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#modal")).toBeHidden();
+    await expect(page.locator("#cfg-subtitle-lang_tag")).toHaveValue("en");
     expect((await getCfg("mock"))["subtitle.lang_tag"]).toBe("zh");
     expect((await getCfg("mock2"))["subtitle.lang_tag"]).toBe("ja");
-    // 二次进确认页 → 确认下发
-    await page.locator("#cfg-subtitle-lang_tag").fill("en");
+    // 再点进确认页 → 确认下发
     await applyAll.click();
     await expect(page.locator("#cfg-apply-all-ok")).toBeVisible({ timeout: 10_000 });
     await page.locator("#cfg-apply-all-ok").click();

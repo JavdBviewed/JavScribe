@@ -148,16 +148,18 @@ test("文件夹批量（行优先）：提交即建主任务+子行 → 派发�
   }
 });
 
-test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engines.json 落盘 → 自动转配置表单", async ({ request }) => {
+test("Key 登记 UI 流程（无预置 key）：设置→服务端 → 保存 → engines.json 落盘 → 页内自动转配置表单", async ({ request }) => {
   await mockReset(request);
   const dir = mkdtempSync(join(tmpdir(), "javscribe-e2e-keyless-"));
   const app = await launchApp(dir); // 无 engines.json：仅 env 预置的 mock 引擎（无 key）
   try {
     const page = await app.firstWindow();
     await waitForReady(page);
-    await goView(page, "engines");
-    await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
-    await expect(page.locator(".set-note")).toHaveText(/该服务尚未登记 API Key/, { timeout: 10_000 });
+    // 0246 A：卡片齿轮已删 → 设置 tab 服务端 pane（keyless 表单搬进 #srv-body，不开弹窗）
+    await goView(page, "ccfg");
+    await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+    await page.selectOption("#srv-sel", "mock");
+    await expect(page.locator("#srv-body .set-note")).toHaveText(/该服务尚未登记 API Key/, { timeout: 10_000 });
     await expect(page.locator("#key-input")).toBeVisible();
     await page.locator("#key-input").fill(MOCK_KEY);
     const [toast] = await Promise.all([
@@ -166,8 +168,9 @@ test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engi
     ]);
     expect(await toast.textContent()).toContain("API Key 已保存");
     await waitForEngineKey(page);
-    // 保存后 modal 自动重开为配置表单
-    await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 15_000 });
+    // 保存后页内自动转配置表单（不弹 #modal）
+    await expect(page.locator("#srv-body #cfg-save")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#modal")).toBeHidden();
     // Key 落盘 engines.json
     const cfg = JSON.parse(readFileSync(join(dir, "engines.json"), "utf-8")) as {
       engines: Array<{ name: string; api_key: string }>;
@@ -180,21 +183,23 @@ test("Key 登记 UI 流程（无预置 key）：设置弹窗 → 保存 → engi
   }
 });
 
-test("服务设置弹窗：组件就绪自检卡片（全就绪 + 单项异常重拉）", async ({ page, request }) => {
-  await goView(page, "engines");
-  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
-  await expect(page.locator("#cfg-save")).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("#modal .cfg-sec-ready")).toBeVisible();
-  await expect(page.locator("#modal .ready-flag.ok")).toContainText("全部就绪", { timeout: 15_000 });
-  await expect(page.locator("#modal .ready-row")).toHaveCount(11);
+test("服务端设置（设置 tab pane）：组件就绪自检卡片（全就绪 + 单项异常重拉）", async ({ page, request }) => {
+  // 0246 A：卡片齿轮已删 → 设置 tab 服务端 pane
+  await goView(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  await page.selectOption("#srv-sel", "mock");
+  await expect(page.locator("#srv-body #cfg-save")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#srv-body .cfg-sec-ready")).toBeVisible();
+  await expect(page.locator("#srv-body .ready-flag.ok")).toContainText("全部就绪", { timeout: 15_000 });
+  await expect(page.locator("#srv-body .ready-row")).toHaveCount(11);
 
-  // 单项异常（gpu=fail，required）→ 重开弹窗重新拉取 → 「存在未就绪项」
+  // 单项异常（gpu=fail，required）→ 重选服务重新拉取 → 「存在未就绪项」
+  // （selectOption 同值重选不触发 onchange，用 __all__ 绕圈）
   await request.post(`${MOCK}/_mock/ready?gpu=fail`);
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#modal")).toBeHidden({ timeout: 5_000 });
-  await page.locator('article.eng[data-name="mock"] .icon-btn.set').click();
-  await expect(page.locator("#modal .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
-  await expect(page.locator("#modal .ready-row.st-fail")).toHaveCount(1);
+  await page.selectOption("#srv-sel", "__all__");
+  await page.selectOption("#srv-sel", "mock");
+  await expect(page.locator("#srv-body .ready-flag.no")).toContainText("存在未就绪项", { timeout: 15_000 });
+  await expect(page.locator("#srv-body .ready-row.st-fail")).toHaveCount(1);
   // 复原，避免拖死后续用例
   await mockReset(request);
 });
