@@ -3,7 +3,7 @@
 //       （用户报告「已绑定「158」：整批只发该服务」+ 旧 serve 1MB bad body size），
 //       与「选择文件夹」per-file 派发时刻实时均衡不对称。
 // 回归（双在线引擎：mock 8302 + 第二 mock 8305，同脚本换端口；workers=1 串行无端口冲突）：
-//   1. 扫描 3 项（两服务在途均 0）提交 → 摊平 mock:2 / second:1（distributeToEngines 确定性），
+//   1. 扫描 3 项（两服务在途均 0）提交 → 摊平 mock:2 / second:1（0246 B 派发时刻实时选机：在途最少 + 平手注册序），
 //      两 serve /jobs 文件齐全、共享同一 batch_id/label（主任务不断链）
 //   2. 路径两服务都 400（__notfound__）→ 全进本机提取回退（假 ffmpeg），
 //      主任务复用 batch，逐文件 auto 解析（在途记账）最终 mock:2 / second:1 全部完成
@@ -46,7 +46,7 @@ test.afterAll(() => {
   secondMock?.kill();
 });
 
-/** 双引擎 userData（注册序 mock 在前：平手时 resolveAutoEngine/distributeToEngines 取它） */
+/** 双引擎 userData（注册序 mock 在前：平手时 pickAutoEngine/resolveAutoEngine 取它） */
 function freshUserData(): string {
   const dir = mkdtempSync(join(tmpdir(), "javscribe-scanbal-"));
   writeFileSync(

@@ -1,6 +1,7 @@
 // 桌面端派发「行优先」专测（10-10-javscribe-dispatch-row-first）
 // 打的是用户 65 文件批量那条链：扫描目录 → 所选服务 400 读不到本机路径 → 回退本机提取
-//   dispatchLocalScanPaths → runDispatchQueue（rowFirst）→ dispatchOne（本机提取 → 上传音频 → 提交）。
+//   runScanQueue 实时泵（提交前指针推进，400 not-found 未结算需 started-- 回退槽位重处理）
+//   → 回退分支本机提取 → 上传音频 → 提交。
 // 断言：① 提交即建主任务 + N 条 pending 子行（serve 此时还没有任务）② 派发页无流程节点、只剩一条
 //   状态行且自动切任务看板 ③ 各阶段进度写进子行 ④ serve 真行出现后交棒去重（全程同一文件恒一行）
 //   ⑤ 批次「取消」对 pending 子行生效：未开始 → 已取消、在跑 → 跑完当前阶段不提交 = 已跳过。
@@ -245,10 +246,12 @@ test("批量取消：未开始子行「取消」=已取消、在跑链跑完当�
     await expect(page.locator(".job-batch-row .pill")).toHaveText("已取消", { timeout: 60_000 });
     await expect(page.locator(".job-batch-row .batch-op")).toHaveCount(0);
 
-    // 队列停止：派发页汇总行说明没有任何一项提交服务
+    // 队列停止：状态行停在「已创建主任务」（finish 只 toast 汇总，不再回写状态行）；
+    // 汇总 toast（err：0 项入队）说明没有任何一项提交服务
     await goView(page, "dispatch");
     await expect(page.locator("#pipeline")).toBeHidden();
-    await expect(page.locator("#dispatch-status")).toHaveText(/已取消：已提交 0\/3 项，3 项已取消/, { timeout: 60_000 });
+    await expect(page.locator("#dispatch-status")).toHaveText(/已创建主任务 .*：3 子任务/);
+    await expect(page.locator("#toasts .toast.err", { hasText: "3 项已取消（未提交服务）" })).toBeVisible({ timeout: 60_000 });
 
     const { log } = await readSampler(page);
     expect(log.some((l) => /\|uploading\|/.test(l))).toBe(false);

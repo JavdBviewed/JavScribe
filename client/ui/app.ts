@@ -3,12 +3,12 @@
 // 网络请求全部走 transport 接口（web 形态实现见 transport-web）。
 
 import type { Transport } from "../core/transport";
-import { LOCAL_SUB_PATTERNS, MIN_FREE_VRAM_GB, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
+import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, distributeToEngines, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
 import { TransportError } from "../core/transport";
@@ -3570,7 +3570,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const pausedBatches = new Set<string>();
   // 行优先批次操作登记：batch_id -> { 取消整批未开始子行 / 单行取消后续发 / 暂停冻结 / 继续放行 }
   const batchQueues = new Map<string, { cancel: () => number; onRowCancel: () => void; pause: () => void; resume: () => void }>();
-  let batchStartNext: (() => void) | null = null; // 文件夹批量封顶等待的续发（泵重触发）
+  const pumpSlots = new Set<() => void>(); // 泵重触发槽（文件夹批量/扫描实时队列各占一槽；触发源=refresh 5s/链结算/设置保存）
   let singleQueuedFile: File | null = null;       // 等 cap 槽位的单文件（文件变更/重新派发即失效，身份匹配防误发）
 
   function inFlightOf(engine: string): number {
@@ -3598,22 +3598,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         return freeVramGb(m.metrics.gpu ?? null);
       },
     });
-  }
-
-  // 「扫描目录」auto 候选集（desktop 形态，10-17-javscribe-0243）：与 resolveAutoEngine 同口径——
-  // 在线 + 参与均衡 + 已登记 API Key + 空闲显存充足（无数据不过滤；全过滤回退全量）；
-  // 按在途升序排（stable sort，平手保注册序）→ distributeToEngines 整批摊匀。
-  function autoBalancedCandidates(): Engine[] | null {
-    const pool = state.engines.filter((e) => e.online && e.enabled !== false && e.has_key);
-    if (!pool.length) return null;
-    const vramOk = pool.filter((e) => {
-      const m = state._metrics[e.name];
-      if (!m || !m.ok || !m.metrics) return true; // 无数据视为满足，不过滤
-      const free = freeVramGb(m.metrics.gpu ?? null);
-      return free == null || free >= MIN_FREE_VRAM_GB;
-    });
-    const cands = vramOk.length ? vramOk : pool;
-    return [...cands].sort((a, b) => inFlightOf(a.name) - inFlightOf(b.name));
   }
 
   function canDispatch(engine: string): boolean {
@@ -3655,7 +3639,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   /** 泵重触发入口（refresh / 链结算 / 设置保存均调）：只释放排队项，不产生新任务 */
   function pumpDispatch(): void {
-    if (batchStartNext) batchStartNext();
+    for (const fn of [...pumpSlots]) fn();
     if (singleQueuedFile && !state.busy && state.file === singleQueuedFile && !state.folderFiles) {
       const engine = engineSelect.value;
       if (engine && canDispatch(engine)) startSingle(engine);
@@ -3740,7 +3724,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const finish = (): void => {
       if (done) return;
       done = true;
-      batchStartNext = null;
+      pumpSlots.delete(startNext);
       batchQueues.delete(batch.id);
       pausedBatches.delete(batch.id);
       const canceledN = rowFirst
@@ -3875,7 +3859,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       renderJobs(state._jobs);
     } else if (total > 0) preparePipeline(`文件 1/${total}`); // 空队列不亮管线
     startNext();
-    if (started < total && !cancelRequested) batchStartNext = startNext; // 封顶等待：泵重触发
+    if (started < total && !cancelRequested) pumpSlots.add(startNext); // 封顶等待：泵重触发
     if (settled === total) finish(); // 空队列
   }
 
@@ -3981,87 +3965,292 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     );
   }
 
-  // 「扫描目录」auto（desktop 形态，10-17-javscribe-0243；10-18 F3 改逐文件提交）：serve 单 job
-  // 多文件无 per-file auto、serve 间无对等注册表 → 客户端做 list-scheduling：按在途负载把文件摊到
-  // 候选服务（distributeToEngines，决策纯函数在 core/concurrency，单测），同一主任务 batch_id 提交。
-  // F3：逐文件提交（单文件 job）——serve /jobs/<id>/result 只回第一个文件的 srt，多文件 job 的
-  // job 级取数必写错文件；逐文件后写回登记/取数/幂等预检按文件成立，负载画像与回退上传路径一致
-  // （concurrency=1 时行为等价）。旧 900KB 字节子批切块随之废止。400 not-found 文件进 overflow
-  // 按候选序重试，候选耗尽回退本机提取上传（desktop 扫描恒为客户端本机磁盘，回退必可用）。
-  async function submitScanAutoDesktop(files: string[], batch: { id: string; label: string }) {
-    const cands = autoBalancedCandidates();
-    if (!cands) {
+  // 扫描路径 → 本地 File（400 回退本机提取链读 _localPath；与 dispatchLocalScanPaths 构造同款）
+  function scanPathToFile(name: string, size: number, path: string): FolderFile {
+    const f = new File([new Blob()], name) as FolderFile;
+    if (Number.isFinite(size) && size >= 0) Object.defineProperty(f, "size", { value: size, configurable: true });
+    f._localPath = path;
+    return f;
+  }
+
+  // 「扫描目录」auto 候选（实时派发，10-18-javscribe-0246）：在线 + 参与均衡 + 已登记 API Key；
+  // exclude = 已对该文件 400（读不到路径）的服务；显存过滤 / 在途最少选取在 pickAutoEngine 内
+  // （与 resolveAutoEngine 同口径，此处不重复）。
+  function scanAutoCandidates(exclude: ReadonlySet<string>): Engine[] {
+    return state.engines.filter((e) => e.online && e.enabled !== false && e.has_key && !exclude.has(e.name));
+  }
+
+  // B（10-18-javscribe-0246）：扫描批次实时选机派发——不再点击时刻静态摊分整批（distributeToEngines 退役），
+  // 改中性待派队列 + 泵：每文件提交时刻 pickAutoEngine 实时选机（在途最少 + 显存感知），受 queue_cap
+  // 闸（滴水）；400 not-found 排除该服务试下一候选，候选耗尽回退本机提取上传。desktop 双路径统一
+  // （auto / 显式引擎）：主任务 + N 子行（行优先），可暂停/取消，服务列提交时刻回填。
+  // F3/F4 红线不变：逐文件 job、pre 登记提交时点落盘、受理 rekey 正式键、网络错误保留 pre 登记
+  // （响应丢失=服务可能已受理）；行优先账本复用 createPendingRows/cancelPendingRow/markPendingFail/rowSink。
+  interface ScanQItem {
+    path: string;
+    name: string;
+    file: FolderFile;            // 回退本机提取链用（读 _localPath）
+    pend: PendingDispatch;       // 子行账本
+    failedEngines: Set<string>;  // 已对该文件 400 的服务
+    fallback: boolean;           // 候选耗尽 / 显式 400 → 本机提取上传
+  }
+  function runScanQueue(
+    files: string[],
+    engine: string,
+    batch: { id: string; label: string },
+    subStatus?: Record<string, string>,
+  ): void {
+    // auto 无可用服务（全离线 / 无 Key / 全退出均衡）：不建主任务（与 0.2.46 前同口径）
+    if (engine === "auto" && !scanAutoCandidates(new Set<string>()).length) {
       toast("自动均衡没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
       return;
     }
-    // 摊位：候选已按在途升序（平手注册序）→ 每文件落本批分配数最少的服务
-    const assign = distributeToEngines(cands.map((e) => e.name), files.length);
-    const bySvc = new Map<string, string[]>();
-    for (let i = 0; i < files.length; i++) {
-      const svc = assign[i];
-      const arr = bySvc.get(svc);
-      if (arr) arr.push(files[i]);
-      else bySvc.set(svc, [files[i]]);
-    }
-    let okN = 0;
-    let skippedN = 0;
-    const used = new Set<string>();
+    state.busy = true;
+    updateGo();
+    localStorage.setItem("javweb_engine", engine);
+    // 清扫描 UI 前捕获 name/size（clearScanUi 后 state.scanItems 为空，回退时不能再查）
+    const queueFiles: FolderFile[] = files.map((p) => {
+      const it = state.scanItems.find((i) => i.path === p);
+      const name = it ? it.name : p.split(/[\\/]/).pop() || p;
+      return scanPathToFile(name, it ? it.size : 0, p);
+    });
+    const total = queueFiles.length;
+    const pend = createPendingRows(batch, queueFiles, engine);
+    const items: ScanQItem[] = queueFiles.map((f, idx) => ({
+      path: files[idx],
+      name: f.name,
+      file: f,
+      pend: pend[idx],
+      failedEngines: new Set<string>(),
+      fallback: false,
+    }));
+    let okN = 0, skippedN = 0, started = 0, settled = 0, done = false, pumping = false;
+    let cancelRequested = false, queuePaused = false;
+    const usedEngines = new Set<string>();
     const errors: string[] = [];
-    let overflow: string[] = []; // 400 not-found：该服务读不到这些路径 → 换下一候选
-    const failed = new Set<string>(); // 本批已 400 的服务，重试 pass 跳过（同 serve 重复 400）
-    for (const [svc, group] of bySvc) {
-      for (const p of group) {
-        const r = await submitScanFile(svc, p, batch);
-        if (r.kind === "ok") {
-          okN += r.okFiles;
-          skippedN += r.skipped.length;
-          used.add(svc);
-        } else if (r.kind === "not-found") {
-          overflow.push(p);
-          failed.add(svc);
-        } else {
-          errors.push(`${svc}: ${r.message}`);
-        }
-      }
-    }
-    // 重试 pass：400 的文件按候选序试未 400 过的服务
-    if (overflow.length) {
-      let retry = overflow;
-      overflow = [];
-      for (const cand of cands) {
-        if (failed.has(cand.name) || !retry.length) continue;
-        const remain: string[] = [];
-        for (const p of retry) {
-          const r = await submitScanFile(cand.name, p, batch);
-          if (r.kind === "ok") {
-            okN += r.okFiles;
-            skippedN += r.skipped.length;
-            used.add(cand.name);
-          } else if (r.kind === "not-found") {
-            remain.push(p);
-            failed.add(cand.name);
-          } else {
-            errors.push(`${cand.name}: ${r.message}`);
+    // settled 去重：整批取消标记的项与链结算的项可能重叠（在跑链跑完也只算一次）
+    const counted = new Set<number>();
+    const settle = (i: number): void => { if (!counted.has(i)) { counted.add(i); settled++; } };
+    const markFallback = (i: ScanQItem, reason: string): void => {
+      i.fallback = true;
+      const r = i.pend.row;
+      if (BATCH_TERMINAL.has(r.status)) return;
+      r.position = "转本机提取上传";
+      r.phase_detail = "转本机提取上传";
+      r.message = reason;
+      schedulePendingRender();
+    };
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      pumpSlots.delete(startNext);
+      batchQueues.delete(batch.id);
+      pausedBatches.delete(batch.id);
+      const canceledN = pend.filter((p) => p.row.status === "canceled" || p.row.status === "skipped").length;
+      const fallbackN = items.filter((i) => i.fallback).length;
+      const notes: string[] = [];
+      if (okN > 0) notes.push(engine === "auto"
+        ? `已入队 ${okN} 项（自动均衡：派发时刻实时选机${usedEngines.size ? `，摊给 ${usedEngines.size} 台服务` : ""}）`
+        : `已入队 ${okN} 项（本机扫描）→ 「${engine}」按空位派发`);
+      if (fallbackN) notes.push(`${fallbackN} 项转本机提取后上传`);
+      if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
+      if (canceledN) notes.push(`${canceledN} 项已取消（未提交服务）`);
+      notes.push(...errors);
+      toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
+      state.busy = false;
+      updateGo();
+      watchPump();
+      refresh();
+      webShowView("jobs");
+    };
+    const startNext = (): void => {
+      if (done || cancelRequested || queuePaused || pumping) return;
+      pumping = true;
+      void (async () => {
+        try {
+          while (started < total && !done && !cancelRequested && !queuePaused) {
+            const it = items[started];
+            const r = it.pend.row;
+            // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
+            if (r.status === "canceled") { settle(started); started++; continue; }
+            // —— 回退项：本机提取上传（与 runDispatchQueue 的 auto/显式分支同口径）——
+            if (it.fallback) {
+              let fbName: string | null = engine;
+              if (engine === "auto") {
+                if (!canDispatch("auto")) break; // 全满 / 全离线：等泵重触发
+                fbName = resolveAutoEngine();
+                if (!fbName) break; // 理论不可达，双保险
+              } else if (!canDispatch(engine)) {
+                break; // 封顶：等 refresh / 链结算 / 设置保存重触发
+              }
+              const real = fbName;
+              const idx = started++;
+              r.engine = real;
+              it.pend.dispatched = true;
+              // 预登记：子行已建、即将提交 → 临时键先持久化（受理后 rekey 正式键）
+              registerWriteBack(preKeyOf(real, it.name), {
+                engine: real, videoName: it.name, dirHandle: null, videoPath: it.path,
+              });
+              void (async () => {
+                let ok = false;
+                let d: UploadStatus | { error: string } = { error: "" };
+                try { [ok, d] = await dispatchTracked(it.file, real, "", batch, rowSink(it.pend)); } catch (_e) { ok = false; }
+                if (ok) {
+                  okN++;
+                  usedEngines.add(real);
+                  const up = d as UploadStatus;
+                  if (up.job_id) {
+                    rekeyWriteBack(preKeyOf(real, it.name), real + "|" + up.job_id);
+                    registerWriteBack(real + "|" + up.job_id, {
+                      engine: real, videoName: it.name, dirHandle: null, videoPath: it.path,
+                    });
+                  }
+                } else {
+                  markPendingFail(it.pend, String((d as { error?: string }).error || "派发失败"));
+                }
+                settle(idx);
+                startNext();
+                if (settled === total) finish();
+              })();
+              continue; // 链按 cap 并行推进，结算后继续
+            }
+            // —— 派发时刻选机（需要处理时才选，不预分配）——
+            let realName: string | null = engine;
+            if (engine === "auto") {
+              const cands = scanAutoCandidates(it.failedEngines);
+              if (!cands.length) {
+                markFallback(it, "所有候选服务都读不到本机路径，转本机提取上传");
+                continue; // 下轮循环进回退分支
+              }
+              realName = pickAutoEngine(cands, {
+                inFlight: inFlightOf,
+                freeVramOf: (name) => {
+                  const m = state._metrics[name];
+                  if (!m || !m.ok || !m.metrics) return null;
+                  return freeVramGb(m.metrics.gpu ?? null);
+                },
+              });
+              if (!realName) break; // 理论不可达（cands 非空即有候选），双保险
+              if (inFlightOf(realName) >= queueCapNow()) break; // 封顶：等泵重触发
+            } else if (inFlightOf(engine) >= queueCapNow()) {
+              break; // 封顶：等 refresh / 链结算 / 设置保存重触发
+            }
+            const real = realName;
+            const idx = started++;
+            r.engine = real; // 服务列提交时刻回填
+            it.pend.dispatched = true;
+            // 提交 HTTP 计入在途（原先漏计；≤5s 行可见后由行接管，cap 更准）
+            chainInFlight.set(real, (chainInFlight.get(real) || 0) + 1);
+            const res = await submitScanFile(real, it.path, batch, subStatus);
+            chainInFlight.set(real, (chainInFlight.get(real) || 0) - 1);
+            if (res.kind === "ok") {
+              okN += res.okFiles;
+              skippedN += res.skipped.length;
+              usedEngines.add(real);
+              if (res.jobId) {
+                // 记账：已提交但行未可见的 job 进 pending（reconcilePending 见行即接管）
+                let st = pendingJobIds.get(real);
+                if (!st) { st = new Set<string>(); pendingJobIds.set(real, st); }
+                st.add(res.jobId);
+                if (!BATCH_TERMINAL.has(r.status)) {
+                  r.job_id = res.jobId;
+                  r.phase = "enqueued";
+                  r.status = "pending";
+                  r.progress = 1;
+                  r.position = "已入队";
+                  r.phase_detail = "已入队";
+                  r.message = `已入队，等待服务开始（任务 ${res.jobId}）`;
+                  it.pend.enqueuedAt = Date.now() / 1000;
+                  schedulePendingRender();
+                }
+              }
+              settle(idx);
+            } else if (res.kind === "not-found") {
+              // 服务确未受理（读不到路径）→ 排除该服务试下一候选（候选数有界）；耗尽 → 本机回退。
+              // 不 advance：下轮循环试下一候选（auto）或进回退分支（显式）
+              it.failedEngines.add(real);
+              if (engine === "auto" ? !scanAutoCandidates(it.failedEngines).length : true) {
+                markFallback(it, engine === "auto"
+                  ? "所有候选服务都读不到本机路径，转本机提取上传"
+                  : "所选服务读不到本机路径，转本机提取上传");
+              }
+              started--; // 本项未结算：回退槽位，下轮循环重新处理（auto 试下一候选 / 显式进回退分支）
+            } else {
+              // 网络错误 = 响应丢失、服务可能已受理 → 不回退、保留 pre 登记；行记失败
+              errors.push(`${real}: ${res.message}`);
+              markPendingFail(it.pend, res.message);
+              settle(idx);
+            }
           }
+          // 自然收口：全部提交/回退派发完毕 → finish（toast + busy 复位 + 批次登记摘除）。
+          // 回退链尚在跑的项由链内 settle 后收口（finish 幂等），此处只兜 HTTP 提交路径。
+          if (settled >= total) finish();
+          if (started < total && !done && !cancelRequested && !queuePaused) pumpSlots.add(startNext);
+        } finally {
+          pumping = false;
         }
-        retry = remain;
+      })();
+    };
+    // 批次取消登记（任务看板主任务行「取消」/ 子行「取消」走这里）；语义对照 runDispatchQueue：
+    // 未开始的子行 → 取消；已派发未入队 → 中止标记（跑完当前阶段不提交服务）；已拿到 job_id 交服务侧。
+    const cancel = (): number => {
+      cancelRequested = true;
+      for (let i = 0; i < total; i++) {
+        if (counted.has(i)) continue;
+        cancelPendingRow(pend[i]);
+        if (pend[i].row.status === "canceled") settle(i);
       }
-      overflow = retry;
-    }
-    if (overflow.length) {
-      // 候选耗尽 → 本机提取回退（复用主任务 batch；该函数自己清扫描 UI 并跑队列）
-      toast(`${overflow.length} 项所有候选服务都读不到，已改为本机提取后上传（自动均衡分发）`, "");
-      dispatchLocalScanPaths("auto", overflow, batch);
-      return;
-    }
+      if (settled >= total) finish();
+      schedulePendingRender();
+      return pend.filter((p) => p.row.status === "canceled" || p.row.status === "skipped").length;
+    };
+    const onRowCancel = (): void => {
+      if (done) return;
+      for (let i = started; i < total; i++) if (pend[i].row.status === "canceled") settle(i);
+      startNext();
+      if (settled === total) finish();
+    };
+    // 主任务「暂停/继续」：冻结派发队列 + 未开始子行标「已暂停」；
+    // 已开跑的链（提取/上传/提交中）不中断——跑完当前阶段（与按钮语义一致）
+    const pause = (): void => {
+      queuePaused = true;
+      pausedBatches.add(batch.id);
+      for (let i = 0; i < total; i++) {
+        const p = pend[i];
+        const rr = p.row;
+        if (p.started || rr.job_id || BATCH_TERMINAL.has(rr.status) || rr.status === "paused") continue;
+        rr._prevStatus = rr.status;
+        rr.status = "paused";
+        rr.position = "已暂停（主任务暂停）";
+        rr.phase_detail = "已暂停（主任务暂停）";
+        rr.message = "主任务已暂停：派发冻结，点「继续」恢复";
+      }
+      schedulePendingRender();
+    };
+    const resume = (): void => {
+      queuePaused = false;
+      pausedBatches.delete(batch.id);
+      for (let i = 0; i < total; i++) {
+        const rr = pend[i].row;
+        if (rr.status !== "paused") continue;
+        rr.status = rr._prevStatus || "pending";
+        rr.position = PENDING_TEXT.queued[0];
+        rr.phase_detail = PENDING_TEXT.queued[0];
+        rr.message = PENDING_TEXT.queued[1];
+        delete rr._prevStatus;
+      }
+      schedulePendingRender();
+      startNext(); // 放行：立即补位至封顶
+    };
+    batchQueues.set(batch.id, { cancel, onRowCancel, pause, resume });
+    // 派发页流程节点收掉，只留一条状态行；提交即进任务看板看进度
     clearScanUi();
-    const notes: string[] = [];
-    if (okN > 0) notes.push(`已入队 ${okN} 项（自动均衡：摊给 ${used.size} 台服务）`);
-    if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
-    notes.push(...errors);
-    toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
-    refresh();
+    resetPipeline();
+    showStatus(`已创建主任务 ${batch.label}：${total} 子任务，提交时刻实时选机派发，进度见「字幕任务」`, "");
     webShowView("jobs");
+    renderJobs(state._jobs);
+    startNext();
+    if (settled === total) finish(); // 空队列
   }
 
   function finishBatch() {
@@ -5299,41 +5488,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const batch = { id: genBatchId(), label: batchLabelForScan() };
     try {
       if (platform.kind === "desktop") {
-        if (engine === "auto") {
-          // desktop auto：serve 单 job 多文件无 auto → 客户端摊给各服务提交（10-17-javscribe-0243）
-          await submitScanAutoDesktop(files, batch);
-          return;
-        }
-        // desktop 指定引擎（F3）：逐文件提交 + 逐文件写回登记——serve /jobs/<id>/result 只回
-        // 第一个文件的 srt，多文件 job 会把写回写错文件；逐文件后按文件写回成立
-        let okN = 0;
-        let skippedN = 0;
-        const errors: string[] = [];
-        const overflow: string[] = [];
-        for (const p of files) {
-          const r = await submitScanFile(engine, p, batch, subStatus);
-          if (r.kind === "ok") {
-            okN += r.okFiles;
-            skippedN += r.skipped.length;
-          } else if (r.kind === "not-found") {
-            overflow.push(p);
-          } else {
-            errors.push(r.message);
-          }
-        }
-        if (overflow.length) {
-          toast("所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
-          dispatchLocalScanPaths(engine, overflow, batch); // 复用主任务 batch：回退不断父任务
-          return;
-        }
-        clearScanUi();
-        const notes: string[] = [];
-        if (skippedN) notes.push(`跳过 ${skippedN} 个在跑/排队的重复任务`);
-        if (okN > 0) notes.push(`已入队 ${okN} 项（本机扫描）→ 任务表中跟进，完成后字幕自动落回本机影片旁`);
-        notes.push(...errors);
-        toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
-        refresh();
-        webShowView("jobs"); // 提交即进任务看板
+        // desktop（10-18-javscribe-0246 B）：auto / 显式引擎统一实时派发队列——提交时刻实时选机
+        //（受 queue_cap 闸），400 候选耗尽回退本机提取上传；主任务 + N 子行可暂停/取消
+        runScanQueue(files, engine, batch, subStatus);
         return;
       }
       // web：原样透传（含 "auto"——工作台 v0.2.11+ 已支持 per-task auto，派发时刻 pick_engine）

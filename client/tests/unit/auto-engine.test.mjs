@@ -19,7 +19,7 @@ try {
   await build({ entryPoints: [tsSrc], bundle: true, format: "cjs", outfile: out, logLevel: "silent" });
   const mod = await import(`file://${out}`);
   const ex = mod.default ?? mod;
-  const { pickAutoEngine, freeVramGb, distributeToEngines, chunkPathsByBytes } = ex;
+  const { pickAutoEngine, freeVramGb, chunkPathsByBytes } = ex;
   const constsOut = resolve(tmp, "consts.cjs");
   await build({ entryPoints: [resolve(here, "../../core/constants.ts")], bundle: true, format: "cjs", outfile: constsOut, logLevel: "silent" });
   const cmod = await import(`file://${constsOut}`);
@@ -91,15 +91,6 @@ try {
     );
   }
   console.log("ok 5 - online/enabled 过滤、阈值边界、空候选");
-
-  // ---------- distributeToEngines（10-17-javscribe-0243 扫描 auto 分发） ----------
-  assert.deepEqual(distributeToEngines([], 3), [], "空候选 → []");
-  assert.deepEqual(distributeToEngines(["a"], 0), [], "n=0 → []");
-  assert.deepEqual(distributeToEngines(["a"], 3), ["a", "a", "a"], "单候选全落它");
-  assert.deepEqual(distributeToEngines(["a", "b"], 4), ["a", "b", "a", "b"], "双候选均摊、平手输入序在前");
-  assert.deepEqual(distributeToEngines(["a", "b"], 5), ["a", "b", "a", "b", "a"], "奇数多一个给输入序首");
-  assert.deepEqual(distributeToEngines(["a", "b", "c"], 7), ["a", "b", "c", "a", "b", "c", "a"], "三候选 3/2/2");
-  console.log("ok 6 - distributeToEngines 均摊/平手/边界");
 
   // ---------- chunkPathsByBytes（900KB 子批，兼容新旧 serve 上限） ----------
   assert.deepEqual(chunkPathsByBytes([], 100), [], "空列表 → []");
