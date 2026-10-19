@@ -127,3 +127,33 @@ test("服务卡监控：无 GPU → 队列深度曲线；开 GPU → 利用率+�
   await mockControl(req, "metrics", { gpu_present: true, gpu_util: 43, mem_used_mb: 5400, mem_total_mb: 8192 });
   await expect(box.locator(".mm-main")).toContainText("GPU 43% · 显存 5.3/8.0G", { timeout: 20_000 });
 });
+
+test("任务搜索：文件名 / 任务 id 子串过滤（大小写不敏感），清空恢复全量", async ({ page }) => {
+  await mockSeed(req, { n: 2, status: "done" });
+  await page.goto("/");
+  await waitForEngineOnline(page);
+  await goTab(page, "jobs");
+  await expect(jobRows(page)).toHaveCount(2, { timeout: 15_000 });
+
+  const search = page.locator("#job-search");
+  // 文件名子串（主名口径：/media/jav/seed-001.mp4 → seed-001.mp4）
+  await search.fill("seed-001");
+  await expect(jobRows(page)).toHaveCount(1);
+  await expect(jobRows(page).first().locator(".fn")).toContainText("seed-001.mp4");
+
+  // 任务 id 子串（job_id=20260905-seed-<batch>-NNN）
+  await search.fill("20260905");
+  await expect(jobRows(page)).toHaveCount(2);
+
+  // 大小写不敏感
+  await search.fill("SEED-002");
+  await expect(jobRows(page)).toHaveCount(1);
+
+  // 无匹配 → 空态
+  await search.fill("no-such-video");
+  await expect(jobRows(page)).toHaveCount(0);
+
+  // 清空恢复全量
+  await search.fill("");
+  await expect(jobRows(page)).toHaveCount(2);
+});

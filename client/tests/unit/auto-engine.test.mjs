@@ -31,31 +31,63 @@ try {
   assert.equal(freeVramGb({ present: true, mem_used_mb: null, mem_total_mb: 24564 }), null, "used 缺失 → null");
   assert.ok(Math.abs(freeVramGb({ present: true, mem_used_mb: 14900, mem_total_mb: 24564 }) - 9.4375) < 1e-3,
     "free = (total - used) / 1024");
-  assert.equal(MIN_FREE_VRAM_GB, 10, "阈值常量默认 10");
+  assert.equal(MIN_FREE_VRAM_GB, 5, "阈值常量默认 5（0.2.47：10 → 5，空闲 9G 的整机不再被永久踢出均衡池）");
   console.log("ok 1 - freeVramGb");
 
   const A = { name: "158", online: true };
   const B = { name: "127", online: true };
 
-  // 4a. A 显存不足但更闲、B 显存充足 → 选 B（PRD 用例 4-①）
+  // 4a. 显式阈值 10（旧口径）：A 显存不足但更闲、B 充足 → 选 B（PRD 用例 4-①）
   {
     const r = pickAutoEngine([A, B], {
       inFlight: (n) => (n === "158" ? 0 : 2),          // A 更闲
+      minFreeVramGb: 10,
       freeVramOf: (n) => (n === "158" ? 9.3 : 22.2),   // A < 10 不足、B 充足
     });
     assert.equal(r, "127", "显存不足但更闲的 A 不作候选，选 B");
   }
-  console.log("ok 2 - A 显存不足且更闲、B 显存充足 → 选 B");
+  console.log("ok 2 - 显式阈值 10：A 显存不足且更闲、B 充足 → 选 B");
 
-  // 4b. A/B 显存均不足 → 回退在途最少（不卡派发）（PRD 用例 4-②）
+  // 4a'. 缺省阈值 5（0.2.47 新口径）：A 空闲 9.3G ≥ 5 → 参选、在途最少胜出
   {
     const r = pickAutoEngine([A, B], {
       inFlight: (n) => (n === "158" ? 0 : 2),
-      freeVramOf: (n) => (n === "158" ? 9.3 : 8.1),    // 双不足
+      freeVramOf: (n) => (n === "158" ? 9.3 : 22.2),
+    });
+    assert.equal(r, "158", "缺省 5G 下 9.3G 空闲参选 → 在途最少");
+  }
+  console.log("ok 2' - 缺省阈值 5：空闲 9.3G 参选");
+
+  // 4b. A/B 显存均不足缺省阈值 → 回退在途最少（不卡派发）（PRD 用例 4-②）
+  {
+    const r = pickAutoEngine([A, B], {
+      inFlight: (n) => (n === "158" ? 0 : 2),
+      freeVramOf: (n) => (n === "158" ? 4.9 : 3.2),    // 双 < 5 不足
     });
     assert.equal(r, "158", "全部不足 → 回退在途最少");
   }
   console.log("ok 3 - A/B 均显存不足 → 回退在途最少");
+
+  // 4b'. 缺省阈值下 A 4.9G 不足被滤、B 充足 → 选 B
+  {
+    const r = pickAutoEngine([A, B], {
+      inFlight: (n) => (n === "158" ? 0 : 2),
+      freeVramOf: (n) => (n === "158" ? 4.9 : 22.2),
+    });
+    assert.equal(r, "127", "4.9G < 5 缺省阈值 → A 滤除，选 B");
+  }
+  console.log("ok 3' - 缺省阈值：4.9G 被滤、22G 胜出");
+
+  // 4b''. minFreeVramGb = 0 → 关闭显存过滤（生产 158 空闲 9G 场景的显式开关）
+  {
+    const r = pickAutoEngine([A, B], {
+      inFlight: (n) => (n === "158" ? 0 : 2),
+      minFreeVramGb: 0,
+      freeVramOf: (n) => (n === "158" ? 1.0 : 22.2),   // 1G 也不滤
+    });
+    assert.equal(r, "158", "阈值 0 = 不过滤，纯在途最少");
+  }
+  console.log("ok 3'' - 阈值 0 关闭显存过滤");
 
   // 4c. 无 metrics 数据 → 视为满足、不过滤（旧逻辑回归）（PRD 用例 4-③）
   {
@@ -75,14 +107,19 @@ try {
       "全离线/退出均衡 → null",
     );
     assert.equal(
-      pickAutoEngine([A, B], { inFlight: () => 0, freeVramOf: (n) => (n === "158" ? 10 : 22.2) }),
+      pickAutoEngine([A, B], { inFlight: () => 0, freeVramOf: (n) => (n === "158" ? 5 : 22.2) }),
       "158",
-      "free 恰好 = 阈值 10 → 满足（< 才过滤）",
+      "free 恰好 = 缺省阈值 5 → 满足（< 才过滤）",
     );
     assert.equal(
-      pickAutoEngine([A, B], { inFlight: () => 0, freeVramOf: (n) => (n === "158" ? 9.999 : 22.2) }),
+      pickAutoEngine([A, B], { inFlight: () => 0, freeVramOf: (n) => (n === "158" ? 4.999 : 22.2) }),
       "127",
-      "free 略低于阈值 → 过滤",
+      "free 略低于缺省阈值 → 过滤",
+    );
+    assert.equal(
+      pickAutoEngine([A, B], { inFlight: () => 0, minFreeVramGb: 10, freeVramOf: (n) => (n === "158" ? 10 : 22.2) }),
+      "158",
+      "free 恰好 = 显式阈值 10 → 满足（< 才过滤）",
     );
     assert.equal(
       pickAutoEngine([A, B], { inFlight: (n) => (n === "158" ? 3 : 1), minFreeVramGb: 100, freeVramOf: () => 22.2 }),

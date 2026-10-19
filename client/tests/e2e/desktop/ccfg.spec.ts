@@ -40,7 +40,8 @@ test("设置 tab（客户端 pane）：改并发保存 → client-config.json �
   // 独立文件持久化（userData/client-config.json；不混写 settings.json/watch.json）
   const cfgFile = join(userData, "client-config.json");
   expect(existsSync(cfgFile)).toBe(true);
-  expect(JSON.parse(readFileSync(cfgFile, "utf-8"))).toEqual({ extract_workers: 5, queue_cap: 7 });
+  // 0.2.47：新增 vram_free_min_gb（空闲显存阈值，缺省 5）随表单整体落盘
+  expect(JSON.parse(readFileSync(cfgFile, "utf-8"))).toEqual({ extract_workers: 5, queue_cap: 7, vram_free_min_gb: 5 });
   // 同 userData 重启 → 读回保存值
   await app.close();
   const r = await relaunch(userData);

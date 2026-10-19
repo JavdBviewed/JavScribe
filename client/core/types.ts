@@ -48,6 +48,8 @@ export interface ClientConfig {
   extract_workers: number;
   /** 转译并发（服务队列上限）：同时在途任务数，超出本机排队（1..16） */
   queue_cap: number;
+  /** auto 均衡空闲显存阈值（GB）：最近采样空闲显存 < 此值的服务不收 auto 派发（0 = 不过滤）；0..16，缺省 5 */
+  vram_free_min_gb?: number;
   /** 管线全局暂停（工作台持久化，重启不丢；与 /api/pause 联动） */
   pipeline_paused?: boolean;
   // ---- 扫描规则（客户端侧；规则跟客户端走、不跟引擎走，10-08 自「服务设置」归位） ----
@@ -261,6 +263,11 @@ export interface ScanItem {
   name_sub_token?: string | null;
   /** name_no_sub 命中的具体标记（UI tooltip 展示；未命中为 null） */
   name_no_sub_token?: string | null;
+  /** 扫描×已完成任务对账命中（0.2.47）：匹配到的任务 job_id。非空=「已生成未落盘」
+   *  （已有 done 结果、可直接回写落盘，无需重新生成）；仅 desktop 形态给出回写入口 */
+  reconciled_job_id?: string | null;
+  /** 对账命中行的任务归属服务名（tag tooltip 展示，供用户核对防同名误配） */
+  reconciled_engine?: string | null;
 }
 
 /** 扫描目录响应（web 形态 GET /api/scan/local?engine=&path=；desktop 为本地 serve /scan） */

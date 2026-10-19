@@ -189,6 +189,92 @@ test("扫描 auto 提交 3 项：两服务全 400 → 本机提取回退（复�
   }
 });
 
+/**
+ * 显存感知回归（0.2.47，生产 158 场景：RTX4090 被外部进程占 15G、空闲 9G < 旧阈值 10G
+ * → 整批被钉死 127，用户报「自动均衡没有效果」）。
+ *   3. 缺省阈值 5：4G 空闲服务被滤出 auto 候选 → 3 项全给 22G 空闲服务
+ *   4. 阈值 0（设置 vram_free_min_gb=0）：4G 空闲服务重新参选 → 2/1 摊平
+ */
+async function setGpu(url: string, usedMb: number, totalMb: number): Promise<void> {
+  const r = await fetch(`${url}/_mock/metrics`, {
+    method: "POST",
+    body: JSON.stringify({ gpu_present: true, gpu_util: 12, mem_used_mb: usedMb, mem_total_mb: totalMb }),
+  });
+  if (!r.ok) throw new Error(`mock metrics ${url} -> ${r.status}`);
+}
+
+interface MetricsShimState {
+  _metrics?: Record<string, { metrics?: { gpu?: { mem_used_mb?: number } | null } }>;
+}
+
+/** 等客户端 5s 轮询已采到两服务的目标显存值（选机过滤依赖最近采样） */
+async function waitMetricsSampled(page: import("@playwright/test").Page, mockUsed: number, secondUsed: number): Promise<void> {
+  await page.waitForFunction(
+    (args: [number, number]) => {
+      const [mm, ss] = args;
+      const s = (window as unknown as { state?: MetricsShimState }).state;
+      const gm = s?._metrics?.mock?.metrics?.gpu;
+      const gs = s?._metrics?.second?.metrics?.gpu;
+      return !!gm && !!gs && gm.mem_used_mb === mm && gs.mem_used_mb === ss;
+    },
+    [mockUsed, secondUsed] as [number, number],
+    { timeout: 30_000 },
+  );
+}
+
+test("显存过滤：4G 空闲（低于缺省 5G 阈值）服务被滤出，整批 3 项全给 22G 服务", async () => {
+  const dir = freshUserData();
+  writeFileSync(join(dir, "client-config.json"), JSON.stringify({ scan_min_size_mb: 0 }), "utf-8");
+  await resetMocks();
+  await setGpu(MOCK_URL, 20480, 24576);  // 空闲 4G < 5
+  await setGpu(SECOND_URL, 2048, 24576); // 空闲 22G
+  const scanDir = makeScanDir("javscribe-scanbal-vram");
+  const { app, page } = await launch(dir);
+  try {
+    page.on("dialog", (d) => d.accept());
+    await waitMetricsSampled(page, 20480, 2048);
+    await submitScanAuto(page, scanDir);
+    await expect
+      .poll(async () => (await jobsOf(MOCK_URL)).concat(await jobsOf(SECOND_URL))
+        .reduce((n, j) => n + (j.files?.length || 0), 0), { timeout: 30_000, intervals: [200] })
+      .toBe(3);
+    const mj = await jobsOf(MOCK_URL);
+    const sj = await jobsOf(SECOND_URL);
+    expect(fileNames(mj).length).toBe(0); // 4G 空闲服务被显存过滤，0 接收
+    expect(fileNames(sj).length).toBe(3); // 22G 空闲服务全收 3 项
+  } finally {
+    await app.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("显存过滤可关：vram_free_min_gb=0 → 4G 空闲服务重新参选（2/1 摊平）", async () => {
+  const dir = freshUserData();
+  writeFileSync(join(dir, "client-config.json"), JSON.stringify({ scan_min_size_mb: 0, vram_free_min_gb: 0 }), "utf-8");
+  await resetMocks();
+  await setGpu(MOCK_URL, 20480, 24576);
+  await setGpu(SECOND_URL, 2048, 24576);
+  const scanDir = makeScanDir("javscribe-scanbal-vram0");
+  const { app, page } = await launch(dir);
+  try {
+    page.on("dialog", (d) => d.accept());
+    await waitMetricsSampled(page, 20480, 2048);
+    await submitScanAuto(page, scanDir);
+    await expect
+      .poll(async () => (await jobsOf(MOCK_URL)).concat(await jobsOf(SECOND_URL))
+        .reduce((n, j) => n + (j.files?.length || 0), 0), { timeout: 30_000, intervals: [200] })
+      .toBe(3);
+    const mj = await jobsOf(MOCK_URL);
+    const sj = await jobsOf(SECOND_URL);
+    // 在途最少 + 平手注册序（mock 在前）：1→mock、2→second、3→mock
+    expect(fileNames(mj).length).toBe(2); // 阈值 0 不过滤 → mock 重新参选
+    expect(fileNames(sj).length).toBe(1);
+  } finally {
+    await app.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** 假 ffmpeg：argv 末位 = 输出路径、第 3 位 = -i 的输入路径（dispatch-rows.spec.ts 同款） */
 function makeFakeFfmpeg(): { dir: string; bin: string } {
   const dir = mkdtempSync(join(tmpdir(), "javscribe-e2e-fakeff-"));

@@ -189,12 +189,17 @@ try {
   // ---------- normalizeClientConfig（保存/读回的值域钳制） ----------
   {
     const cc = normalizeClientConfig({ extract_workers: 2, queue_cap: 4 });
-    assert.deepEqual(cc, { extract_workers: 2, queue_cap: 4 }, "合法值原样");
+    assert.deepEqual(cc, { extract_workers: 2, queue_cap: 4, vram_free_min_gb: 5 }, "合法值原样（vram 补缺省 5）");
     assert.deepEqual(normalizeClientConfig({ extract_workers: 99, queue_cap: -3 }),
-      { extract_workers: 8, queue_cap: 1 }, "越界 clamp（8/1）");
+      { extract_workers: 8, queue_cap: 1, vram_free_min_gb: 5 }, "越界 clamp（8/1）");
     assert.deepEqual(normalizeClientConfig({ extract_workers: "x", queue_cap: null }),
-      { extract_workers: 2, queue_cap: 4 }, "脏值回落默认（2/4）");
-    assert.deepEqual(normalizeClientConfig(null), { extract_workers: 2, queue_cap: 4 }, "null → 默认");
+      { extract_workers: 2, queue_cap: 4, vram_free_min_gb: 5 }, "脏值回落默认（2/4）");
+    assert.deepEqual(normalizeClientConfig(null), { extract_workers: 2, queue_cap: 4, vram_free_min_gb: 5 }, "null → 默认");
+    assert.equal(normalizeClientConfig({ vram_free_min_gb: 12 }).vram_free_min_gb, 12, "vram 合法值原样");
+    assert.equal(normalizeClientConfig({ vram_free_min_gb: 0 }).vram_free_min_gb, 0, "vram 0 合法（= 不过滤）");
+    assert.equal(normalizeClientConfig({ vram_free_min_gb: 99 }).vram_free_min_gb, 5, "vram 越界回落默认（不 clamp，防脏值变 0=不过滤）");
+    assert.equal(normalizeClientConfig({ vram_free_min_gb: -1 }).vram_free_min_gb, 5, "vram 负数回落默认 5");
+    assert.equal(normalizeClientConfig({ vram_free_min_gb: "x" }).vram_free_min_gb, 5, "vram 脏值回落默认 5");
     const withPause = normalizeClientConfig({ extract_workers: 1, queue_cap: 16, pipeline_paused: true });
     assert.equal(withPause.pipeline_paused, true, "pipeline_paused 保留");
     assert.equal(normalizeClientConfig({ extract_workers: 1, queue_cap: 16 }).pipeline_paused, undefined, "未提供则不补 pipeline_paused");

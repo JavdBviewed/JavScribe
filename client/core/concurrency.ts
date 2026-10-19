@@ -28,9 +28,10 @@ export interface EngineLite {
 }
 
 /** 客户端并发设置默认值（与 web 服务端 CLIENT_CONFIG_DEFAULTS / desktop CLIENT_CFG_DEFAULTS 对齐）。 */
-export const CLIENT_CFG_DEFAULTS: { extract_workers: number; queue_cap: number } = {
+export const CLIENT_CFG_DEFAULTS: { extract_workers: number; queue_cap: number; vram_free_min_gb: number } = {
   extract_workers: 2,
   queue_cap: 4,
+  vram_free_min_gb: 5,
 };
 
 /** 值域钳制 + 脏值回落默认（保存失败不落内存：调用方决定何时应用本函数的结果）。 */
@@ -41,6 +42,11 @@ export function normalizeClientConfig(raw: unknown): ClientConfig {
   const out: ClientConfig = {
     extract_workers: cc(o.extract_workers, 1, 8, CLIENT_CFG_DEFAULTS.extract_workers),
     queue_cap: cc(o.queue_cap, 1, 16, CLIENT_CFG_DEFAULTS.queue_cap),
+    // vram：值域外/脏值整体回落默认（不 clamp 到 0，避免脏负值变「不过滤」）
+    vram_free_min_gb: typeof o.vram_free_min_gb === "number" && Number.isInteger(o.vram_free_min_gb)
+      && o.vram_free_min_gb >= 0 && o.vram_free_min_gb <= 16
+      ? o.vram_free_min_gb
+      : CLIENT_CFG_DEFAULTS.vram_free_min_gb,
   };
   if (typeof o.pipeline_paused === "boolean") out.pipeline_paused = o.pipeline_paused;
   // 扫描规则（扁平 scan_* 键）：type-guard 透传，脏值丢弃（保存前的值域校验在服务端/IPC 侧）
@@ -189,6 +195,7 @@ export function freeVramGb(gpu: EngineMetricsGpu | null | undefined): number | n
  * auto 派发时刻解析（显存感知）：
  *  - 候选 = 在线且参与均衡（enabled !== false）；
  *  - 显存过滤：最近采样空闲显存 < minFreeVramGb → 不作候选；无数据（null）视为满足、不过滤；
+ *    minFreeVramGb = 0 → 关闭显存过滤（纯在途最少）；
  *  - 剩余候选按在途最少取胜，平手按注册序取首个（稳定即可）；
  *  - 显存过滤后候选全空但原候选非空 → 回退「在途最少」（原逻辑），保证不卡派发。
  */
@@ -196,13 +203,13 @@ export function pickAutoEngine(
   engines: readonly EngineLite[],
   opts: {
     inFlight: (name: string) => number;
-    /** 显存阈值（GB）；缺省 MIN_FREE_VRAM_GB */
+    /** 显存阈值（GB）；0 = 不过滤；负数/缺省回退 MIN_FREE_VRAM_GB */
     minFreeVramGb?: number;
     /** 某服务最近 metrics 采样空闲显存（GB）；null/缺省 = 无数据不过滤 */
     freeVramOf?: (name: string) => number | null;
   },
 ): string | null {
-  const minGb = typeof opts.minFreeVramGb === "number" && Number.isFinite(opts.minFreeVramGb) && opts.minFreeVramGb > 0
+  const minGb = typeof opts.minFreeVramGb === "number" && Number.isFinite(opts.minFreeVramGb) && opts.minFreeVramGb >= 0
     ? opts.minFreeVramGb
     : MIN_FREE_VRAM_GB;
   const freeVram = opts.freeVramOf || ((_n: string): number | null => null);
@@ -216,10 +223,12 @@ export function pickAutoEngine(
     }
     return best;
   };
-  const vramOk = cands.filter((e) => {
-    const f = freeVram(e.name);
-    return f == null || f >= minGb;
-  });
+  const vramOk = minGb > 0
+    ? cands.filter((e) => {
+      const f = freeVram(e.name);
+      return f == null || f >= minGb;
+    })
+    : cands;
   return pickMin(vramOk) ?? pickMin(cands);
 }
 

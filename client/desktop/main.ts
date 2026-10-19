@@ -1436,6 +1436,11 @@ function registerIpc(): void {
             if (!r.ok) return { ok: false, error: r.error };
             next.queue_cap = r.v;
           }
+          if (c.vram_free_min_gb !== undefined) {
+            const r = checkInt(c.vram_free_min_gb, "vram_free_min_gb", CLIENT_CFG_LIMITS.vram_free_min_gb);
+            if (!r.ok) return { ok: false, error: r.error };
+            next.vram_free_min_gb = r.v;
+          }
           if (c.scan_video_exts !== undefined) {
             const v = normList(c.scan_video_exts);
             if (v === null || v.length === 0 || !v.every((x) => /^[a-z0-9]{1,8}$/.test(x))) {
@@ -2499,6 +2504,8 @@ function registerUpdateIpc(): void {
 interface ClientCfgFile {
   extract_workers: number;
   queue_cap: number;
+  /** auto 均衡空闲显存阈值（GB）；0 = 不过滤；缺省 5（与 core CLIENT_CFG_DEFAULTS 对齐） */
+  vram_free_min_gb?: number;
   /** 管线全局暂停（pauseAll 持久化，重启不丢；与本机闸 pipelinePaused 联动） */
   pipeline_paused?: boolean;
   // ---- 扫描规则（扁平 scan_* 键，与 web client_config.json 同形；10-08 归位） ----
@@ -2510,10 +2517,12 @@ interface ClientCfgFile {
   scan_no_sub_tokens?: string[];
 }
 const CLIENT_CFG_FILE = "client-config.json";
-const CLIENT_CFG_DEFAULTS: ClientCfgFile = { extract_workers: 2, queue_cap: 4 };
-const CLIENT_CFG_LIMITS: Record<"extract_workers" | "queue_cap", [number, number]> = {
+const VRAM_FREE_MIN_GB_DEFAULT = 5;
+const CLIENT_CFG_DEFAULTS: ClientCfgFile = { extract_workers: 2, queue_cap: 4, vram_free_min_gb: VRAM_FREE_MIN_GB_DEFAULT };
+const CLIENT_CFG_LIMITS: Record<"extract_workers" | "queue_cap" | "vram_free_min_gb", [number, number]> = {
   extract_workers: [1, 8],
   queue_cap: [1, 16],
+  vram_free_min_gb: [0, 16],
 };
 let clientCfgPath = "";
 
@@ -2527,6 +2536,7 @@ function clientCfgLoad(): ClientCfgFile {
     const out: ClientCfgFile = {
       extract_workers: clientCfgClamp(raw.extract_workers, CLIENT_CFG_LIMITS.extract_workers[0], CLIENT_CFG_LIMITS.extract_workers[1], CLIENT_CFG_DEFAULTS.extract_workers),
       queue_cap: clientCfgClamp(raw.queue_cap, CLIENT_CFG_LIMITS.queue_cap[0], CLIENT_CFG_LIMITS.queue_cap[1], CLIENT_CFG_DEFAULTS.queue_cap),
+      vram_free_min_gb: clientCfgClamp(raw.vram_free_min_gb, CLIENT_CFG_LIMITS.vram_free_min_gb[0], CLIENT_CFG_LIMITS.vram_free_min_gb[1], VRAM_FREE_MIN_GB_DEFAULT),
     };
     // 扫描规则 type-guard 透传（脏值丢弃）；值域校验在 putClientConfig 侧
     const strList = (v: unknown): v is string[] =>

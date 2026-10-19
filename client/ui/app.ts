@@ -11,6 +11,8 @@ import type { JavExtractAPI } from "./extract";
 import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
+import { buildDoneJobIndex, matchScanItem, type ReconcilableRow } from "../core/scan-reconcile";
+import { jobLabelMain, jobPrimaryName, matchJobSearch } from "../core/job-search";
 import { TransportError } from "../core/transport";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
@@ -45,7 +47,9 @@ interface AppState {
   scanResolvedPath: string;
   scanChecked: Set<string>;
   scanPage: number;          // 扫描列表当前页（0 起；勾选态全局维护，与翻页互不影响）
-  scanFilter: "all" | "no-sub" | "has-sub" | "small"; // 分类 tab 过滤（all 恒可用；勾选态跨 tab 全局）
+  scanFilter: "all" | "no-sub" | "has-sub" | "small" | "unwritten"; // 分类 tab 过滤（all 恒可用；勾选态跨 tab 全局）
+  scanDoneIndex: Map<string, ReconcilableRow>; // 扫描×已完成任务对账索引（每次 refresh 重建；「已生成未落盘」标记用）
+  jobSearch: string; // 任务页搜索词（内存态，不持久化；留空=全量）
   scanPageSize: number;      // 扫描列表每页行数（10/20/50/100/500 档，localStorage 持久化，默认 10）
   lastScan: ScanResult | null; // 最近一次扫描结果（翻页重渲染用，免重发请求）
   scanTask: ScanTaskSnapshot | null; // 后台扫描任务（web 形态刷新后可恢复）
@@ -98,6 +102,8 @@ const state: AppState = {
   scanChecked: new Set(),
   scanPage: 0,
   scanFilter: "all",
+  scanDoneIndex: new Map(),
+  jobSearch: "",
   scanPageSize: readPageSize("javweb_scan_pagesize"),
   lastScan: null,
   scanTask: null,
@@ -761,13 +767,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         const ccNow = normalizeClientConfig(ccRaw);
         if (!state.ccfg
           || ccNow.extract_workers !== state.ccfg.extract_workers
-          || ccNow.queue_cap !== state.ccfg.queue_cap) {
+          || ccNow.queue_cap !== state.ccfg.queue_cap
+          || ccNow.vram_free_min_gb !== state.ccfg.vram_free_min_gb) {
           state.ccfg = ccNow;
           jav()?.wakeExtract?.(); // 提取并发变更 → 释放池等待者（调小无害：不中断在跑者）
           pumpDispatch();         // 在途封顶变更 → 立即重判排队项
         }
       }
       state._batches = batches || [];
+      // 0.2.47：done 任务出现/消失 → 刷新扫描结果「已生成未落盘」标记（仅扫描视图可见时重渲染）
+      if (state.scanItems.length) {
+        rebuildScanDoneIndex();
+        const nRe = reconcileScanItems();
+        if (nRe && $("sec-dispatch").classList.contains("view-on")) renderScanResults(state.lastScan!);
+      }
       renderJobs(jobs);
       if (typeof t.engineMetrics === "function") { // web + desktop 均支持（desktop 走 main IPC 直连 serve /metrics/json）
         for (const e of engines) {
@@ -1330,10 +1343,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 主名：远端/上传任务 file 是 opus 内容寻址 hash（<sha1>.opus），
     // label 才是上传时的原始视频名——此时用视频名当主名（hash 泄漏进任务表即 F2 投诉）；
     // 本地任务 label 与 file 同值、或「文件夹扫描 · N 项」批量占位 → 主名仍用 file。
-    const labBase = (j.label || "").replace(/.*[\\/]/, "");
-    const labelMain = !!j.label && !j.label.startsWith("文件夹扫描")
-      && labBase !== j.file && VIDEO_EXT_RE.test(labBase);
-    const primary = labelMain ? labBase : (j.file || "");
+    const labelMain = jobLabelMain(j);
+    const primary = jobPrimaryName(j);
     // 跳过行优先显示 message（含已存在字幕的完整路径）；ghost 行恒显 message（状态说明）
     const sub = isGhost ? (j.message || "")
       : j.status === "skipped" && j.message ? j.message
@@ -1405,10 +1416,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
       : "";
-    // 换服务重跑（仅 desktop）：终态行复用本地音轨缓存向其他服务提交新任务
+    // 换服务重跑（仅 desktop）：复用本地音轨缓存向其他服务提交新任务。
+    // 0.2.47：从终态放宽到 排队/运行/暂停（cancel-first：先取消原任务再重交，防双活）；
+    // data-file 传显示主名（remote 行 file 是 opus hash，传 hash 缓存必 miss → 既有 bug 修复）
+    const rerunNonTerminal = j.job_id && (st === "pending" || st === "running" || st === "paused");
     const rerunBtn = (platform.kind === "desktop" && j.file && !isPendingRow && !isGhost
-      && (j.status === "done" || j.status === "error" || j.status === "skipped"))
-      ? `<button type="button" class="dl-btn rerun" data-file="${esc(j.file)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" title="复用该影片的本地音轨缓存，选择另一个服务端重新提交">&#8644; 换服务重跑</button>`
+      && j.local !== false
+      && ((j.status === "done" || j.status === "error" || j.status === "skipped") || rerunNonTerminal))
+      ? `<button type="button" class="dl-btn rerun" data-file="${esc(primary)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" data-status="${esc(st)}" title="${rerunNonTerminal ? "先取消原服务上的任务（排队中立即终止；运行中检查点中止，已生成字幕保留），再复用本地音轨缓存提交到另一个服务端" : "复用该影片的本地音轨缓存，选择另一个服务端重新提交"}">&#8644; 换服务重跑</button>`
       : "";
     // 行优先 pending 子行（未开始、未提交服务）：单行取消 = 不进队列、不占在途（链已开跑不给按钮）
     const pendCancel = pendQueued
@@ -1927,8 +1942,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     for (const k of Array.from(state.selected)) if (!allKeys.has(k)) state.selected.delete(k);
 
     const filtered = visibleRows(rows2);
+    // 0.2.47 搜索：主名 / file / job_id / task_id 小写子串，与 筛选/来源 AND；
+    // batch 组 = 组标（主任务名）或任一子行命中 → 整组显示
+    let shown = filtered;
+    const searchTerm = state.jobSearch.trim().toLowerCase();
+    if (searchTerm) {
+      const groupHit = new Map<string, boolean>();
+      for (const j of filtered) {
+        if (!j.batch_id || groupHit.get(j.batch_id)) continue;
+        if ((j.batch_label || "").toLowerCase().includes(searchTerm) || matchJobSearch(j, searchTerm)) {
+          groupHit.set(j.batch_id, true);
+        }
+      }
+      shown = filtered.filter((j) => (j.batch_id ? groupHit.get(j.batch_id) === true : matchJobSearch(j, searchTerm)));
+    }
     // 全选/批量操作只覆盖可操作的行：未入队的 pending 子行走行内「取消」（无 serve 任务可寻址）
-    state._filteredKeys = filtered
+    state._filteredKeys = shown
       .filter((j) => !(j.dispatch_pending && !j.job_id)
         && !(typeof j.pkey === "string" && j.pkey.startsWith("ghost|"))) // F4/F5 ghost 行 renderer 本地，批量操作不可寻址
       .map(jobKey);
@@ -1942,7 +1971,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     type Entry = { kind: "row"; row: JobRow } | { kind: "batch"; g: BatchGroup };
     const batchGroups = new Map<string, BatchGroup>();
     const entries: Entry[] = [];
-    for (const j of filtered) {
+    for (const j of shown) {
       const bid = j.batch_id;
       if (!bid) { entries.push({ kind: "row", row: j }); continue; }
       let g = batchGroups.get(bid);
@@ -1955,8 +1984,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       g.children.push(j);
     }
     // 对账兜底：本地记录在、但子行已全部过期（serve 200 窗挤出 / 重启后刷新）→
-    // 渲染一条完成态主任务行（无子行）；筛选非全量时不展示，避免误导
-    if (state.filter === "all" && state.source === "all") {
+    // 渲染一条完成态主任务行（无子行）；筛选非全量 / 搜索中不展示，避免误导
+    if (state.filter === "all" && state.source === "all" && !searchTerm) {
       const liveBids = new Set(rows2.map((r) => r.batch_id).filter(Boolean) as string[]);
       for (const rec of state._batches) {
         if (!rec || !rec.batch_id || liveBids.has(rec.batch_id)) continue;
@@ -1974,8 +2003,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const pageEntries = entries.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
 
     const list = jobList;
-    $("jobs-empty").hidden = filtered.length > 0;
-    $("jobs-empty-text").textContent = rows2.length ? "当前筛选下无任务" : "暂无任务";
+    $("jobs-empty").hidden = shown.length > 0;
+    $("jobs-empty-text").textContent = rows2.length
+      ? (searchTerm ? "无匹配搜索词的任务" : "当前筛选下无任务")
+      : "暂无任务";
     const now = Date.now() / 1000;
     const rowMap = new Map<string, JobRowEl>();
     for (const r of Array.from(list.children)) rowMap.set((r as HTMLElement).dataset.jkey ?? "", r as JobRowEl);
@@ -2457,7 +2488,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rb = (ev.target as HTMLElement).closest(".rerun") as HTMLButtonElement | null;
     if (rb && !rb.disabled) {
       if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
-      void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "");
+      void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "", rb.dataset.status || "");
       return;
     }
     const cb = (ev.target as HTMLElement).closest(".cancel") as HTMLButtonElement | null;
@@ -2580,6 +2611,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     renderBulkBar();
     renderSelAll();
   };
+
+  // 0.2.47 需求2：任务搜索框（debounce 150ms；留空=全量；内存态，刷新即清）
+  const jobSearchEl = $("job-search") as HTMLInputElement | null;
+  if (jobSearchEl) {
+    let searchTimer: number | undefined;
+    jobSearchEl.addEventListener("input", () => {
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(() => {
+        state.jobSearch = jobSearchEl.value;
+        state.page = 0;
+        renderJobs(state._jobs);
+      }, 150);
+    });
+  }
 
   // 表头「全选当前筛选结果」（跨页；部分选中 → indeterminate）
   const selAll = $("job-sel-all") as HTMLInputElement | null;
@@ -3213,6 +3258,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       t.readSrt(b.dataset.srt)
         .then((d) => openSrtPreview(d.name, d.text, d.size_mb))
         .catch((e: Error) => toast(e.message || "字幕预览失败", "err"));
+      return;
+    }
+    // 0.2.47 需求1：「已生成未落盘」行 → 回写已完成任务结果到影片同目录（desktop-only 按钮）
+    const wb = (ev.target as HTMLElement).closest<HTMLElement>(".scan-wb");
+    if (wb && wb.dataset.path) {
+      const path = wb.dataset.path;
+      const item = state.scanItems.find((i) => i.path === path);
+      if (item) {
+        (wb as HTMLButtonElement).disabled = true; // 防连点
+        void scanWriteBackItem(item).then(() => { if (state.lastScan) renderScanResults(state.lastScan); });
+      }
+      return;
     }
   });
 
@@ -3585,13 +3642,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return state.ccfg?.queue_cap ?? CLIENT_CFG_DEFAULTS.queue_cap;
   }
 
-  /** auto 派发时刻解析（显存感知，10-13-javscribe-client-writeback-guard F3④）：
-   *  在线且参与均衡的服务里，先按最近 metrics 采样的空闲显存过滤（< MIN_FREE_VRAM_GB 不作候选；
+  /** auto 均衡空闲显存阈值（GB）：客户端设置值（0 = 不过滤），脏值/缺省回落内置缺省（core MIN_FREE_VRAM_GB 口径） */
+  function vramFreeMinGbNow(): number {
+    const v = state.ccfg?.vram_free_min_gb;
+    return typeof v === "number" && Number.isFinite(v) && v >= 0
+      ? v
+      : CLIENT_CFG_DEFAULTS.vram_free_min_gb;
+  }
+
+  /** auto 派发时刻解析（显存感知，10-13-javscribe-client-writeback-guard F3④；0.2.47 阈值客户端可调）：
+   *  在线且参与均衡的服务里，先按最近 metrics 采样的空闲显存过滤（< 阈值不作候选；0 = 不过滤；
    *  无数据视为满足不过滤），再选在途最少者（平手注册序）；显存过滤后候选全空 → 回退在途最少
    *  保证不卡派发。无候选返 null。决策纯函数在 core/concurrency.pickAutoEngine（单测）。 */
   function resolveAutoEngine(): string | null {
     return pickAutoEngine(state.engines, {
       inFlight: inFlightOf,
+      minFreeVramGb: vramFreeMinGbNow(),
       freeVramOf: (name) => {
         const m = state._metrics[name];
         if (!m || !m.ok || !m.metrics) return null;
@@ -3888,6 +3954,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 清扫描 UI（三处统一入口：400 回退 / auto 提交 / scanSubmit 成功路径）
   function clearScanUi(): void {
     state.scanItems = [];
+    state.scanDoneIndex = new Map();
     state.scanChecked = new Set();
     state.lastScan = null;
     state.scanPage = 0;
@@ -4124,6 +4191,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               }
               realName = pickAutoEngine(cands, {
                 inFlight: inFlightOf,
+                minFreeVramGb: vramFreeMinGbNow(),
                 freeVramOf: (name) => {
                   const m = state._metrics[name];
                   if (!m || !m.ok || !m.metrics) return null;
@@ -4480,7 +4548,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   // ---------- 任务表「换服务重跑」：复用本地音轨缓存向另一个服务端提交新任务（仅 desktop） ----------
-  async function openRerunModal(videoName: string, curEngine: string, _curJobId: string) {
+  async function openRerunModal(videoName: string, curEngine: string, curJobId: string, curStatus = "") {
     showModal(`换服务重跑 · ${videoName}`);
     const body = $("modal-body");
     body.innerHTML = '<div class="muted">检测本地音轨缓存中…</div>';
@@ -4492,6 +4560,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="muted small">重跑复用的是本机提取的音轨缓存（7 天保留）。该任务若是整片直传提交、或缓存已过期，就没有可复用的音轨。</div>`;
       return;
     }
+    // 0.2.47：非终态行（排队/运行/暂停）→ cancel-first：先取消原任务再重交，防双活
+    const nonTerminal = !!curJobId && (curStatus === "pending" || curStatus === "running" || curStatus === "paused");
     const cands = (state.engines || []).filter((e) => e.name !== curEngine && e.online);
     const statusHtml = hit.opusValid
       ? `<div class="set-note">音轨缓存命中：<b>${mb(hit.audioBytes)} MB</b>·来源 ${esc(hit.videoPath)}</div>`
@@ -4504,6 +4574,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <label class="chk-row"><input type="radio" name="rerun-engine" value="${esc(e.name)}"${i === 0 ? " checked" : ""}>
       <span>${esc(e.name)} <span class="muted small mono">${esc(e.url)}</span></span></label>`).join("");
     body.innerHTML = `
+      ${nonTerminal
+        ? `<div class="set-note err">该任务当前「${curStatus === "running" ? "运行中" : curStatus === "paused" ? "已暂停" : "排队中"}」：将先在「${esc(curEngine)}」上取消该任务（排队中立即终止；运行中在检查点中止，已生成字幕保留），再向所选服务重新提交。</div>`
+        : ""}
       ${statusHtml}
       <div class="set-group">目标服务</div>
       ${opts}
@@ -4523,6 +4596,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       };
       try {
         const h = hit!;
+        // 0.2.47 cancel-first：非终态行先取消原任务。
+        // 404/409 = 原任务已不存在/已结束 → 视同取消成功，直接重交；其余失败一律中止（防双活）
+        if (nonTerminal) {
+          prog.textContent = "取消原服务任务中…";
+          try {
+            const cd = await t.cancelJob(curEngine, curJobId);
+            if (!["canceled", "canceling"].includes(cd.status)) {
+              throw new Error(`取消状态异常（${cd.status}）`);
+            }
+          } catch (e) {
+            const emsg = (e as Error).message || "";
+            if (!/任务不存在|任务已结束|job not found|no need/i.test(emsg)) {
+              throw new Error(`取消原任务失败（${emsg}），已中止重交；请确认原任务结束后再试`);
+            }
+          }
+        }
         // 第一段：取 opus（缓存命中直接复用；错开从源视频重提）
         let opusPath: string; let audioBytes: number;
         if (h.opusValid) {
@@ -4572,8 +4661,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         registerWriteBack(eng + "|" + jobId, {
           engine: eng, videoName, dirHandle: null, videoPath: h.videoPath,
         });
+        // 0.2.47：非终态行的旧任务写回登记迁移到新键（镜像 retry handler：强制写回集/登记不丢）
+        if (nonTerminal && curJobId) {
+          const oldKey = curEngine + "|" + curJobId;
+          if (state.writeBackJobs.has(oldKey)) {
+            rekeyWriteBack(oldKey, eng + "|" + jobId);
+            const mi = state.writeBackJobs.get(eng + "|" + jobId);
+            if (mi) mi.engine = eng; // rekey 迁入的是旧服务 info，登记归属改为新服务
+            saveWriteBackStore();
+          }
+        }
         hideModal();
-        toast(`换服务重跑：「${videoName}」→ 「${eng}」任务 ${jobId}`, "ok");
+        toast(nonTerminal
+          ? `换服务重跑：已取消「${curEngine}」原任务，「${videoName}」→ 「${eng}」任务 ${jobId}（旧任务检查点收尾，已生成字幕保留）`
+          : `换服务重跑：「${videoName}」→ 「${eng}」任务 ${jobId}`, "ok");
         refresh();
       } catch (e) {
         prog.textContent = "";
@@ -5177,11 +5278,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
   function scanViewItems(): ScanItem[] {
     if (state.scanFilter === "all") return state.scanItems;
+    if (state.scanFilter === "unwritten") return state.scanItems.filter((i) => !!i.reconciled_job_id);
     return state.scanItems.filter((i) => scanCatOf(i) === state.scanFilter);
   }
-  /** 当前视图内可被「全选」覆盖的项（过小只能手动勾选，任何视图下都不进全选域） */
+  /** 当前视图内可被「全选」覆盖的项（过小 / 已生成未落盘 只能手动勾选，任何视图下都不进全选域） */
   function scanViewSelectable(): ScanItem[] {
-    return scanViewItems().filter((i) => !i.too_small);
+    return scanViewItems().filter((i) => !i.too_small && !i.reconciled_job_id);
   }
 
   function applyScanResult(d: ScanResult) {
@@ -5191,9 +5293,103 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     state.scanFilter = "all"; // 每次新扫描重置分类 tab
     state.scanMapped = d.mapped === true;
     state.scanResolvedPath = d.path || "";
-    state.scanChecked = new Set(state.scanItems.filter((i) => !i.has_subtitle && !i.too_small).map((i) => i.path));
+    rebuildScanDoneIndex();
+    reconcileScanItems();
+    // 默认勾选域：无字幕且非过小、且未对账命中（命中项走「回写」而非重跑，默认不勾）
+    state.scanChecked = new Set(state.scanItems
+      .filter((i) => !i.has_subtitle && !i.too_small && !i.reconciled_job_id).map((i) => i.path));
     renderScanResults(d);
     updateScanGo();
+  }
+
+  // ---------- 扫描×已完成任务对账（0.2.47 需求1）：「已生成未落盘」标记 + 一键回写 ----------
+  // 直播/远端任务 done 后字幕未落盘 → 再扫描该影片会被当「无字幕」重复生成。
+  // 对账命中（带扩展名 basename 小写）→ 行标 tag、进独立分类 tab、不进全选域；
+  // 回写 = 取该 done 任务的结果 srt 落到扫描项同目录（不重跑生成；已有 srt 不覆盖）。
+  function rebuildScanDoneIndex(): void {
+    const rows: ReconcilableRow[] = [
+      ...state._jobs,
+      ...Array.from(state._pending.values()).map((p) => p.row),
+    ];
+    state.scanDoneIndex = buildDoneJobIndex(rows);
+  }
+
+  function reconcileScanItems(): number {
+    let n = 0;
+    for (const i of state.scanItems) {
+      const m = matchScanItem(i, state.scanDoneIndex);
+      const jid = m ? (m.row.job_id || "") : null;
+      const eng = m ? (m.row.engine || null) : null;
+      if (i.reconciled_job_id !== jid || i.reconciled_engine !== eng) {
+        const wasReconciled = !!i.reconciled_job_id;
+        i.reconciled_job_id = jid;
+        i.reconciled_engine = eng;
+        n++;
+        // 动态新命中（先扫描后出 done 行）：同步移出勾选域，与 applyScanResult 的
+        // 「默认不勾选」同口径——防止已生成影片被「生成字幕」重新提交跑一遍。
+        // 仅 null→set 迁移清除：命中后用户手动重勾的项不回滚（下一轮无迁移）
+        if (!wasReconciled && jid) state.scanChecked.delete(i.path);
+      }
+    }
+    return n;
+  }
+
+  /** 单项回写：命中行的任务结果 srt → 扫描项同目录（幂等：已有 srt 视同已有字幕） */
+  async function scanWriteBackItem(item: ScanItem): Promise<boolean> {
+    const m = matchScanItem(item, state.scanDoneIndex);
+    const jobId = m?.row.job_id;
+    if (!m || !jobId) {
+      toast("未匹配到可回写的任务（可能已过期），请刷新后重试", "err");
+      return false;
+    }
+    const row = m.row;
+    const srtName = item.name.replace(/\.[^.]+$/, "") + SRT_SUFFIX;
+    const info: WriteBackInfo = { engine: row.engine, videoName: item.name, dirHandle: null, videoPath: item.path };
+    try {
+      if (await platform.srtExists(info, srtName)) {
+        item.has_subtitle = true;
+        item.subtitle_status = "external";
+        item.subtitle = srtName;
+        item.reconciled_job_id = null;
+        item.reconciled_engine = null;
+        toast(`「${item.name}」字幕已存在（${srtName}），视同已有字幕`, "");
+        return true;
+      }
+      let data: ArrayBuffer | null = null;
+      for (let i = 0; i < 5 && !data; i++) {
+        data = await t.getResultData(row.engine, jobId);
+        if (!data) await new Promise((res) => setTimeout(res, 2000));
+      }
+      if (!data) { toast(`「${item.name}」任务结果暂不可下载（可能已过期），请重新生成`, "err"); return false; }
+      const ok = await platform.writeSrt(info, srtName, data);
+      if (!ok) throw new Error("写回失败");
+      item.has_subtitle = true;
+      item.subtitle_status = "external";
+      item.subtitle = srtName;
+      item.reconciled_job_id = null;
+      item.reconciled_engine = null;
+      toast(`「${item.name}」已回写 ${srtName}（取任务 ${jobId} 结果，未重新生成）`, "ok");
+      return true;
+    } catch (e) {
+      toast(`「${item.name}」回写失败（${(e as Error).message}）`, "err");
+      return false;
+    }
+  }
+
+  /** 批量回写（「回写所选」按钮）：逐项串行，每项独立 toast，末了重渲染 */
+  async function scanWriteBackMany(paths: string[]): Promise<void> {
+    const items = state.scanItems.filter((i) => paths.includes(i.path) && i.reconciled_job_id);
+    if (!items.length) return;
+    if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    const btn = $("scan-writeback") as HTMLButtonElement;
+    const total = items.length;
+    for (let i = 0; i < total; i++) {
+      btn.disabled = true;
+      btn.innerHTML = `&#8617; 回写中 ${i + 1} / ${total}…`;
+      await scanWriteBackItem(items[i]);
+    }
+    if (state.lastScan) renderScanResults(state.lastScan);
+    updateScanSummary(); // 复位「回写所选」按钮的标签/禁用态（updateScanGo 只管 #scan-go）
   }
   async function pollScanTask(id: string) {
     if (!t.getScanTask) return;
@@ -5306,10 +5502,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     {
       const tabsEl = $("scan-tabs");
       if (state.scanItems.length) {
-        const counts: Record<string, number> = { "no-sub": 0, "has-sub": 0, small: 0 };
+        const counts: Record<string, number> = { "no-sub": 0, "has-sub": 0, small: 0, unwritten: 0 };
         for (const i of state.scanItems) counts[scanCatOf(i)]++;
+        for (const i of state.scanItems) if (i.reconciled_job_id) counts.unwritten++;
         const defs: Array<[typeof state.scanFilter, string]> =
-          [["all", "全部"], ["no-sub", "无字幕"], ["has-sub", "已有字幕"], ["small", "过小"]];
+          [["all", "全部"], ["no-sub", "无字幕"], ["has-sub", "已有字幕"], ["small", "过小"], ["unwritten", "已生成未落盘"]];
         tabsEl.innerHTML = defs
           .filter(([k]) => k === "all" || counts[k] > 0)
           .map(([k, label]) =>
@@ -5355,7 +5552,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         <tbody>
           ${pageItems.map((i) => {
             const langs = (i.embedded_langs || []).join("/") || "—";
-            const subCell = i.subtitle_status === "external"
+            let subCell = i.subtitle_status === "external"
               ? `<span class="tag subtag" title="${esc(i.subtitle || "")}">外部 srt</span><button type="button" class="srt-pv" data-srt="${esc(i.subtitle ? siblingOf(i.path, i.subtitle) : "")}" title="预览字幕内容">预览</button>`
               : i.subtitle_status === "named"
               ? `<span class="tag subtag" title="文件名含标记 ${esc(i.name_sub_token || "")}，按规则视为已压字幕（可在「设置 → 客户端 → 扫描规则」改判）">标记（名）</span>`
@@ -5364,6 +5561,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               : i.name_no_sub
               ? `<span class="tag subtag ok" title="文件名含标记 ${esc(i.name_no_sub_token || "")}，按规则视为无字幕版（可在「设置 → 客户端 → 扫描规则」改判）">无字幕（名）</span>`
               : '<span class="muted" title="普通扫描不会读取视频内容">未检查</span>';
+            if (i.reconciled_job_id) {
+              // 0.2.47 需求1：对账命中 → 前置 tag（服务/任务号供核对，防同名误配）+ desktop 回写按钮
+              subCell = `<span class="tag subtag warn" title="已匹配完成任务（服务 ${esc(i.reconciled_engine || "—")} · 任务 ${esc(i.reconciled_job_id)}）：字幕已生成但未落盘到影片旁，可直接回写，无需重新生成">已生成未落盘</span>`
+                + (platform.kind === "desktop"
+                  ? `<button type="button" class="srt-pv scan-wb" data-path="${esc(i.path)}" title="把该已完成任务的结果写回影片同目录（已有 srt 不覆盖）">回写</button>`
+                  : "");
+            }
             return `
             <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
               <td class="col-check"><input type="checkbox" data-path="${esc(i.path)}"${state.scanChecked.has(i.path) ? " checked" : ""}></td>
@@ -5425,16 +5629,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const total = state.scanItems.length;
     const nSub = state.scanItems.filter((i) => i.has_subtitle).length;
     const nSmall = state.scanItems.filter((i) => i.too_small && !state.scanChecked.has(i.path)).length;
+    const nUnwritten = state.scanItems.filter((i) => i.reconciled_job_id).length;
     let text = total ? `已选 ${n} / ${total}` : "";
     if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
     if (nSmall) text += ` · ${nSmall} 个过小未选`;
+    if (nUnwritten) text += ` · ${nUnwritten} 个已生成未落盘默认不勾选`;
     text += (text ? " · " : "") + "内嵌字幕未检查（不会触发网盘下载）";
     if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
     $("scan-count").textContent = text;
     const button = scanSubmit;
     button.disabled = n === 0 || !engineSelect.value || state.busy;
     button.innerHTML = "&#9654; 生成字幕（已选择 " + n + " 项）";
-    // 「全选」按当前分类 tab 视图域：只覆盖视图内非「过小」文件（too_small 只能手动勾选）
+    // 「回写所选」：desktop-only；已选中 ∩ 已生成未落盘 ≥1 才可点（回写不重跑生成）
+    const wbBtn = $("scan-writeback") as HTMLButtonElement;
+    if (platform.kind === "desktop") {
+      const selUnwritten = state.scanItems.filter((i) => i.reconciled_job_id && state.scanChecked.has(i.path)).length;
+      wbBtn.hidden = nUnwritten === 0;
+      wbBtn.disabled = selUnwritten === 0 || state.busy;
+      wbBtn.innerHTML = `&#8617; 回写所选（${selUnwritten}）`;
+    } else {
+      wbBtn.hidden = true;
+    }
+    // 「全选」按当前分类 tab 视图域：只覆盖视图内非「过小」「已生成未落盘」文件（两者只能手动勾选）
     const selectable = scanViewSelectable();
     scanSelectAll.checked = selectable.length > 0
       && selectable.every((i) => state.scanChecked.has(i.path));
@@ -5446,7 +5662,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 视图域全选：勾选=加视图内非过小项（保留其它 tab 已选项）；取消=只减视图项
     const view = new Set(scanViewItems().map((i) => i.path));
     if (checked) {
-      for (const i of state.scanItems) if (view.has(i.path) && !i.too_small) state.scanChecked.add(i.path);
+      for (const i of state.scanItems) if (view.has(i.path) && !i.too_small && !i.reconciled_job_id) state.scanChecked.add(i.path);
     } else {
       for (const p of [...state.scanChecked]) if (view.has(p)) state.scanChecked.delete(p);
     }
@@ -5520,6 +5736,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     } finally {
       updateScanSummary();
     }
+  };
+
+  // 「回写所选」（desktop-only；web 该按钮恒 hidden，接线无副作用）：
+  // 勾选 ∩ 「已生成未落盘」项 → 逐项串行回写（回写不置 state.busy，逐项 toast 自行门控）
+  const scanWbBtn = $("scan-writeback") as HTMLButtonElement;
+  scanWbBtn.onclick = async () => {
+    if (platform.kind !== "desktop" || state.busy) return;
+    const paths = [...state.scanChecked];
+    if (!state.scanItems.some((i) => paths.includes(i.path) && i.reconciled_job_id)) return;
+    await scanWriteBackMany(paths);
   };
 
   // ---------- 时钟 ----------
@@ -5943,6 +6169,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         <div class="cfg-row ccfg-row" data-base="${cc.queue_cap}">
           <span class="cfg-lab">转译并发（服务队列上限）${helpIcon("服务端逐条串行转译。此项为「同时在途任务数上限」≈ 服务队列深度，超出的任务在本机排队等待派发。调低可保护服务端内存/磁盘与队列稳定，也缩小服务重启时丢失排队任务的风险面。封顶 1 ~ 16，保存后立即生效。")}</span>
           <input id="ccfg-queue_cap" type="number" min="1" max="16" value="${cc.queue_cap}" spellcheck="false" autocomplete="off"></div>
+        ${platform.kind === "desktop" ? `
+        <div class="cfg-row ccfg-row" data-base="${cc.vram_free_min_gb}">
+          <span class="cfg-lab">自动均衡空闲显存阈值（GB）${helpIcon("自动均衡选机：最近一次采样空闲显存低于此值的服务，不再接收新的 auto 派发（已派发任务不受影响）。单模型实例约占 5G 显存，设低于 5 可能让服务后起实例显存不足（服务端有显存预检与 OOM 自愈兜底）；设为 0 = 不按显存过滤、纯按在途最少派发（服务被其他程序占满显存时也有派发）。0 ~ 16，默认 5，保存后立即生效。")}</span>
+          <input id="ccfg-vram_free_min_gb" type="number" min="0" max="16" step="1" value="${cc.vram_free_min_gb}" spellcheck="false" autocomplete="off"></div>` : ""}
       </div>
       <div class="ccfg-foot">
         <span class="cfg-foot-note">只保存在客户端本机，不影响服务端</span>
@@ -6074,14 +6304,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (saveBtn) saveBtn.onclick = async () => {
         const ew = parseInt(($("ccfg-extract_workers") as HTMLInputElement).value, 10);
         const qc = parseInt(($("ccfg-queue_cap") as HTMLInputElement).value, 10);
+        const vfEl = $("ccfg-vram_free_min_gb") as HTMLInputElement | null;
+        const vf = vfEl ? parseInt(vfEl.value, 10) : null;
         if (isNaN(ew) || ew < 1 || ew > 8) { toast("音轨提取并发需在 1 ~ 8 之间", "err"); return; }
         if (isNaN(qc) || qc < 1 || qc > 16) { toast("转译并发需在 1 ~ 16 之间", "err"); return; }
+        if (vfEl && (isNaN(vf as number) || (vf as number) < 0 || (vf as number) > 16)) { toast("自动均衡空闲显存阈值需在 0 ~ 16 之间", "err"); return; }
         try {
-          await t.putClientConfig!({ extract_workers: ew, queue_cap: qc });
+          const payload: Record<string, unknown> = { extract_workers: ew, queue_cap: qc };
+          if (vf !== null) payload.vram_free_min_gb = vf;
+          await t.putClientConfig!(payload as unknown as import("../core/types").ClientConfig);
           // S4：保存成功才应用本端内存（R2：保存失败不落内存，下轮 refresh 读回自愈）
-          state.ccfg = normalizeClientConfig({ ...(state.ccfg || {}), extract_workers: ew, queue_cap: qc });
+          state.ccfg = normalizeClientConfig({
+            ...(state.ccfg || {}), extract_workers: ew, queue_cap: qc,
+            ...(vf !== null ? { vram_free_min_gb: vf } : {}),
+          });
           jav()?.wakeExtract?.(); // 提取并发变更 → 释放池等待者
-          pumpDispatch();         // 在途封顶变更 → 立即重判排队项
+          pumpDispatch();         // 在途封顶/显存阈值变更 → 立即重判排队项
           toast("客户端设置已保存（立即生效，无需重启）", "ok");
           for (const row of rows) row.dataset.base = (row.querySelector("input") as HTMLInputElement).value;
           ccDirty();

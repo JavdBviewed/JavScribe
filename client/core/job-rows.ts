@@ -58,6 +58,7 @@ export function jobRows(infos: JobSourceInfo[]): any[] {
         created: job.created ?? null,
         finished: job.finished ?? null,
         source_kind: job.source_kind ?? null,
+        paused: job.paused === true, // 单任务挂起（serve 0.2.3+；与 web _job_rows 同口径，desktop 补齐）
         // 主任务（batch）归属：serve 持久化字段，旧 serve 无字段 → null（单文件行为不变）
         batch_id: job.batch_id ?? null,
         batch_label: job.batch_label ?? null,

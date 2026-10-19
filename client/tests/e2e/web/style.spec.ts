@@ -86,6 +86,7 @@ test("任务看板：进行中（扫光动画帧）", async ({ page }) => {
   await mockPause(req); // 先停：running 行不会在页面刷新前进成 done
   await mockSeed(req, { n: 1, status: "running", progress: 0.37 });
   await goTab(page, "jobs");
+  // 0.2.47：任务表最小内容 1069px < 默认视口容器宽 1102px，无横滚，整表完整可见
   await page.locator(".job-row.running").waitFor({ timeout: 15_000 });
   // 根治断言：前序用例残留批次记录随保留期剪枝 → 看板无 0 子任务孤儿主任务行，
   // 行集合精确 = 本用例 1 条 running seed（expect 自动重试覆盖最后几个 tick 的剪枝延迟）

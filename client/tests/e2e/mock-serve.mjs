@@ -173,6 +173,7 @@ function jobOf(files, { source_kind = "remote", label = "", id, batch_id = null,
     label,
     files,
     paused: false,
+    cancel_requested: false, // 0.2.47：协作式取消（tick 下轮把非终态文件收口 canceled，模拟检查点中止）
     batch_id, batch_label,
   };
   state.jobs.set(j.id, j);
@@ -217,6 +218,22 @@ function srtFor(name) {
 setInterval(() => {
   if (state.paused) return;
   for (const j of state.jobs.values()) {
+    // 0.2.47 协作式取消：cancel_requested 的任务下一 tick 把非终态文件全部收口（模拟检查点中止；
+    // 已 done 文件的字幕/结果保留，与 serve engine.cancel_job 语义一致）
+    if (j.cancel_requested) {
+      for (const t of j.files) {
+        if (t.status === "running" || t.status === "pending") {
+          t.status = "canceled";
+          t.message = "已取消";
+          t.finished = Date.now() / 1000;
+          t.eta_s = null;
+        }
+      }
+      if (j.finished == null && j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status))) {
+        j.finished = Date.now() / 1000;
+      }
+      continue;
+    }
     if (j.paused) continue;
     // 主任务（batch）串行：单 job 至多 1 个文件 running，每 tick 晋升 1 个 pending（复刻 serve 单文件串行处理）；
     // batch 暂停/队列暂停 → 不晋升新文件（在跑跑完才真正停；队列暂停=mock 冻结全部在途，既有口径）
@@ -616,6 +633,34 @@ const server = http.createServer((req, res) => {
     if (!j.paused) return sendErr(409, "任务未在挂起状态");
     j.paused = false;
     return send(200, { ok: true, job_id: parts[1], status: "resumed" });
+  }
+
+  // ---- POST /jobs/<id>/cancel（与 serve 0.2.12 progress_api 同形：404/409/200 canceled|canceling）----
+  if (req.method === "POST" && parts.length === 3 && parts[0] === "jobs" && parts[2] === "cancel") {
+    const j = state.jobs.get(parts[1]);
+    if (!j) return sendErr(404, "job not found（任务不存在或已过期）");
+    if (j.finished != null) return sendErr(409, "任务已结束，无需取消");
+    if (j.cancel_requested) {
+      // 幂等：已受理过取消 → 直接回当前收口状态
+      const settled = j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status));
+      return send(200, { ok: true, job_id: j.id, status: settled ? "canceled" : "canceling" });
+    }
+    j.cancel_requested = true;
+    if (!j.files.some((t) => t.status === "running")) {
+      // 全 pending（排队中）：立即收尾
+      for (const t of j.files) {
+        if (t.status === "pending") {
+          t.status = "canceled";
+          t.message = "已取消";
+          t.finished = Date.now() / 1000;
+          t.eta_s = null;
+        }
+      }
+      j.finished = Date.now() / 1000;
+      return send(200, { ok: true, job_id: j.id, status: "canceled" });
+    }
+    // 有 running：检查点中止，下轮 tick 收口
+    return send(200, { ok: true, job_id: j.id, status: "canceling" });
   }
 
   // ---- POST /jobs/batch/<id>/pause|resume|cancel（主任务；恒 200：该 serve 未持有该 batch 也照记标记，与 serve 一致）----
