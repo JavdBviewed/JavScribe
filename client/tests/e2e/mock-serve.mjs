@@ -64,6 +64,7 @@ const state = {
   cache: new Map(),     // sha1 -> {size, ext}（内容寻址缓存，/cache/check、/upload/submit 用）
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
   apiKeyMode: "ok",     // ok | no-key
+  healthFailLeft: 0,  // 0.2.48 宽限期 e2e：剩余故障注入次数（/_mock/health-fail 设；>0 时 /health 回 503）
   paused: false,
   queuePaused: false,   // 用户面队列暂停（/jobs/pause|resume，与 serve 0.2.3 一致；mock 无队列，冻结全部在途）
   batchPaused: new Set(), // 主任务（batch）暂停标记（/jobs/batch/<id>/pause|resume|cancel；按 batch 冻结晋升，在跑不受影响）
@@ -300,8 +301,15 @@ const server = http.createServer((req, res) => {
     if (req.method === "POST") {
       const sub = parts[1];
       if (sub === "pause") { state.paused = true; return send(200, { ok: true }); }
+      if (sub === "health-fail") {
+        return readBody().then((b) => {
+          const n = b && JSON.parse(b).count;
+          state.healthFailLeft = typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : 0;
+          return send(200, { ok: true, healthFailLeft: state.healthFailLeft });
+        });
+      }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; return send(200, { ok: true }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -411,6 +419,11 @@ const server = http.createServer((req, res) => {
   // ---- GET ----
   if (req.method === "GET") {
     if (!parts.length || parts[0] === "health") {
+      // 0.2.48 宽限期 e2e：故障注入窗口内的 /health 一律 503（模拟瞬时采样失败）
+      if (state.healthFailLeft > 0) {
+        state.healthFailLeft--;
+        return send(503, { ok: false, error: "mock fault injected" });
+      }
       // stats：mock 无任务窗驱逐，全量终态扫描与 serve 累计口径一致（e2e 统计数字=行计数，基线像素不变）
       const stats = { done: 0, skipped: 0, failed: 0 };
       for (const j of state.jobs.values()) {

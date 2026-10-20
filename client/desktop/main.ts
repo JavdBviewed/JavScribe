@@ -28,6 +28,7 @@ import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
 import { folderIsVideo, folderTokensIn, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { jobRows, pickJobDetail } from "../core/job-rows";
 import { sanitizeSrtBytes } from "../core/srt-sanitize";
+import { decideOnline } from "../core/concurrency";
 import {
   type EmbeddedSub,
   parseProbeOutput,
@@ -437,6 +438,8 @@ let win: BrowserWindow | null = null;
 let lastSnap: Snapshot | null = null;
 let inFlight: Promise<Snapshot> | null = null;
 const TTL_MS = 3000;
+/** 0.2.48 健康采样宽限期：引擎名 -> 连续失败次数（成功归零；服务删除时随快照剪枝） */
+const failStreak = new Map<string, number>();
 
 async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
   const prev = lastSnap?.engines.find((e) => e.name === entry.name);
@@ -465,6 +468,7 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
         }),
       );
     }
+    failStreak.set(entry.name, 0); // 0.2.48 宽限期：采样成功 → 连续失败清零
     return {
       name: entry.name,
       url: entry.url,
@@ -488,19 +492,25 @@ async function refreshOne(entry: EngineEntry): Promise<EngineInfo> {
       _details: details,
     };
   } catch (e) {
-    // 离线：保留上次 version/device/jobs（与 poller 一致）
+    // 采样失败：保留上次 version/device（与 poller 一致）。
+    // 0.2.48 宽限期：曾在线引擎单次失败仍维持在线（decideOnline），避免 5-8s 误踢自动均衡候选；
+    // 宽限路径保留上次 jobs_running 并填 error 字段（渲染端出软警告行）。
+    const msg = String((e as Error)?.message || e).slice(0, 200);
+    const fails = (failStreak.get(entry.name) || 0) + 1;
+    failStreak.set(entry.name, fails);
+    const grace = decideOnline(fails, prev?.online);
     return {
       name: entry.name,
       url: entry.url,
-      online: false,
+      online: grace,
       has_key: !!entry.api_key,
       version: prev?.version ?? null,
       device: prev?.device ?? null,
-      jobs_running: 0,
+      jobs_running: grace ? (prev?.jobs_running ?? 0) : 0,
       batch_paused: prev?.batch_paused ?? [],
       paused: prev?.paused ?? false,
       stats: prev?.stats ?? null,
-      error: String((e as Error)?.message || e).slice(0, 200),
+      error: msg,
       _details: prev?._details ?? [],
     };
   }
@@ -519,6 +529,9 @@ function refresh(force = false): Promise<Snapshot> {
   if (!inFlight) {
     inFlight = (async () => {
       const engines = await Promise.all(store.all().map(refreshOne));
+      for (const k of [...failStreak.keys()]) {
+        if (!engines.some((e) => e.name === k)) failStreak.delete(k);
+      }
       batchesReconcile(engines); // 主任务完成对账（batches.json；快照成功才判）
       return { engines, at: Date.now() };
     })();

@@ -8,7 +8,7 @@ import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineM
 import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
-import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
+import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, isVramExcluded, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
 import { buildDoneJobIndex, matchScanItem, type ReconcilableRow } from "../core/scan-reconcile";
@@ -789,12 +789,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             state._metrics[e.name] = m;
             const card = document.querySelector<HTMLElement>(
               `#engine-grid .eng[data-name="${CSS.escape(e.name)}"]`);
-            if (card) renderEngineMetrics(card, e.name);
+            if (card) { renderEngineMetrics(card, e.name); updateEngExclHint(card, e); }
           }).catch(() => {
             state._metrics[e.name] = { ok: false, error: "unreachable" };
             const card = document.querySelector<HTMLElement>(
               `#engine-grid .eng[data-name="${CSS.escape(e.name)}"]`);
-            if (card) renderEngineMetrics(card, e.name);
+            if (card) { renderEngineMetrics(card, e.name); updateEngExclHint(card, e); }
           });
         }
       }
@@ -1159,9 +1159,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ${serveUpBadge(e)}
       <span class="tag${e.jobs_running ? " hot" : ""}">运行 ${e.jobs_running || 0}</span>
       ${e.paused ? `<span class="tag tag-paused" title="服务队列已挂起：运行中任务跑完后不再开新任务（看板「继续任务」或单任务「继续」恢复）">已暂停</span>` : ""}
-      ${e.online ? "" : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
+      ${e.online ? (e.error ? `<div class="eng-err-warn" title="${esc(e.error)}">检测异常：${esc(e.error)}（宽限期，未剔除）</div>` : "") : `<div class="eng-err">${esc(e.error || "离线")}</div>`}
     </div>
     <div class="eng-metrics"></div>
+    <div class="eng-excl" hidden></div>
     ${typeof t.setEngineEnabled === "function" ? `
     <div class="eng-bal-row">
       <label class="eng-bal" title="勾选后该服务参与「自动均衡」：新任务实时分派给在途任务最少的在线服务；取消勾选后只收手动指定的任务"><input type="checkbox" class="bal-chk" data-name="${esc(e.name)}"${e.enabled === false ? "" : " checked"}> 参与均衡</label>
@@ -1192,6 +1193,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       card.classList.toggle("off", !e.online);
       card.classList.toggle("bal-off", e.enabled === false);
       renderEngineMetrics(card as HTMLElement, e.name);
+      updateEngExclHint(card as HTMLElement, e);
     }
     const order = Array.from(grid.children).map((c) => (c as HTMLElement).dataset.name).join("\u0001");
     if (order !== list.map((e) => e.name).join("\u0001")) {
@@ -3648,6 +3650,31 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return typeof v === "number" && Number.isFinite(v) && v >= 0
       ? v
       : CLIENT_CFG_DEFAULTS.vram_free_min_gb;
+  }
+
+  /** 0.2.48：auto 均衡显存阈值剔除提示文案（纯判定；与 pickAutoEngine 过滤口径一致：
+   *  在线 + 参与均衡 + 阈值>0 + 有采样 + 空闲<阈值 → 才提示；无采样/阈值 0 → 不提示） */
+  function engExclText(e: Engine): string {
+    if (!e.online || e.enabled === false) return "";
+    const thr = vramFreeMinGbNow();
+    if (thr <= 0) return "";
+    const m = state._metrics[e.name];
+    if (!m || !m.ok || !m.metrics) return "";
+    const free = freeVramGb(m.metrics.gpu ?? null);
+    if (!isVramExcluded(free, thr)) return "";
+    return `未参与均衡：空闲显存 ${(free as number).toFixed(1)}G < 阈值 ${thr}G（设置可调）`;
+  }
+
+  function updateEngExclHint(card: HTMLElement, e: Engine) {
+    const box = card.querySelector<HTMLElement>(".eng-excl");
+    if (!box) return;
+    const txt = engExclText(e);
+    if (txt) {
+      if (box.hidden) box.hidden = false;
+      if (box.textContent !== txt) box.textContent = txt;
+    } else if (!box.hidden) {
+      box.hidden = true;
+    }
   }
 
   /** auto 派发时刻解析（显存感知，10-13-javscribe-client-writeback-guard F3④；0.2.47 阈值客户端可调）：

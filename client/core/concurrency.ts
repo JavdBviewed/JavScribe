@@ -232,6 +232,31 @@ export function pickAutoEngine(
   return pickMin(vramOk) ?? pickMin(cands);
 }
 
+/**
+ * 单次 /health 采样失败宽限判定（0.2.48，10-20-javscribe-health-grace-vram-hint）：
+ *  - fails=0 → 在线；
+ *  - fails=1 且引擎此前在线 → 宽限期，维持在线（单次瞬时采样失败不踢出自动均衡候选，
+ *    渲染端可见软警告行）；
+ *  - 其余（新引擎首失败 / 连续第 2 次失败）→ 离线。
+ */
+export function decideOnline(fails: number, prevOnline: boolean | undefined): boolean {
+  const n = typeof fails === "number" && Number.isFinite(fails) && fails > 0 ? Math.trunc(fails) : 0;
+  if (n === 0) return true;
+  return n === 1 && prevOnline === true;
+}
+
+/**
+ * 是否因空闲显存低于阈值被自动均衡剔除（0.2.48 引擎卡片提示判定，与 pickAutoEngine 口径一致）：
+ *  - minGb<=0 → 未开过滤，不剔除；
+ *  - free=null（无采样数据/旧服务）→ 视为满足，不剔除；
+ *  - free<minGb → 剔除（卡片应可见提示，解释「为什么这台没分到任务」）。
+ */
+export function isVramExcluded(free: number | null, minGb: number): boolean {
+  if (!(typeof minGb === "number" && Number.isFinite(minGb) && minGb > 0)) return false;
+  if (free == null || !Number.isFinite(free)) return false;
+  return free < minGb;
+}
+
 const _enc = new TextEncoder();
 
 /**

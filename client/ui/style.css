@@ -419,6 +419,24 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
   padding: 5px 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 0.2.48 宽限期软警告：单次采样失败但仍在候选池（区别于离线红条） */
+.eng-err-warn {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 5px 9px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 0.2.48 显存阈值剔除提示：解释「为什么这台没分到任务」 */
+.eng-excl {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 引擎卡监控块：GPU/显存 + 1h 迷你趋势（sparkline 纯 SVG，无第三方库） */
 .eng-metrics { margin-top: 10px; min-height: 16px; }
 .eng-metrics:empty { display: none; }

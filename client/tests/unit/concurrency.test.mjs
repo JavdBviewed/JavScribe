@@ -21,7 +21,7 @@ try {
   await build({ entryPoints: [tsSrc], bundle: true, format: "cjs", outfile: out, logLevel: "silent" });
   const mod = await import(`file://${out}`);
   const ex = mod.default ?? mod;
-  const { createPool, canStartInFlight, countInFlightRows, normalizeClientConfig, TERMINAL_JOB_STATUSES } = ex;
+  const { createPool, canStartInFlight, countInFlightRows, normalizeClientConfig, TERMINAL_JOB_STATUSES, decideOnline, isVramExcluded } = ex;
 
   // ---------- TERMINAL_JOB_STATUSES ----------
   assert.ok(TERMINAL_JOB_STATUSES.has("done"), "done 是终态");
@@ -255,7 +255,29 @@ try {
   }
   console.log("ok 11 - pool 不传 hooks 旧行为回归");
 
-  console.log("concurrency.test: 11/11 组断言全过");
+  // ---------- decideOnline（0.2.48 健康采样宽限期） ----------
+  assert.equal(decideOnline(0, false), true, "首次采样成功 → 在线");
+  assert.equal(decideOnline(0, true), true, "持续成功 → 在线");
+  assert.equal(decideOnline(1, true), true, "曾在线引擎单次失败 → 宽限期维持在线");
+  assert.equal(decideOnline(1, false), false, "新引擎首失败 → 立即离线（无宽限）");
+  assert.equal(decideOnline(1, undefined), false, "无历史（undefined）首失败 → 离线");
+  assert.equal(decideOnline(2, true), false, "连续第 2 次失败 → 离线");
+  assert.equal(decideOnline(5, true), false, "连续多次失败 → 离线");
+  assert.equal(decideOnline(-1, true), true, "脏值负数按 0 处理 → 在线");
+  assert.equal(decideOnline(1.0, true), true, "浮点 1.0 截断为 1 → 宽限");
+  console.log("ok 12 - decideOnline 宽限判定（曾在线单失败留 / 新引擎与连败即离）");
+
+  // ---------- isVramExcluded（0.2.48 显存阈值剔除提示判定，口径同 pickAutoEngine 过滤） ----------
+  assert.equal(isVramExcluded(4.9, 5), true, "空闲 4.9 < 阈值 5 → 剔除");
+  assert.equal(isVramExcluded(5, 5), false, "空闲 = 阈值 → 不剔除（>= 满足）");
+  assert.equal(isVramExcluded(6.2, 5), false, "空闲高于阈值 → 不剔除");
+  assert.equal(isVramExcluded(null, 5), false, "无采样数据（null）→ 视为满足不剔除");
+  assert.equal(isVramExcluded(4.9, 0), false, "阈值 0 = 关闭过滤 → 不剔除");
+  assert.equal(isVramExcluded(4.9, -1), false, "脏值负阈值 → 不过滤");
+  assert.equal(isVramExcluded(NaN, 5), false, "脏值 NaN 空闲 → 不剔除");
+  console.log("ok 13 - isVramExcluded 阈值剔除判定（<阈值剔 / =阈值与无数据与 0 阈值不剔）");
+
+  console.log("concurrency.test: 13/13 组断言全过");
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }
