@@ -1718,13 +1718,17 @@ body.desktop main > section.view-on { display: block; }
 .cfg-foot {
   position: sticky; bottom: 0;
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin: 2px -18px 0;
-  padding: 10px 18px;
-  background: var(--surface);
-  border-top: 1px solid var(--line);
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
 }
 .cfg-foot-note { font-size: 11px; color: var(--muted); flex: 1; min-width: 200px; }
 .cfg-foot-actions { display: flex; gap: 8px; }
+/* 0.2.49 P7：dirty 计数强调（无改动=灰，有未保存=主题橙加粗） */
+.ccfg-foot .dirty-n, .cfg-foot .dirty-n { color: var(--accent); font-weight: 650; }
 /* 客户端（本机工作台）卡片：卡片内独立小页脚（独立保存，区别于底部服务端保存条） */
 .ccfg-foot {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -1735,7 +1739,8 @@ body.desktop main > section.view-on { display: block; }
 .ccfg-foot .cfg-foot-note { min-width: 0; }
 
 /* ---------- 设置 tab（sec-ccfg：独立视图，客户端/服务端子 tab） ---------- */
-.cc-cards { display: flex; flex-direction: column; gap: 14px; max-width: 780px; }
+.cc-cards { display: flex; flex-direction: column; gap: 14px; }
+.cc-pane { max-width: 860px; }
 /* 设置页子 tab 容器 + pane 显隐 */
 .cc-subtabs { display: flex; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 .cc-pane[hidden] { display: none; }
@@ -1763,8 +1768,7 @@ body.desktop main > section.view-on { display: block; }
 }
 .cc-watch-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cc-watch-row #cc-watch-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cc-card .cfg-row input[type="number"] { width: 220px; }
-.cc-card .cfg-row input[type="text"] { width: 100%; max-width: 480px; }
+.cc-card .cfg-row input { width: 100%; max-width: 560px; }
 .set-note-title { font-weight: 700; margin-bottom: 4px; }
 
 /* 帮助图标 tooltip 方向变体（由 JS 按视口空间临时加类） */

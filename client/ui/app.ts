@@ -4930,7 +4930,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         row.classList.toggle("dirty", cur !== (row.dataset.base ?? ""));
         const n = target.querySelectorAll(".cfg-row.dirty").length;
         const d = $("cfg-dirty");
-        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        if (d) { d.textContent = n ? `有 ${n} 项未保存` : "无改动"; d.classList.toggle("dirty-n", n > 0); }
         const r = $("cfg-reset");
         if (r) r.hidden = n === 0;
       };
@@ -4984,7 +4984,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     // 取值参考：第一个在线且已登记 Key 的服务端，否则第一个（表单值来源，不代表下发目标）
     const ref = engines.find((e) => e.online && e.has_key) || engines[0];
-    setSrvNote(`通用设置 = 一份配置下发到所有服务端；保存前逐端差异确认。取值参考「${ref.name}」。`);
+    setSrvNote("通用设置 = 一份配置下发到所有服务端；保存前逐端差异确认（取值参考见下方卡片）。");
     body.innerHTML = '<div class="muted small">加载设置中…</div>';
     t.getConfig(ref.name)
       .then((items) => { if (seq === srvSeq) renderCfgForm(body, "common", ref.name, items); })
@@ -6247,14 +6247,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     <section class="cfg-sec cc-card" data-sec="ccfg-desktop-update">
       <h4 class="cfg-sec-title">桌面端更新<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">与「检查更新」弹窗高级区同源（settings.json）</span></h4>
       <div class="cfg-sec-body">
-        <label class="chk-row"><input type="checkbox" id="cc-up-enabled"${upCfg && upCfg.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label>
-        <div class="cfg-row"><span class="cfg-lab">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
+        <div class="cfg-row ccfg-row" data-base="${upCfg && upCfg.enabled ? "1" : "0"}">
+        <label class="chk-row"><input type="checkbox" id="cc-up-enabled"${upCfg && upCfg.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label></div>
+        <div class="cfg-row ccfg-row" data-base="${esc(upCfg?.mirror || "")}"><span class="cfg-lab">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
         <input id="cc-up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upCfg?.mirror || "")}"></div>
-        <div class="cfg-row"><span class="cfg-lab">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
+        <div class="cfg-row ccfg-row" data-base="${esc(upCfg?.proxy || "")}"><span class="cfg-lab">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
         <input id="cc-up-proxy" class="mono" type="text" placeholder="留空直连 GitHub" value="${esc(upCfg?.proxy || "")}"></div>
       </div>
       <div class="ccfg-foot">
         <span class="cfg-foot-note">保存后立即生效（代理下次检查/下载即走新代理）</span>
+        <span id="cc-up-dirty" class="muted small">无改动</span>
         <span class="cfg-foot-actions"><button type="button" id="cc-up-save" class="btn">保存更新设置</button></span>
       </div>
     </section>
@@ -6272,7 +6274,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     html += "</div>"; // cc-cards
     html += `
-    </div> // cc-pane client
+    </div>
     <div class="cc-pane" data-pane="server" hidden>
       <div class="srv-bar">
         <span class="srv-bar-label">服务端</span>
@@ -6305,7 +6307,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       };
     }
     const srvSel = $("srv-sel") as HTMLSelectElement | null;
-    if (srvSel) srvSel.onchange = () => renderSrv(srvSel.value);
+    if (srvSel) {
+      // 0.2.49 P6：切服务 = 整表单重渲染 —— 有未保存改动先确认；取消则回退下拉（与表单保持一致）
+      srvSel.dataset.cur = srvSel.value;
+      srvSel.onchange = () => {
+        const sb = $("srv-body");
+        if (sb?.querySelector(".cfg-row.dirty")
+          && !window.confirm("当前服务设置未保存，切换将丢弃。继续？")) {
+          srvSel.value = srvSel.dataset.cur || srvSel.value;
+          return;
+        }
+        srvSel.dataset.cur = srvSel.value;
+        renderSrv(srvSel.value);
+      };
+    }
     // 并发卡：改动追踪 + 独立保存（原弹窗卡片语义原样迁移）
     if (cc) {
       const rows = Array.from(body.querySelectorAll<HTMLElement>(".cc-card[data-sec=ccfg-concurrency] .ccfg-row"));
@@ -6318,7 +6333,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           if (changed) n++;
         }
         const d = $("ccfg-dirty");
-        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        if (d) { d.textContent = n ? `有 ${n} 项未保存` : "无改动"; d.classList.toggle("dirty-n", n > 0); }
         const b = $("ccfg-save");
         if (b) b.hidden = n === 0;
       };
@@ -6361,7 +6376,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const sCtl = (id: string) => $(id) as HTMLInputElement;
       const sRowVal = (row: HTMLElement) => {
         const ctl = row.querySelector("input") as HTMLInputElement;
-        return ctl.type === "checkbox" ? String(ctl.checked) : ctl.value;
+        return ctl.type === "checkbox" ? (ctl.checked ? "1" : "0") : ctl.value;
       };
       const ccScanDirty = (): void => {
         let n = 0;
@@ -6371,7 +6386,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           if (changed) n++;
         }
         const d = $("cc-scan-dirty");
-        if (d) d.textContent = n ? `有 ${n} 项未保存` : "无改动";
+        if (d) { d.textContent = n ? `有 ${n} 项未保存` : "无改动"; d.classList.toggle("dirty-n", n > 0); }
         const b = $("cc-scan-save");
         if (b) b.hidden = n === 0;
       };
@@ -6408,6 +6423,27 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 桌面专属：更新设置（与更新弹窗高级区同数据源，保存后同步侧边栏「自动更新」勾选）
     const upSave = $("cc-up-save") as HTMLButtonElement | null;
     if (upSave) {
+      // 0.2.49 P7：更新卡补 dirty 追踪（与并发/扫描卡同语义：脏行高亮 + 计数，保存成功重置基准）
+      const upRows = Array.from(body.querySelectorAll<HTMLElement>(".cc-card[data-sec=ccfg-desktop-update] .ccfg-row"));
+      const upRowVal = (row: HTMLElement) => {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        return ctl.type === "checkbox" ? (ctl.checked ? "1" : "0") : ctl.value;
+      };
+      const upDirty = (): void => {
+        let n = 0;
+        for (const row of upRows) {
+          const changed = upRowVal(row) !== (row.dataset.base ?? "");
+          row.classList.toggle("dirty", changed);
+          if (changed) n++;
+        }
+        const d = $("cc-up-dirty");
+        if (d) { d.textContent = n ? `有 ${n} 项未保存` : "无改动"; d.classList.toggle("dirty-n", n > 0); }
+      };
+      for (const row of upRows) {
+        const ctl = row.querySelector("input") as HTMLInputElement;
+        ctl.addEventListener("input", upDirty);
+        ctl.addEventListener("change", upDirty);
+      }
       upSave.onclick = async () => {
         const b = upBridge();
         if (!b) return;
@@ -6420,6 +6456,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           upSettings = await b.putSettings(next);
           const auto = $("up-auto") as HTMLInputElement | null;
           if (auto) auto.checked = upSettings.enabled;
+          for (const row of upRows) row.dataset.base = upRowVal(row);
+          upDirty();
           toast("更新设置已保存（立即生效）", "ok");
         } catch (e) {
           toast((e as Error).message, "err");
@@ -6466,7 +6504,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   try { savedView = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
   const initialView: ViewName = hashView || (VIEWS.includes(savedView as ViewName) ? (savedView as ViewName) : "dispatch");
   let currentView: ViewName = initialView;
+  // 0.2.49 P6：设置页未保存改动检测 —— 客户端卡 / 服务端表单任一 dirty 即视为脏
+  function ccViewDirty(): boolean {
+    const body = $("cc-body");
+    if (!body) return false;
+    if (body.querySelector(".ccfg-row.dirty")) return true;
+    if (body.querySelector("#srv-body .cfg-row.dirty")) return true;
+    return false;
+  }
   webShowView = (view: ViewName) => {
+    // 0.2.49 P6：离开设置视图 / 重设已激活的设置 tab 都会整体重渲染（改动静默丢失）→ 先确认
+    if (currentView === "ccfg" && ccViewDirty()
+      && !window.confirm("设置页有未保存的改动，切换后将丢弃。继续？")) return;
     for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
     for (const item of navItems) {
       const active = item.dataset.view === view;

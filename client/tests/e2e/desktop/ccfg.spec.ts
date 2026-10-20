@@ -53,3 +53,64 @@ test("设置 tab（客户端 pane）：改并发保存 → client-config.json �
     await r.app.close().catch(() => {});
   }
 });
+
+test("设置页：子 tab 无调试残留文本（回归：模板字符串内注释外泄 // cc-pane client）", async ({ page }) => {
+  await goView(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  await expect(page.locator("#srv-sel")).toBeVisible({ timeout: 10_000 });
+  const leak = await page.evaluate(() =>
+    document.querySelector("#sec-ccfg")?.textContent.includes("// cc-pane") ?? false);
+  expect(leak).toBe(false);
+});
+
+test("设置页：未保存改动保护（切服务/切视图均确认，取消则留在原地、下拉回退）", async ({ page }) => {
+  await goView(page, "ccfg");
+  await page.click('.cc-subtabs .cfg-tab[data-cctab="server"]');
+  await page.selectOption("#srv-sel", "mock");
+  await expect(page.locator("#srv-body #cfg-save")).toBeVisible({ timeout: 15_000 });
+  // 弄脏单服务表单
+  await page.locator("#cfg-subtitle-lang_tag").fill("en");
+  await expect(page.locator("#cfg-dirty")).toHaveText("有 1 项未保存");
+  // 守卫在 handler 里同步 confirm（阻塞渲染器）→ 测试须先挂 dialog 处理，动作才能返回
+  // 1) dirty 时切服务 → confirm；取消 → 下拉回退、表单保持
+  const d1: { msg: string | null } = { msg: null };
+  page.once("dialog", (d) => { d1.msg = d.message(); void d.dismiss(); });
+  await page.selectOption("#srv-sel", "__all__");
+  expect(d1.msg).toContain("未保存");
+  await expect(page.locator("#srv-sel")).toHaveValue("mock");
+  await expect(page.locator("#cfg-subtitle-lang_tag")).toHaveValue("en");
+  // 2) dirty 时切走视图 → confirm；取消 → 仍在设置视图
+  const d2: { msg: string | null } = { msg: null };
+  page.once("dialog", (d) => { d2.msg = d.message(); void d.dismiss(); });
+  await page.click('#nav .view-tab[data-view="engines"]');
+  expect(d2.msg).toContain("未保存");
+  await expect(page.locator("#sec-ccfg")).toHaveClass(/view-on/);
+  // 3) 接受确认 → 切换生效（设置页整体重渲染，未保存值丢弃）
+  const d3: { msg: string | null } = { msg: null };
+  page.once("dialog", (d) => { d3.msg = d.message(); void d.accept(); });
+  await page.click('#nav .view-tab[data-view="engines"]');
+  expect(d3.msg).toContain("未保存");
+  await expect(page.locator("#sec-engines")).toHaveClass(/view-on/);
+});
+
+test("设置页（客户端 pane）：扫描卡触改不误标「进入子目录」复选框行（回归：base 1/0 与 true/false 失配恒脏）", async ({ page }) => {
+  await goView(page, "ccfg");
+  await expect(page.locator("#cc-scan-exts")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#cc-scan-dirty")).toHaveText("无改动");
+  await page.locator("#cc-scan-exts").fill("mp4,mkv");
+  await expect(page.locator("#cc-scan-dirty")).toHaveText("有 1 项未保存");
+  // 只有扩展名行 dirty；复选框行（data-base 1/0 约定）不得误标
+  expect(await page.locator("#sec-ccfg .cc-card[data-sec=ccfg-scan] .ccfg-row.dirty").count()).toBe(1);
+});
+
+test("设置页（桌面）：更新卡 dirty 追踪（改镜像源 → 计数 → 保存重置）", async ({ page }) => {
+  await goView(page, "ccfg");
+  await expect(page.locator("#cc-up-mirror")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#cc-up-dirty")).toHaveText("无改动");
+  await page.locator("#cc-up-mirror").fill("https://mirror.example.com/");
+  await expect(page.locator("#cc-up-dirty")).toHaveText("有 1 项未保存");
+  await page.click("#cc-up-save");
+  await expect(page.locator("#toasts .toast.ok", { hasText: "更新设置已保存" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#cc-up-dirty")).toHaveText("无改动");
+  await expect(page.locator("#cc-up-mirror")).toHaveValue("https://mirror.example.com/");
+});
