@@ -210,8 +210,11 @@ export const desktopTransport: Transport = {
   // 写回登记镜像（B）：main 进程磁盘同步镜像（renderer localStorage 异步落盘，SIGKILL 丢最后一次写入）
   saveWriteBackMirror: (json) => { void call("saveWriteBackMirror", json); },
   loadWriteBackMirror: async () => (await call<string>("loadWriteBackMirror")) || null,
+  saveLedgerMirror: (json) => { void call("saveLedgerMirror", json); },
+  loadLedgerMirror: async () => (await call<string>("loadLedgerMirror")) || null,
   // 全局暂停/继续（桌面形态）：本机管线闸 + 全部已登记服务队列扇出，单端失败逐条降级不 throw
   pauseAll: (paused) => call<PauseAllResult>("pauseAll", String(paused)),
   // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）
   listJobsSummary: () => call<JobSummary>("listJobsSummary"),
+  cleanupFinishedJobs: () => call<import("../core/types").CleanupJobsResult>("jobsCleanup"),
 };

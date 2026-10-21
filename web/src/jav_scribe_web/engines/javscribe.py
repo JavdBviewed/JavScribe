@@ -212,6 +212,13 @@ class JavScribeEngine(EngineAdapter):
         r.raise_for_status()
         return r.json()
 
+    async def cleanup_finished(self) -> dict:
+        """清理服务终态任务（客户端「清理已完成」fan-out）。serve 0.2.13+；
+        旧版服务无此端点 → 404，原样抛出 HTTPStatusError。"""
+        r = await self._get_client().post(f"{self.url}/jobs/cleanup")
+        r.raise_for_status()
+        return r.json()
+
     def _auth_headers(self) -> dict[str, str]:
         return {"X-Api-Key": self.api_key} if self.api_key else {}
 

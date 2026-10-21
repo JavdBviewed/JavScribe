@@ -93,11 +93,18 @@ export interface Transport {
   listBatches?(): Promise<BatchRecord[]>;
   /** 手动清除单条主任务记录（看板孤儿行「清除」入口）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
   batchClear?(batchId: string): Promise<{ ok: boolean }>;
+  /** 清理已完成任务：fan-out 所有在线服务（serve 0.2.13+；旧版 404 单条 unsupported 不 throw）；
+   *  未实现则 UI 只清本机账本不 fan-out */
+  cleanupFinishedJobs?(): Promise<import("./types").CleanupJobsResult>;
   /** 写回登记镜像（desktop）：main 进程把登记 JSON 同步落盘（renderer localStorage 异步落盘，
    *  SIGKILL 丢最后一次写入）；fire-and-forget 不 throw；web 形态未实现，登记仅走 localStorage */
   saveWriteBackMirror?(json: string): void;
   /** 读写回登记镜像（启动兜底：localStorage 丢失时合并灌回内存）；未实现 / 无镜像返回 null */
   loadWriteBackMirror?(): Promise<string | null>;
+  /** 派发账本镜像（desktop）：同 saveWriteBackMirror 语义；web 形态未实现，账本仅走 localStorage */
+  saveLedgerMirror?(json: string): void;
+  /** 读派发账本镜像（启动兜底）；未实现 / 无镜像返回 null */
+  loadLedgerMirror?(): Promise<string | null>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */

@@ -121,6 +121,7 @@ export const webTransport: Transport = {
     jpost<{ ok: boolean }>(`/api/batches/${encodeURIComponent(batchId)}/clear`),
 
   listJobsSummary: () => jget<import("../core/types").JobSummary>("/api/jobs/summary"),
+  cleanupFinishedJobs: () => jpost<import("../core/types").CleanupJobsResult>("/api/jobs/cleanup"),
 
   getClientConfig: () =>
     jget<{ config: import("../core/types").ClientConfig }>("/api/client-config").then((d) => d.config),

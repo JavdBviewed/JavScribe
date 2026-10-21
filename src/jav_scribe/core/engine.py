@@ -581,6 +581,26 @@ class Engine:
         self._drain_pending()
         return {"canceled_jobs": canceled_jobs, "canceled_files": canceled_files}
 
+    def cleanup_finished(self) -> int:
+        """清理已完成任务：删本引擎任务表内全部终态任务（done/skipped/error/canceled），
+        落盘 jobs.json 同步收缩。供客户端「清理已完成」fan-out 调用（POST /jobs/cleanup）。
+        非终态任务不动；stats.json 累计统计独立（_counted 去重），清理不回退不重计；
+        被清任务后续 retry → 404「任务不存在或已过期」（语义一致）。返回删除条数。
+        """
+        removed = 0
+        with self._sched_lock:
+            kept = []
+            for job in self.jobs:
+                if job.done:
+                    removed += 1
+                else:
+                    kept.append(job)
+            if removed:
+                self.jobs = kept
+                self._save_jobs()
+                self.log(f"[engine] 已清理终态任务 {removed} 个（任务表剩 {len(self.jobs)} 个）")
+        return removed
+
     def _restore_job_history(self) -> None:
         if self._jobs_path is None or not self._jobs_path.exists():
             return

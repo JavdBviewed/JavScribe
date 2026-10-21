@@ -216,7 +216,10 @@ function srtFor(name) {
 }
 
 // ---- 推进 running 任务 ----
-setInterval(() => {
+// 0.2.51：持有定时器句柄——/_mock/speed（与 reset 还原）的 tickMs 改动即时生效（重建 interval）；
+// 此前 interval 只在模块加载时按初始 100ms 固化，spec 声明的 tickMs 不生效（限速口径全错）
+let tickTimer = null;
+function tickOnce() {
   if (state.paused) return;
   for (const j of state.jobs.values()) {
     // 0.2.47 协作式取消：cancel_requested 的任务下一 tick 把非终态文件全部收口（模拟检查点中止；
@@ -242,7 +245,7 @@ setInterval(() => {
     for (const t of j.files) {
       if (t.status !== "running") continue;
       if (state.queuePaused) continue;
-      t.progress = Math.min(1, t.progress + state.step);
+      t.progress = Math.min(1, t.progress + (j.step ?? state.step));
       t.position_s = Math.round(t.duration_s * t.progress);
       t.position = fmtTs(t.position_s);
       t.phase_detail = "转写中";
@@ -263,11 +266,17 @@ setInterval(() => {
     const allTerminal = j.files.every((t) => ["done", "skipped", "canceled", "error"].includes(t.status));
     if (j.batch_id) {
       if (allTerminal && j.finished == null) j.finished = Date.now() / 1000;
-    } else if (j.files.every((t) => t.status !== "running")) {
+    } else if (j.finished == null && j.files.every((t) => t.status !== "running")) {
+      // 0.2.51：finished 只置一次（此前每 tick 覆盖已完成任务的 finished 时间戳）
       j.finished = Date.now() / 1000;
     }
   }
-}, state.tickMs);
+}
+function applyTick() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(tickOnce, state.tickMs);
+}
+applyTick();
 
 function fmtTs(s) {
   if (s == null) return "";
@@ -309,7 +318,7 @@ const server = http.createServer((req, res) => {
         });
       }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; applyTick(); return send(200, { ok: true }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -353,7 +362,7 @@ const server = http.createServer((req, res) => {
         return readBody().then((b) => {
           // 前 skipped 个 skipped、再 errors 个 error、再 pending 个 pending、其余 status
           const { n = 25, status = "done", skipped = 0, errors = 0, pending = 0, progress = 0,
-                  position = "", paused = 0, batch_id = null, batch_label = null } = b ? JSON.parse(b) : {};
+                  position = "", paused = 0, batch_id = null, batch_label = null, step: jobStep = null } = b ? JSON.parse(b) : {};
             const batch = ++state.seedSeq;
           for (let i = 0; i < n; i++) {
             // 0.2.50：paused 个（排队+挂起）优先，再 skipped/errors/pending，其余 status
@@ -373,6 +382,7 @@ const server = http.createServer((req, res) => {
               position: position || "",
             });
             const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${batch}-${String(i + 1).padStart(3, "0")}`, batch_id, batch_label });
+            if (jobStep != null) j.step = jobStep; // 每任务限速（running seed 保持不推进等场景）
             if (i < paused) j.paused = true;
             // 确定性 created（间隔 60s，seed-n 最新）：created 降序的分页断言不依赖真实毫秒
             j.created = Date.now() / 1000 - (n - i) * 60;
@@ -390,6 +400,7 @@ const server = http.createServer((req, res) => {
         return readBody().then((b) => {
           const { step = 0.25, tickMs = 100 } = b ? JSON.parse(b) : {};
           state.step = step; state.tickMs = tickMs;
+          applyTick();
           return send(200, { ok: true });
         });
       }
@@ -633,6 +644,15 @@ const server = http.createServer((req, res) => {
     const changed = parts[1] === "pause" ? !state.queuePaused : state.queuePaused;
     state.queuePaused = parts[1] === "pause";
     return send(200, { ok: true, paused: state.queuePaused, changed });
+  }
+
+  // ---- POST /jobs/cleanup（与 serve 0.2.13 progress_api 同形：仅删终态，返回 removed）----
+  if (req.method === "POST" && parts.length === 2 && parts[0] === "jobs" && parts[1] === "cleanup") {
+    let removed = 0;
+    for (const [id, j] of [...state.jobs]) {
+      if (j.finished != null) { state.jobs.delete(id); removed += 1; }
+    }
+    return send(200, { ok: true, removed });
   }
 
   // ---- POST /jobs/<id>/pause|resume（单任务挂起）----

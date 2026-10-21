@@ -641,6 +641,11 @@ class _Handler(BaseHTTPRequestHandler):
             changed = self.engine.pause_queue() if parts[1] == "pause" else self.engine.resume_queue()
             self._send(200, {"ok": True, "paused": self.engine.paused, "changed": changed})
             return
+        if len(parts) == 2 and parts[0] == "jobs" and parts[1] == "cleanup":
+            # 清本引擎终态任务（客户端「清理已完成」fan-out；与 /jobs 操作同敏感级）
+            removed = self.engine.cleanup_finished()
+            self._send(200, {"ok": True, "removed": removed})
+            return
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] in ("pause", "resume"):
             if self.engine.job_by_id(parts[1]) is None:
                 self._send(404, {"ok": False, "error": "job not found（任务不存在或已过期）"})

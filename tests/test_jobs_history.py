@@ -66,6 +66,16 @@ def _make_engine(td: Path, fake: Path, logs: list[str]) -> Engine:
     return Engine(_cfg(fake), log=logs.append, profile="test", data_dir=td)
 
 
+
+def _post(url: str) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as ex:
+        return ex.code, json.loads(ex.read().decode())
+
+
 def test_history_survives_restart() -> None:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -207,6 +217,42 @@ def test_jobs_detail_param() -> None:
             eng.stop()
 
 
+
+def test_cleanup_finished() -> None:
+    """POST /jobs/cleanup：仅删终态任务，非终态保留，jobs.json 同步收缩。"""
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        fake = td / "fake_infer.py"
+        fake.write_text(FAKE_OK, encoding="utf-8")
+        va, vb = td / "a.mkv", td / "b.mkv"
+        va.write_bytes(b"1")
+        vb.write_bytes(b"2")
+        logs: list[str] = []
+        eng = _make_engine(td, fake, logs)
+        # 一个终态（done）+ 一个非终态（pending，worker 未跑）
+        jdone = eng.submit([va], run_in_thread=False)
+        jhalf = Job(id=new_job_id(), files=[Task(path=Path("/tmp/hold.mkv"), status=TaskStatus.RUNNING)],
+                    label="进行中")
+        eng.jobs.append(jhalf)
+        assert jdone.done is True and jhalf.done is False
+        httpd = ProgressHTTP(eng, host="127.0.0.1", port=0, inbox_dir=td)
+        httpd.start()
+        base = f"http://127.0.0.1:{httpd.server.server_address[1]}"
+        try:
+            code, body = _post(base + "/jobs/cleanup")
+            assert code == 200 and body == {"ok": True, "removed": 1}, (code, body)
+            code, body = _http(base + "/jobs")
+            assert code == 200 and [x["id"] for x in body] == [jhalf.id], (code, body)
+            # jobs.json 同步收缩：终态不再落盘，重启后不恢复
+            saved = json.loads((td / "jobs.json").read_text(encoding="utf-8"))
+            assert all(x["id"] != jdone.id for x in saved)
+            # 空清理幂等
+            code, body = _post(base + "/jobs/cleanup")
+            assert code == 200 and body == {"ok": True, "removed": 0}, (code, body)
+        finally:
+            httpd.stop()
+            eng.stop()
+
 if __name__ == "__main__":
     test_history_survives_restart()
     test_unfinished_job_not_restored()
@@ -214,4 +260,5 @@ if __name__ == "__main__":
     test_corrupt_history_ignored()
     test_history_grows_after_restart()
     test_jobs_detail_param()
+    test_cleanup_finished()
     print("ALL JOBS HISTORY TESTS PASSED")

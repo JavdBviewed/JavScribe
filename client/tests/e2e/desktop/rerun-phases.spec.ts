@@ -143,8 +143,9 @@ test("运行中行重跑：cancel-first（检查点中止）→ 重交第二服�
   await resetMocks(request);
   const { app, page } = await launch(dir);
   try {
-    // 放慢 mock：1%/500ms → 约 50s 才完成，保整个用例期间恒「运行中」（reset 会还原 speed）
-    await mockSpeed(request, { step: 0.01, tickMs: 500 });
+    // 放慢 mock：2%/500ms → 约 25s 才完成：旧任务在重跑流程期间恒「运行中」，
+    // 换服务后的新任务也落在 60s 断言窗内（reset 会还原 speed）
+    await mockSpeed(request, { step: 0.02, tickMs: 500 });
     await dispatchFile(page, join(FIXTURES, "video-a.mp4"));
 
     await goView(page, "jobs");

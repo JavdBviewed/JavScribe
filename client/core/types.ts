@@ -108,6 +108,9 @@ export interface JobRow {
   local?: boolean | null;
   /** 派发「行优先」pending 行（仅 renderer 态：批量提交即建行，serve 真行出现后让位删除） */
   dispatch_pending?: boolean;
+  /** 派发账本行（仅 renderer 态：客户端本地子行账本恢复渲染用——服务端记录已不可见时
+   *  按最后本地状态展示；服务端同 job_id 行可见时不出账本行，不双行） */
+  ledger?: boolean;
   /** pending 行的稳定 key（无 job_id / created 会重建，供勾选、patch、取消定位） */
   pkey?: string;
   /** 主任务暂停前的状态备份（「继续」时还原；renderer 态字段） */
@@ -162,6 +165,13 @@ export interface BatchOpResult {
   action: "pause" | "resume" | "cancel";
   engines: { engine: string; ok: boolean; unsupported?: boolean; error?: string; result?: Record<string, unknown> }[];
   local?: { frozen?: boolean; released?: boolean; canceled?: number };
+}
+
+/** 清理已完成 fan-out 结果（web 工作台 /api/jobs/cleanup 与 desktop jobsCleanup 同形；
+ *  各服务独立返回：ok+removed / 离线 / 旧版 404 → unsupported，单条失败不阻塞整体） */
+export interface CleanupJobsResult {
+  ok: boolean;
+  engines: { engine: string; ok: boolean; removed?: number; unsupported?: boolean; error?: string }[];
 }
 
 /** 服务端监控快照（serve 0.2.4+ GET /metrics/json → 工作台 /api/engines/{name}/metrics） */

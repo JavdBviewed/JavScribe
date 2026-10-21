@@ -1764,6 +1764,32 @@ def build_app(store: EngineStore, poller: Poller, updater: UpdateChecker | None 
         await _gate._wake()  # 排队中的等待者立即按新服务重判
         return {"ok": True, "task_id": task.id, "engine": engine}
 
+    # -- 清理已完成（fan-out 全部在线服务；serve 0.2.13+；旧服务 404 → unsupported）--
+    @app.post("/api/jobs/cleanup")
+    async def api_jobs_cleanup() -> dict:
+        engines_out: list[dict] = []
+        for name, info in sorted(poller.engines.items(), key=lambda kv: kv[0]):
+            if not info.online or store.get(name) is None:
+                engines_out.append({"engine": name, "ok": False, "error": "服务离线"})
+                continue
+            entry = store.get(name)
+            eng = JavScribeEngine(name, entry["url"])
+            try:
+                res = await eng.cleanup_finished()
+                engines_out.append({"engine": name, "ok": True, "removed": int(res.get("removed", 0))})
+            except httpx.HTTPStatusError as ex:
+                if ex.response.status_code == 404:
+                    engines_out.append({"engine": name, "ok": False, "unsupported": True,
+                                        "error": "服务版本过旧，不支持清理"})
+                else:
+                    engines_out.append({"engine": name, "ok": False,
+                                        "error": f"服务请求失败: HTTP {ex.response.status_code}"})
+            except httpx.HTTPError as ex:
+                engines_out.append({"engine": name, "ok": False, "error": f"服务不可达: {ex}"})
+            finally:
+                await eng.close()
+        return {"ok": True, "engines": engines_out}
+
     @app.post("/api/jobs/bulk")
     async def api_jobs_bulk(body: dict) -> dict:
         """批量操作（大批量任务场景）：action=pause/resume/retry/cancel/assign。

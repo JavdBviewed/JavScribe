@@ -6,7 +6,7 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-CAsJS25w.js"></script>
+  <script type="module" crossorigin src="/assets/index-Jy7WhbQr.js"></script>
   <link rel="stylesheet" crossorigin href="/assets/index-CAYsy20t.css">
 </head>
 <body>
@@ -233,6 +233,8 @@
       <input type="search" id="job-search" class="job-search mono" placeholder="搜索文件名 / 任务 id" aria-label="搜索任务" spellcheck="false" autocomplete="off">
       <button type="button" id="job-pause-all" class="btn job-pause-all" hidden
         title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（服务端级操作：所有连接这些服务的客户端都会看到队列挂起；运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
+      <button type="button" id="job-clear-done" class="btn job-clear-done" hidden
+        title="清理已完成任务：仅终态（完成/跳过/失败/已取消）——本机派发账本 + 各在线服务端任务表；进行中/排队/已暂停不动。清理后服务端残留的已完成行不再显示（重启后仍生效）">🧹 清理已完成</button>
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">

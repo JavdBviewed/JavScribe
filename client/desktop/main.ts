@@ -1673,6 +1673,10 @@ function registerIpc(): void {
           }
           return { ok: true, data: await batchOpAll(action, bid) };
         }
+        // 清理已完成：fan-out 所有已登记服务（serve 0.2.13+，404 静默）
+        case "jobsCleanup": {
+          return { ok: true, data: await jobsCleanupAll() };
+        }
         // 主任务记录列表（batches.json，created 降序）
         case "listBatches": {
           const recs = Object.keys(batches)
@@ -1709,6 +1713,19 @@ function registerIpc(): void {
           try {
             return { ok: true, data: wbMirrorPath && fs.existsSync(wbMirrorPath)
               ? fs.readFileSync(wbMirrorPath, "utf-8") : "" };
+          } catch {
+            return { ok: true, data: "" };
+          }
+        }
+        // 派发账本镜像（0.2.51）：同 writeback 镜像语义
+        case "saveLedgerMirror": {
+          ledgerMirrorSave(String(a0 || "{}"));
+          return { ok: true };
+        }
+        case "loadLedgerMirror": {
+          try {
+            return { ok: true, data: ledgerMirrorPath && fs.existsSync(ledgerMirrorPath)
+              ? fs.readFileSync(ledgerMirrorPath, "utf-8") : "" };
           } catch {
             return { ok: true, data: "" };
           }
@@ -2919,6 +2936,20 @@ function batchesSave(): void {
 // ---------------------------------------------------------------------------
 const WB_MIRROR_FILE = "writeback.json";
 let wbMirrorPath = "";
+// 派发账本镜像（0.2.51）：同 WB 模式——renderer localStorage 异步落盘，
+// SIGKILL 丢最后一次写入 → main 磁盘镜像 ledger.json 兜底；启动丢失时合并读回
+const LEDGER_MIRROR_FILE = "ledger.json";
+let ledgerMirrorPath = "";
+
+function ledgerMirrorSave(raw: string): void {
+  if (!ledgerMirrorPath) return;
+  try {
+    fs.mkdirSync(path.dirname(ledgerMirrorPath), { recursive: true });
+    fs.writeFileSync(ledgerMirrorPath, raw);
+  } catch (e) {
+    console.error("[ledger-mirror] 镜像写入失败:", (e as Error).message);
+  }
+}
 
 function wbMirrorSave(raw: string): void {
   if (!wbMirrorPath) return;
@@ -3055,6 +3086,32 @@ async function batchOpAll(action: string, bid: string): Promise<unknown> {
     }
   }
   return { ok: true, batch_id: bid, action, engines, local: {} };
+}
+
+/** 清理已完成：fan-out 所有已登记服务 POST /jobs/cleanup（serve 0.2.13+；
+ *  404 → unsupported 不 throw 不阻塞；不可达记 error。本机无服务端任务存储，无需本机分支） */
+async function jobsCleanupAll(): Promise<unknown> {
+  const engines: Array<{ engine: string; ok: boolean; removed?: number; unsupported?: boolean; error?: string }> = [];
+  for (const entry of store.all()) {
+    const headers: Record<string, string> = {};
+    if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
+    try {
+      const r = await httpJson<any>(
+        `${entry.url}/jobs/cleanup`,
+        { method: "POST", headers, timeoutMs: 5000 },
+      );
+      if (r.status === 200) {
+        engines.push({ engine: entry.name, ok: true, removed: Number((r.data as { removed?: number } | null)?.removed || 0) });
+      } else if (r.status === 404) {
+        engines.push({ engine: entry.name, ok: false, unsupported: true, error: "服务版本过旧，不支持清理" });
+      } else {
+        engines.push({ engine: entry.name, ok: false, error: "HTTP " + r.status });
+      }
+    } catch (e) {
+      engines.push({ engine: entry.name, ok: false, error: (e as Error).message || String(e) });
+    }
+  }
+  return { ok: true, engines };
 }
 
 /** 看板统计（对齐 web 工作台 /api/jobs/summary）：进行中=当前在途行数 + 本机在跑提取；
@@ -3325,6 +3382,7 @@ app.whenReady().then(() => {
   batchesPath = path.join(app.getPath("userData"), BATCH_FILE);
   batchesLoad();
   wbMirrorPath = path.join(app.getPath("userData"), WB_MIRROR_FILE);
+  ledgerMirrorPath = path.join(app.getPath("userData"), LEDGER_MIRROR_FILE);
   void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）

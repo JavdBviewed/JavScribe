@@ -252,6 +252,232 @@ async function hydrateWriteBackMirror(t: Transport): Promise<void> {
 }
 loadWriteBackStore();
 
+// ---------- 派发账本（0.2.51）：批量派发子行账本 ----------
+// 背景：行优先 pending 子行纯 renderer 内存（state._pending），客户端中途退出后主任务的
+// 子行/状态全丢；服务端 200 内存窗 + jobs.json（仅恢复终态）也会挤丢非终态任务。
+// 账本 = pkey → 最后已知子行状态，持久化 localStorage（desktop 另加 main 进程磁盘镜像
+// ledger.json 防 SIGKILL）。refresh 每轮与 /jobs 双向校准：
+//   同 job_id 服务端行可见 → 服务端状态优先（不出账本行，不双行）；
+//   服务端已忘（窗挤出 / serve 重启丢非终态）→ 出账本行（最后本地状态 + 「本地记录」标）；
+//   子行带 batch_id/batch_label → 父子分组由账本供给（子行全过期时主任务行仍可见）。
+// 不变式：账本行永不写 state._jobs（在途封顶 countInFlightRows 维持 serve-only，见 L1591）。
+interface LedgerChild {
+  batch_id: string | null;
+  batch_label: string;
+  engine: string;
+  job_id: string | null;
+  videoName: string;
+  status: string;
+  progress: number;
+  message: string;
+  created: number | null;
+  finished: number | null;
+  updatedAt: number;
+}
+// 终态口径（账本/清理/筛选共用；模块级：ledger 工具函数与渲染层都引用）
+const BATCH_TERMINAL = new Set(["done", "skipped", "error", "canceled"]);
+
+const LEDGER_STORE_KEY = "javweb_dispatch_ledger_v1";
+const LEDGER_MAX_CHILDREN = 500;   // 对齐 serve JOBS_HISTORY_MAX
+const LEDGER_MAX_SUPPRESS = 1000;  // 抑制集上限（最旧优先剪）
+const LEDGER_TTL_MS = 14 * 24 * 3600 * 1000; // 陈旧条目惰性剪枝
+const ledger: { v: 1; children: Record<string, LedgerChild>; suppress: string[] } =
+  { v: 1, children: {}, suppress: [] };
+let ledgerMirrorSave: ((json: string) => void) | null = null;
+const ledgerFinger = new Map<string, string>(); // pkey -> 上次落盘指纹（transition 才写盘）
+
+function loadLedgerStore(): void {
+  try {
+    const raw = localStorage.getItem(LEDGER_STORE_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw) as { v?: number; children?: Record<string, Partial<LedgerChild>>; suppress?: unknown };
+    if (!d || d.v !== 1 || !d.children) return;
+    for (const [k, c] of Object.entries(d.children)) {
+      if (!k || !c || typeof c.status !== "string" || typeof c.videoName !== "string") continue;
+      ledger.children[k] = {
+        batch_id: typeof c.batch_id === "string" ? c.batch_id : null,
+        batch_label: typeof c.batch_label === "string" ? c.batch_label : "",
+        engine: typeof c.engine === "string" ? c.engine : "",
+        job_id: typeof c.job_id === "string" ? c.job_id : null,
+        videoName: c.videoName,
+        status: c.status,
+        progress: typeof c.progress === "number" ? c.progress : 0,
+        message: typeof c.message === "string" ? c.message : "",
+        created: typeof c.created === "number" ? c.created : null,
+        finished: typeof c.finished === "number" ? c.finished : null,
+        updatedAt: typeof c.updatedAt === "number" ? c.updatedAt : Date.now(),
+      };
+    }
+    if (Array.isArray(d.suppress)) {
+      for (const s of d.suppress) if (typeof s === "string" && s) ledger.suppress.push(s);
+    }
+  } catch { /* 账本损坏按空处理（宁缺勿错；派发链运行期重建） */ }
+}
+
+function saveLedgerStore(): void {
+  let json = "";
+  try {
+    json = JSON.stringify(ledger);
+    localStorage.setItem(LEDGER_STORE_KEY, json);
+  } catch { /* 持久化失败不影响内存账本（本会话仍有效） */ }
+  if (json) { try { ledgerMirrorSave?.(json); } catch { /* 镜像失败不影响内存账本 */ } }
+}
+
+/** 账本剪枝：TTL（14 天）+ 条数上限（终态最旧优先）；剪枝本身触发落盘 */
+function ledgerPrune(): void {
+  const now = Date.now();
+  let changed = false;
+  for (const [k, c] of Object.entries(ledger.children)) {
+    if (now - c.updatedAt > LEDGER_TTL_MS) { delete ledger.children[k]; changed = true; }
+  }
+  let excess = Object.keys(ledger.children).length - LEDGER_MAX_CHILDREN;
+  if (excess > 0) {
+    const sorted = Object.entries(ledger.children).sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+    for (const [k, c] of sorted) {
+      if (excess <= 0) break;
+      if (BATCH_TERMINAL.has(c.status)) { delete ledger.children[k]; excess--; changed = true; }
+    }
+    for (const [k] of sorted) {
+      if (excess <= 0) break;
+      if (k in ledger.children) { delete ledger.children[k]; excess--; changed = true; }
+    }
+  }
+  excess = ledger.suppress.length - LEDGER_MAX_SUPPRESS;
+  if (excess > 0) { ledger.suppress.splice(0, excess); changed = true; }
+  if (changed) saveLedgerStore();
+}
+
+/** 账本同步（幂等）：仅 transition（status/phase/job_id/engine/终态时刻）落盘；进度 tick 不写 */
+function ledgerSyncPending(p: PendingDispatch): void {
+  const r = p.row;
+  const fin = `${r.status}|${r.phase || ""}|${r.job_id || ""}|${r.engine}|${r.finished ? 1 : 0}|${p.aborted ? 1 : 0}`;
+  if (ledgerFinger.get(p.pkey) === fin) return;
+  ledgerFinger.set(p.pkey, fin);
+  ledger.children[p.pkey] = {
+    batch_id: r.batch_id || null,
+    batch_label: r.batch_label || "",
+    engine: r.engine,
+    job_id: r.job_id ? String(r.job_id) : null,
+    videoName: r.file || r.label || "",
+    status: r.status,
+    progress: r.progress || 0,
+    message: r.phase_detail || r.position || r.message || "",
+    created: r.created ?? null,
+    finished: r.finished ?? null,
+    updatedAt: Date.now(),
+  };
+  ledgerPrune();
+  saveLedgerStore();
+}
+
+function ledgerRemove(key: string): void {
+  if (key in ledger.children) {
+    delete ledger.children[key];
+    ledgerFinger.delete(key);
+    saveLedgerStore();
+  }
+}
+
+function ledgerAddSuppress(keys: string[]): void {
+  if (!keys.length) return;
+  for (const k of keys) {
+    if (k && !ledger.suppress.includes(k)) ledger.suppress.push(k);
+  }
+  saveLedgerStore();
+}
+
+/** 账本恢复行：服务端同 job_id 行可见 → 跳过（服务端优先，不双行）；
+ *  同 pkey 的 live pending 行在场 → 跳过（行池 jobKey 相同会碰撞，live 行被账本行覆盖、
+ *  进度/阶段冻结在账本最后一次 transition——在途批次视觉丢失实时状态）；
+ *  已清理（suppress）→ 跳过；否则按最后本地状态出参考行（非终态带「本地记录」提示） */
+function ledgerRows(jobs: readonly JobRow[]): JobRow[] {
+  if (!Object.keys(ledger.children).length) return [];
+  const visible = new Set<string>();
+  for (const r of jobs) if (r.job_id) visible.add(String(r.job_id));
+  const livePkeys = new Set<string>(state._pending.keys());
+  const out: JobRow[] = [];
+  for (const [pkey, c] of Object.entries(ledger.children)) {
+    if (livePkeys.has(pkey)) continue;
+    if (c.job_id) {
+      if (visible.has(c.job_id)) continue;
+      if (ledger.suppress.includes(c.engine + "|" + c.job_id)) continue;
+    }
+    const terminal = BATCH_TERMINAL.has(c.status);
+    const note = terminal ? "" : "本地记录（服务端记录不可用，显示最后本地状态）";
+    out.push({
+      engine: c.engine,
+      job_id: c.job_id,
+      label: c.videoName,
+      file: c.videoName,
+      status: c.status,
+      progress: c.progress,
+      position: c.message,
+      phase_detail: c.message,
+      message: note,
+      created: c.created,
+      finished: c.finished,
+      batch_id: c.batch_id,
+      batch_label: c.batch_label,
+      pkey,
+      ledger: true,
+    });
+  }
+  return out;
+}
+
+/** refresh 每轮：双向校准的剪枝侧——suppress 自愈（非终态 serve 行复活 → 解除抑制）+ TTL/上限剪枝 */
+function reconcileLedger(jobs: readonly JobRow[]): void {
+  let supChanged = false;
+  if (ledger.suppress.length) {
+    for (const r of jobs) {
+      if (!r.job_id || BATCH_TERMINAL.has(r.status)) continue;
+      const k = r.engine + "|" + String(r.job_id);
+      const i = ledger.suppress.indexOf(k);
+      if (i >= 0) { ledger.suppress.splice(i, 1); supChanged = true; }
+    }
+  }
+  if (supChanged) saveLedgerStore();
+  ledgerPrune();
+}
+
+// desktop：main 进程磁盘镜像钩子（initApp 注入；renderer localStorage 异步落盘，SIGKILL 丢最后一次写入）
+async function hydrateLedgerMirror(t: Transport): Promise<void> {
+  if (typeof t.loadLedgerMirror !== "function") return;
+  try {
+    const raw = await t.loadLedgerMirror();
+    if (!raw) return;
+    const d = JSON.parse(raw) as { v?: number; children?: Record<string, Partial<LedgerChild>>; suppress?: unknown };
+    if (!d || d.v !== 1) return;
+    let added = 0;
+    if (d.children) {
+      for (const [k, c] of Object.entries(d.children)) {
+        if (ledger.children[k]) continue; // 内存（localStorage）已有优先
+        if (!c || typeof c.status !== "string" || typeof c.videoName !== "string") continue;
+        ledger.children[k] = {
+          batch_id: typeof c.batch_id === "string" ? c.batch_id : null,
+          batch_label: typeof c.batch_label === "string" ? c.batch_label : "",
+          engine: typeof c.engine === "string" ? c.engine : "",
+          job_id: typeof c.job_id === "string" ? c.job_id : null,
+          videoName: c.videoName,
+          status: c.status,
+          progress: typeof c.progress === "number" ? c.progress : 0,
+          message: typeof c.message === "string" ? c.message : "",
+          created: typeof c.created === "number" ? c.created : null,
+          finished: typeof c.finished === "number" ? c.finished : null,
+          updatedAt: typeof c.updatedAt === "number" ? c.updatedAt : Date.now(),
+        };
+        added++;
+      }
+    }
+    if (Array.isArray(d.suppress)) {
+      for (const s of d.suppress) if (typeof s === "string" && s && !ledger.suppress.includes(s)) ledger.suppress.push(s);
+    }
+    if (added) saveLedgerStore(); // 回填 localStorage，后续会话不再依赖镜像
+  } catch { /* 镜像损坏/缺失按无处理 */ }
+}
+
+loadLedgerStore(); // 启动读回账本（localStorage 同步读，无需 transport）
+
 const PLANE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
 
 const STATUS_ZH: Record<string, string> = {
@@ -344,6 +570,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 写回登记镜像（B）：注入 main 磁盘镜像钩子 + 启动兜底读回（SIGKILL 丢 localStorage 最后一次写入）
   wbMirrorSave = (json) => { t.saveWriteBackMirror?.(json); };
   void hydrateWriteBackMirror(t);
+  // 派发账本镜像（0.2.51）：同 WB 语义
+  ledgerMirrorSave = (json) => { t.saveLedgerMirror?.(json); };
+  void hydrateLedgerMirror(t);
   // ---------- 静态表单元素句柄（HTML 固定节点，轮询不重建，取一次即可） ----------
   const engineSelect = $("engine-select") as HTMLSelectElement;
   const engineName = $("engine-name") as HTMLInputElement;
@@ -777,6 +1006,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       materializePreGhosts(jobs); // F4：残留 pre 登记 → 可见占位行（未提交）
       reconcilePending(); // S4：行接管 pending 记账（行到终态即释 cap 槽）
       reconcilePendingRows(); // 行优先：serve 真行可见 → 同 job_id 的 pending 行让位删除（不双行）
+      reconcileLedger(jobs); // 0.2.51：账本双向校准（suppress 自愈 + TTL/上限剪枝）
       if (ccRaw) {
         const ccNow = normalizeClientConfig(ccRaw);
         if (!state.ccfg
@@ -1370,11 +1600,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const sub = isGhost ? (j.message || "")
       : j.status === "skipped" && j.message ? j.message
       : (!labelMain && j.message) ? j.message : "";
-    const dl = j.status === "done" && j.job_id
+    // 0.2.51 派发账本行：服务端记录已不可寻址（200 窗挤出 / serve 重启丢失）→
+    // serve 侧操作（重试/取消/挂起/恢复/下载/预览）一律不给，避免对不存在的任务发请求
+    const isLedger = j.ledger === true;
+    const isServeRow = !!j.job_id && !isLedger;
+    const dl = j.status === "done" && j.job_id && !isLedger
       ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}" title="下载生成的字幕（.srt）">&#8595; 下载</a>`
       : "";
     // 预览：done 且有任务 id → 走 result 端点拉内容（本地扫描/远端任务通用）
-    const pv = j.status === "done" && j.job_id
+    const pv = j.status === "done" && j.job_id && !isLedger
       ? `<button type="button" class="srt-pv" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="预览生成的字幕（时间轴 + 全文）">预览</button>`
       : "";
     // 本地扫描任务：工作台本机字幕回写状态（ok / skipped_exists / skipped / failed:…）
@@ -1388,7 +1622,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<span class="wb-tag sub-exist" title="提交前检测到${SUB_SRC[j.sub_status]}，经确认继续生成">已有字幕</span>`
       : "";
     const retryKey = j.engine + "|" + (j.job_id || "");
-    const isServeRow = !!j.job_id;
     // 他端标记：他端客户端提交的服务任务（字幕不落回本机；服务端操作仍可用）
     const srcTag = j.local === false
       ? `<span class="src-tag" title="该任务由其他客户端提交：可看进度并做服务端操作（暂停/继续/重试/取消/下载 srt）；源视频不在本机，字幕不会自动落回本机磁盘">他端</span>`
@@ -1434,7 +1667,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         + `<button type="button" class="dl-btn reassign-go" data-tid="${esc(j.task_id)}" title="应用改派">&#10230;</button>`
       : "";
     // 取消（运行中/排队，未挂起）：协作式——排队立即收尾；运行中检查点中止；已生成字幕保留
-    const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused
+    const cancel = (j.status === "running" || j.status === "pending") && j.job_id && !j.paused && !isLedger
       ? `<button type="button" class="dl-btn cancel" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="终止排队/未开始文件；运行中将在检查点中止，已生成字幕保留">&#10006; 取消</button>`
       : "";
     // 换服务重跑（仅 desktop）：复用本地音轨缓存向其他服务提交新任务。
@@ -1450,6 +1683,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const pendCancel = pendQueued
       ? `<button type="button" class="dl-btn pend-cancel" data-pkey="${esc(key)}" title="取消该子任务（尚未开始，不会提交服务）">&#10006; 取消</button>`
       : "";
+    // 0.2.51 账本行（终态）：单行清除本地记录（服务端记录已过期/已清理，对应行不会再出现）
+    const ledClear = isLedger && BATCH_TERMINAL.has(j.status)
+      ? `<button type="button" class="dl-btn led-clear" data-pkey="${esc(key)}" title="清除该本地记录：仅删本机派发账本条目，不动服务端">&#10005; 清除</button>`
+      : "";
     // F4/F5 ghost 行按钮：重试（重新提交）/ 取消（丢弃 pre 登记）——独立类，不撞通用 .retry/.cancel handler
     const gGhost = isGhost ? ghostRows.get(key) : undefined;
     const gRetry = isGhost && gGhost?.videoPath
@@ -1459,9 +1696,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn ghost-cancel" data-gkey="${esc(key)}" title="丢弃该登记：放弃此文件的字幕生成">&#10006; 取消</button>`
       : "";
     // core：变化时整行重写（状态/文件/操作按钮，低频）；pct/eta/pos/elapsed 单独打补丁（高频）
-    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, offTag, cancel, pendCancel, gRetry, gCancel, srcTag, createdAt, finishedAt].join("\u0001");
+    const core = [key, sel, j.status, j.paused, j.engine, j.file, sub, dl, pv, retry, srvRetry, pauseJobBtn, resumeJobBtn, localAct, localPauseBtn, reassignCtl, rerunBtn, pos, wb, ss, offTag, cancel, pendCancel, ledClear, gRetry, gCancel, srcTag, createdAt, finishedAt].join("\u0001");
     const html = `
-      <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""}${pendNoJob || isGhost ? " disabled" : ""} aria-label="勾选任务（批量操作）"></label>
+      <label class="job-chk-box"><input type="checkbox" class="job-chk" data-key="${esc(key)}"${sel ? " checked" : ""}${pendNoJob || isGhost || isLedger ? " disabled" : ""} aria-label="勾选任务（批量操作）"></label>
       <div class="job-cell" title="${j.engine === "auto" ? "派发时按实时负载自动选择服务" : ""}">${esc(j.engine === "auto" ? "⚖ 自动均衡" : j.engine)}</div>
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}${offTag}</div>
@@ -1470,7 +1707,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
       <div class="job-cell mono cell-created">${esc(createdAt) || "—"}</div>
       <div class="job-cell mono cell-finished${j.status === "done" && finishedAt ? " is-done" : ""}">${esc(finishedAt) || "—"}</div>
-      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${pendCancel}${cancel}${gRetry}${gCancel}</div>`;
+      <div class="job-actions">${dl}${pv}${retry}${srvRetry}${pauseJobBtn}${resumeJobBtn}${localAct}${localPauseBtn}${reassignCtl}${rerunBtn}${pendCancel}${cancel}${ledClear}${gRetry}${gCancel}</div>`;
     return { html, core, pct, eta, pos, elapsed };
   }
 
@@ -1488,7 +1725,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // ---------- 主任务（batch）：聚合状态 / 行渲染 ----------
-  const BATCH_TERMINAL = new Set(["done", "skipped", "error", "canceled"]);
 
   function genBatchId(): string {
     return "b-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
@@ -1606,6 +1842,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function pendingRank(r: JobRow): number {
     if (r.status === "running") return 0;
     if (r.dispatch_pending && !BATCH_TERMINAL.has(r.status)) return 0;
+    if (r.ledger && !BATCH_TERMINAL.has(r.status)) return 0; // 账本恢复行：未终态置顶（用户需先看到）
     if (r.status === "unsubmitted") return 1; // F4 占位行：终态不抢置顶
     return 1;
   }
@@ -1614,12 +1851,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return [...ghostRows.values()].map((g) => g.row);
   }
 
-  /** serve 行 + pending 行 + ghost 行合并（口径同 job-rows：活跃优先 → created 降序；同批 pending 保队列正序） */
+  /** serve 行 + pending 行 + 账本行 + ghost 行合并（口径同 job-rows：活跃优先 → created 降序；
+   *  同批 pending 保队列正序）。账本行只进渲染层，不写 state._jobs（在途封顶 serve-only 不变式） */
   function mergePendingRows(rows: JobRow[]): JobRow[] {
     const pend = pendingRows();
+    const led = ledgerRows(rows);
     const ghosts = ghostRowsList();
-    if (!pend.length && !ghosts.length) return rows;
-    const out = rows.concat(pend, ghosts);
+    if (!pend.length && !led.length && !ghosts.length) return rows;
+    const out = rows.concat(pend, led, ghosts);
     out.sort((a, b) => pendingRank(a) - pendingRank(b) || (b.created || 0) - (a.created || 0));
     return out;
   }
@@ -1666,6 +1905,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       };
       const p: PendingDispatch = { row, pkey, started: false, dispatched: false, enqueuedAt: null, aborted: false };
       state._pending.set(pkey, p);
+      ledgerSyncPending(p); // 0.2.51：建行即入账本（中途退出客户端后重启可恢复）
       out.push(p);
     });
     return out;
@@ -1693,6 +1933,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       } else {
         r.message = "主任务已取消：当前阶段跑完后不再提交服务";
       }
+      ledgerSyncPending(p);
       schedulePendingRender();
       return true;
     }
@@ -1703,6 +1944,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     r.phase_detail = "已取消";
     r.message = "已取消（未开始）";
     r.finished = Date.now() / 1000;
+    ledgerSyncPending(p);
     schedulePendingRender();
     return true;
   }
@@ -1733,6 +1975,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     r.status = "error";
     r.message = msg;
     r.finished = Date.now() / 1000;
+    ledgerSyncPending(p);
     schedulePendingRender();
   }
 
@@ -1760,6 +2003,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         // 已入队：serve 行可见即让位；60s 仍不可见（服务重启/挤出内存窗）兜底删除不留幻行
         if (seen.has(String(jid)) || (p.enqueuedAt != null && now - p.enqueuedAt > 60)) {
           state._pending.delete(key);
+          ledgerFinger.delete(key); // 0.2.51：行已交棒/过期，账本条目保留（重启恢复用）但指纹释放
         }
         continue;
       }
@@ -1772,6 +2016,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (hit) {
           r.job_id = hit;
           state._pending.delete(key);
+          ledgerFinger.delete(key); // 0.2.51：同上
         }
       }
     }
@@ -1861,6 +2106,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         r.phase = "queued";
         setPos(meta, meta);
         r.progress = 0;
+        ledgerSyncPending(p);
         schedulePendingRender();
       },
       stage: (n, meta, prog) => {
@@ -1871,6 +2117,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         r.phase = phaseOf(n);
         setPos(meta, PENDING_TEXT[stageKey(n)]?.[1]);
         r.progress = prog == null ? 0 : Math.max(0, Math.min(1, prog));
+        ledgerSyncPending(p);
         schedulePendingRender();
       },
       stageDone: (n, meta) => {
@@ -1878,6 +2125,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         p.started = true;
         setPos(meta, meta);
         r.progress = 1;
+        ledgerSyncPending(p);
         schedulePendingRender();
       },
       done: (_meta, info) => {
@@ -1890,6 +2138,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         r.progress = 1;
         setPos("已入队", jid ? `已入队，等待服务开始（任务 ${jid}）` : "已入队，等待服务开始");
         p.enqueuedAt = Date.now() / 1000;
+        ledgerSyncPending(p); // job_id 到手：账本回填（重启后按 job_id 与服务端对账）
         schedulePendingRender();
       },
       // 主任务取消：跑完当前阶段后到此为止，不再提交服务（行标「跳过」，非失败）
@@ -1903,6 +2152,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         r.progress = 0;
         setPos("已跳过（主任务取消）", "主任务已取消，未提交服务");
         r.finished = Date.now() / 1000;
+        ledgerSyncPending(p);
         schedulePendingRender();
         return true;
       },
@@ -1912,6 +2162,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         r.status = "error";
         r.message = msg;
         r.finished = Date.now() / 1000;
+        ledgerSyncPending(p);
         schedulePendingRender();
       },
       // 主任务「暂停」保持：暂停期间行落「已暂停」（_prevStatus 记账待恢复），
@@ -1927,6 +2178,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               r.position = "已暂停（主任务暂停）";
               r.phase_detail = "已暂停（主任务暂停）";
               r.message = "主任务已暂停：提取上传冻结，点「继续」恢复";
+              ledgerSyncPending(p);
               schedulePendingRender();
             }
             window.setTimeout(step, 500);
@@ -1938,6 +2190,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             r.phase_detail = PENDING_TEXT.queued[0];
             r.message = PENDING_TEXT.queued[1];
             delete r._prevStatus;
+            ledgerSyncPending(p);
             schedulePendingRender();
           }
           res();
@@ -1947,14 +2200,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     };
   }
 
+  // 最近一次合并行集（清理已完成按钮的计数口径；renderJobs 每轮更新）
+  let lastMergedRows: JobRow[] = [];
+
   function renderJobs(rows: JobRow[]) {
-    // 行优先：pending 子行并入看板（serve 真行出现后让位删除，不双行）
-    const rows2 = mergePendingRows(rows);
+    // 清理已完成：被抑制的服务端残留终态行不再显示（非终态复活由 reconcileLedger 解除抑制）
+    const sup = ledger.suppress;
+    const rowsIn = sup.length
+      ? rows.filter((j) => !(j.job_id && BATCH_TERMINAL.has(j.status)
+          && sup.includes(j.engine + "|" + String(j.job_id))))
+      : rows;
+    // 行优先：pending 子行 + 账本恢复行并入看板（serve 真行出现后让位删除，不双行）
+    const rows2 = mergePendingRows(rowsIn);
+    lastMergedRows = rows2;
     // 统计与筛选合一（renderFilterBar）：终态计数走 serve 累计 summary（200 内存窗
     // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
     renderFilterBar(rows2);
     renderSourceFilter(rows2);
     renderPauseAllBtn();
+    renderClearDoneBtn();
 
     // 单任务挂起可用性：同任务任一文件运行中 → 服务侧拒绝挂起（409），行级「暂停」隐藏
     const jobActive = new Map<string, boolean>();
@@ -1985,6 +2249,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 全选/批量操作只覆盖可操作的行：未入队的 pending 子行走行内「取消」（无 serve 任务可寻址）
     state._filteredKeys = shown
       .filter((j) => !(j.dispatch_pending && !j.job_id)
+        && !j.ledger // 账本恢复行：服务端记录已不可寻址，批量操作不给
         && !(typeof j.pkey === "string" && j.pkey.startsWith("ghost|"))) // F4/F5 ghost 行 renderer 本地，批量操作不可寻址
       .map(jobKey);
 
@@ -2089,7 +2354,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         : "—";
       const collapsed = state._batchCollapsed.has(g.bid);
       const hasFailed = g.children.some((j) => j.status === "error" || j.status === "canceled");
-      const canOp = typeof t.batchOp === "function" && !g.stale;
+      // 0.2.51 账本组：子行全是本地记录（无 pending 队列、serve 亦不认识）→ 主任务操作无对象，
+      // 不给按钮（清理由行级「清除」/「清理已完成」承担；服务端恢复后 serve 行自行接管）
+      const allLedger = g.children.length > 0 && g.children.every((j) => j.ledger === true);
+      const canOp = typeof t.batchOp === "function" && !g.stale && !allLedger;
       // 行优先：子行还全是本端 pending（尚未提交到服务）→ 服务侧不认识该主任务，
       // 暂停/继续/重试发了只会拿到「批次不存在」；「取消」走本端 pending 语义仍可用。
       const servedGroup = batchServed(g.bid);
@@ -2190,11 +2458,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       done: 0, skipped: 0, failed: 0, paused: 0,
     };
     for (const r of rows) counts[rowBucket(r)] += 1;
+    // 0.2.51：账本终态行不在 serve 累计 summary 内（服务端记录已不可用），
+    // summary 覆盖终态桶时叠加回计数，否则纯本机终态行在看板上「全部 0」
+    let ledDone = 0, ledSkip = 0, ledFail = 0;
+    for (const r of rows) {
+      if (r.ledger !== true) continue;
+      if (r.status === "done") ledDone += 1;
+      else if (r.status === "skipped") ledSkip += 1;
+      else if (r.status === "error" || r.status === "canceled") ledFail += 1;
+    }
     // 终态计数用 serve 累计 summary（200 内存窗下行计数必少算）；活跃态只能按现行
     if (state._summary) {
-      counts.done = state._summary.done;
-      counts.skipped = state._summary.skipped;
-      counts.failed = state._summary.failed;
+      counts.done = state._summary.done + ledDone;
+      counts.skipped = state._summary.skipped + ledSkip;
+      counts.failed = state._summary.failed + ledFail;
     }
     counts.active = counts.queued + counts.extracting + counts.transcribing;
     counts.all = counts.active + counts.done + counts.skipped + counts.failed + counts.paused;
@@ -2323,6 +2600,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       } else toast("该子任务已开跑或已结束，无法单行取消", "err");
       schedulePendingRender();
       batchQueues.get(bid)?.onRowCancel();
+      return;
+    }
+    // 0.2.51 账本行：清除该本地记录（仅删本地账本条目，不动服务端）
+    const lc = (ev.target as HTMLElement).closest(".led-clear") as HTMLButtonElement | null;
+    if (lc && !lc.disabled) {
+      const lpkey = lc.dataset.pkey || "";
+      ledgerRemove(lpkey);
+      toast("已清除该本地记录", "ok");
+      renderJobs(state._jobs);
       return;
     }
     // 主任务（batch）行操作：暂停/继续/取消/重试失败子任务（fan-out 逐引擎提示，不阻塞）
@@ -2625,6 +2911,79 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       btn.disabled = state.busy;
     }
   };
+
+  // ---------- 清理已完成（0.2.51）：本机账本终态 + 各在线服务终态任务表 ----------
+  // 口径：合并行集（serve 行 + pending + 账本行）里的终态行；进行中/排队/暂停一律不动。
+  // 服务端残留行写抑制集（持久化，重启后仍生效）；fan-out best-effort（404 = 旧版静默）。
+  function renderClearDoneBtn(): void {
+    const btn = $("job-clear-done") as HTMLButtonElement | null;
+    if (!btn) return;
+    let n = 0;
+    for (const j of lastMergedRows) if (BATCH_TERMINAL.has(j.status)) n++;
+    btn.hidden = n === 0;
+    btn.disabled = state.busy;
+  }
+
+  ($("job-clear-done") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+    if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    const term = lastMergedRows.filter((j) => BATCH_TERMINAL.has(j.status));
+    if (!term.length) { toast("暂无可清理的已完成任务", "ok"); return; }
+    const ok = window.confirm(
+      `清理 ${term.length} 条已完成任务？\n\n` +
+      "· 仅终态（完成/跳过/失败/已取消）；进行中/排队/暂停的任务不受影响\n" +
+      "· 本机：派发账本终态条目删除，本地记录行一并清除\n" +
+      "· 服务：各在线服务端任务表同步清理（旧版服务自动跳过）\n" +
+      "· 清理后服务端残留的已完成行不再显示（重启后仍生效）\n\n" +
+      "注意：已清任务在服务端将无法再下载/预览/重试，如仍需要结果请谨慎。",
+    );
+    if (!ok) return;
+    const btn = $("job-clear-done") as HTMLButtonElement | null;
+    if (btn) btn.disabled = true;
+    try {
+      // 1) 本机：账本终态条目删除（含本轮可见的终态 pending 行 pkey）
+      const termKeys = new Set(term.map(jobKey));
+      for (const [k, c] of Object.entries(ledger.children)) {
+        if (BATCH_TERMINAL.has(c.status) || termKeys.has(k)) {
+          delete ledger.children[k];
+          ledgerFinger.delete(k);
+        }
+      }
+      // 本轮内存里的终态 pending 行一并移除（与账本口径一致；非终态 pending 不动）
+      for (const [k, p] of Array.from(state._pending)) {
+        if (BATCH_TERMINAL.has(p.row.status)) state._pending.delete(k);
+      }
+      // 2) 抑制集：本轮可见终态行 key 持久化（服务端残留行不再回来）
+      const supKeys: string[] = [];
+      for (const j of term) {
+        if (!j.job_id) continue;
+        const k = j.engine + "|" + String(j.job_id);
+        if (!ledger.suppress.includes(k) && !supKeys.includes(k)) supKeys.push(k);
+      }
+      ledgerAddSuppress(supKeys);
+      saveLedgerStore();
+      // 3) 服务端 fan-out（best-effort；旧版 404 → unsupported 静默降级）
+      let svcTxt = "";
+      if (t.cleanupFinishedJobs) {
+        try {
+          const res = await t.cleanupFinishedJobs();
+          const good = res.engines.filter((e) => e.ok);
+          const removedN = good.reduce((s, e) => s + (e.removed || 0), 0);
+          const bad = res.engines.filter((e) => !e.ok);
+          svcTxt = res.engines.length
+            ? `；服务侧 ${good.length}/${res.engines.length} 成功（清 ${removedN} 条）`
+              + (bad.length ? `；${bad.map((e) => `${e.engine}：${e.error || "失败"}`).join("，")}` : "")
+            : "；服务侧无已登记服务";
+        } catch (e) {
+          svcTxt = `；服务侧清理失败（${(e as Error).message}）`;
+        }
+      }
+      toast(`已清理 ${term.length} 条本机已完成任务${svcTxt}`, "ok");
+      schedulePendingRender();
+      refresh();
+    } finally {
+      if (btn) btn.disabled = state.busy;
+    }
+  });
 
   // ---------- 勾选 + 批量操作（400+ 场景：勾选行 → 底部操作条） ----------
   // 行内勾选（change 委托；行整行重写时 checked 态由 core 串保证一致）
@@ -3902,6 +4261,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (rowFirst) {
           pend[idx].dispatched = true; // 取消/暂停记账：链已派发（含随后进提取池等槽）
           pend[idx].row.engine = real; // auto 解析出的真实服务回填子行
+          ledgerSyncPending(pend[idx]);
         }
         const prefix = rowFirst ? "" : `文件 ${idx + 1}/${total} · `;
         const sink: ChainSink | undefined = rowFirst ? rowSink(pend[idx]) : undefined;
@@ -4229,6 +4589,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               const idx = started++;
               r.engine = real;
               it.pend.dispatched = true;
+              ledgerSyncPending(it.pend);
               // 预登记：子行已建、即将提交 → 临时键先持久化（受理后 rekey 正式键）
               registerWriteBack(preKeyOf(real, it.name), {
                 engine: real, videoName: it.name, dirHandle: null, videoPath: it.path,
@@ -4282,6 +4643,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const idx = started++;
             r.engine = real; // 服务列提交时刻回填
             it.pend.dispatched = true;
+            ledgerSyncPending(it.pend);
             // 提交 HTTP 计入在途（原先漏计；≤5s 行可见后由行接管，cap 更准）
             chainInFlight.set(real, (chainInFlight.get(real) || 0) + 1);
             const res = await submitScanFile(real, it.path, batch, subStatus);
@@ -4304,6 +4666,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
                   r.phase_detail = "已入队";
                   r.message = `已入队，等待服务开始（任务 ${res.jobId}）`;
                   it.pend.enqueuedAt = Date.now() / 1000;
+                  ledgerSyncPending(it.pend);
                   schedulePendingRender();
                 }
               }
