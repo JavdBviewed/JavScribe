@@ -1995,13 +1995,22 @@ function registerIpc(): void {
   });
 
   // 原生目录选择 + 递归枚举（VIDEO_EXTS 过滤、上限 5000、rel 含根目录名——与 web webkitRelativePath 同构）
+  // 0.2.52 M1：multiSelections 支持一次选多个目录（提交时刻按盘拆 batch 的前提）；
+  // 逐目录 walkVideos 合并返回（rel 各自带本目录根目录名 → 保留每文件源目录信息；
+  // dirNames 按绝对路径键，跨目录共享安全，5000 上限跨目录合计）
   ipcMain.handle("pick-video-folder", async () => {
     const r = await dialog.showOpenDialog(win as BrowserWindow, {
       title: "选择影片文件夹",
-      properties: ["openDirectory"],
+      properties: ["openDirectory", "multiSelections"],
     });
     if (r.canceled || !r.filePaths.length) return null;
-    return walkVideos(r.filePaths[0], safeScanOptions(undefined, clientScanCfg()));
+    const opts = safeScanOptions(undefined, clientScanCfg());
+    const dirNames = new Map<string, Set<string>>();
+    const videos: WalkedVideo[] = [];
+    for (const d of r.filePaths) {
+      videos.push(...walkVideos(d, opts, dirNames));
+    }
+    return videos;
   });
 
   // 通用目录选择（「扫描目录」浏览按钮；title 可自定义）

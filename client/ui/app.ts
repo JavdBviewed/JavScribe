@@ -11,6 +11,8 @@ import type { JavExtractAPI } from "./extract";
 import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, isVramExcluded, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
 import { folderIsVideo, folderVideoMeta, type FolderScanRules } from "../core/folder-scan";
 import { pickWriteBackRows } from "../core/writeback";
+import { diskKeyOf } from "../core/disk-key";
+import { folderGroupLabel, groupByDisk, multiGroupLabel } from "../core/disk-split";
 import { buildDoneJobIndex, matchScanItem, type ReconcilableRow } from "../core/scan-reconcile";
 import { jobLabelMain, jobPrimaryName, matchJobSearch } from "../core/job-search";
 import { TransportError } from "../core/transport";
@@ -1751,6 +1753,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rel = f0.webkitRelativePath || "";
     if (rel.includes("/")) return rel.split("/")[0];
     return "文件夹";
+  }
+
+  // 0.2.52 M1：按盘拆 batch 的目录名口径（多组 label 用；单组维持 batchLabelForFolder/batchLabelForScan 不变）。
+  // 文件夹路径目录名 = webkitRelativePath 首段（原生选择 rel 以根目录名开头、webkitdirectory 输入
+  // 天然顶层目录名开头 → 两口径统一即「用户选的目录名」）；rel 缺失时退 _localPath 父目录名。
+  function folderFileDirName(f: FolderFile): string {
+    const rel = f.webkitRelativePath || "";
+    const segs = rel.split("/").filter(Boolean);
+    if (segs.length) return segs[0];
+    const lp = f._localPath || "";
+    const lsegs = lp.split(/[\\/]+/).filter(Boolean);
+    if (lsegs.length > 1) return lsegs[lsegs.length - 2];
+    return "文件夹";
+  }
+  // 扫描路径目录名 = 文件父目录名（平扫即扫描根目录名；多组仅跨挂载稀有情形）。
+  function scanPathDirName(p: string): string {
+    const segs = p.split(/[\\/]+/).filter(Boolean);
+    if (segs.length > 1) return segs[segs.length - 2];
+    if (segs.length === 1) return segs[0];
+    return "扫描目录";
   }
 
   function batchAgg(children: JobRow[]): { status: string; label: string; pct: number } {
@@ -3953,11 +3975,19 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const n = state.folderChecked.size;
     const nSub = items.filter(folderHasSub).length;
     const nSmall = items.filter((v) => v.too_small && !state.folderChecked.has(folderKey(v))).length;
+    // 0.2.52 M1：多目录选择（multiSelections / webkitdirectory 多顶层）→ chip 追加「· N 个目录」；
+    // 顶层目录 = webkitRelativePath 首段（原生选择与 webkitdirectory 同口径）
+    const tops = new Set(
+      items.map((v) => (v.file.webkitRelativePath || "").split("/").filter(Boolean)[0]).filter(Boolean),
+    );
+    const topN = tops.size;
+    const topNote = items.length && topN > 1 ? ` · ${topN} 个目录` : "";
     let text = items.length ? `已选 ${n} / ${items.length}` : "";
+    if (topNote) text += topNote;
     if (nSub) text += ` · ${nSub} 个已有字幕默认不勾选`;
     if (nSmall) text += ` · ${nSmall} 个过小未选`;
     $("folder-count").textContent = text;
-    $("folder-chip-text").textContent = items.length ? `已选 ${n} / ${items.length}` : "";
+    $("folder-chip-text").textContent = items.length ? `已选 ${n} / ${items.length}${topNote}` : "";
     // 「全选」只覆盖非「忽略」文件：too_small 只能手动勾选（与扫描表同口径）
     const selectable = items.filter((v) => !v.too_small).length;
     (document.getElementById("folder-select-all") as HTMLInputElement).checked =
@@ -4038,6 +4068,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const batchQueues = new Map<string, { cancel: () => number; onRowCancel: () => void; pause: () => void; resume: () => void }>();
   const pumpSlots = new Set<() => void>(); // 泵重触发槽（文件夹批量/扫描实时队列各占一槽；触发源=refresh 5s/链结算/设置保存）
   let singleQueuedFile: File | null = null;       // 等 cap 槽位的单文件（文件变更/重新派发即失效，身份匹配防误发）
+  // 0.2.52 M1：按盘拆组 → 一次提交可起多个 runDispatchQueue/runScanQueue（每组一泵）；
+  // busy 改引用计数：首个组进入置位、末个组退出复位（单组 = 与现状逐拍一致）。
+  let activeSubmitQueues = 0;
+  function enterSubmitQueue(): void {
+    activeSubmitQueues++;
+    if (activeSubmitQueues === 1) { state.busy = true; updateGo(); }
+  }
+  function exitSubmitQueue(): void {
+    activeSubmitQueues = Math.max(0, activeSubmitQueues - 1);
+    if (activeSubmitQueues === 0) { state.busy = false; updateGo(); }
+  }
 
   function inFlightOf(engine: string): number {
     let n = chainInFlight.get(engine) || 0;
@@ -4211,8 +4252,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     finishNote: (okN: number, total: number, canceledN: number) => string,
     afterDone: (okN: number) => void,
   ): void {
-    state.busy = true;
-    updateGo();
+    enterSubmitQueue(); // 0.2.52 M1：多组提交引用计数 busy（首个组进入置位）
     localStorage.setItem("javweb_engine", engine);
     const total = queue.length;
     const rowFirst = platform.kind === "desktop";
@@ -4232,6 +4272,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       showStatus(finishNote(okN, total, canceledN), okN ? "ok" : "err");
       afterDone(okN);
       refresh();
+      exitSubmitQueue(); // 0.2.52 M1：引用计数退出（末个组退出才复位 busy）
       // 行优先：提交时已切过一次任务看板，收尾不再抢视——用户可能已回派发页
       // 继续提交下一批（web 形态维持原行为）
       if (okN > 0 && !rowFirst) webShowView("jobs"); // web：批量完成进任务看板
@@ -4371,19 +4412,29 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       .map((v) => v.file);
     singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
     if (!queue.length) return;
-    // 主任务（batch）：同一文件夹提交共享 batch_id（单文件上传不套壳）
-    const batch = { id: genBatchId(), label: batchLabelForFolder() };
-    runDispatchQueue(
+    // 0.2.52 M1：按盘拆 batch——按 diskKeyOf(_localPath) 分组，每组独立 batch + 各自泵；
+    // 单组（web 形态无 _localPath 全空键 / 单目录选择）label 维持现状口径，零噪音。
+    const groups = groupByDisk(
       queue,
-      engine,
-      batch,
-      (okN, total, canceledN) => canceledN > 0
-        ? `批量已取消：已提交 ${okN}/${total} 项，${canceledN} 项已取消（未提交服务）`
-        : okN === total
-        ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
-        : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
-      () => finishBatch(),
+      (f) => diskKeyOf(f._localPath || ""),
+      folderFileDirName,
     );
+    const multi = groups.length > 1;
+    groups.forEach((g, gi) => {
+      const batch = { id: genBatchId(), label: folderGroupLabel(g, multi, batchLabelForFolder()) };
+      runDispatchQueue(
+        g.items,
+        engine,
+        batch,
+        (okN, total, canceledN) => canceledN > 0
+          ? `批量已取消：已提交 ${okN}/${total} 项，${canceledN} 项已取消（未提交服务）`
+          : okN === total
+          ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
+          : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
+        // 末组收尾清文件夹 UI（busy 由泵引用计数收口）；非末组空收尾
+        gi === groups.length - 1 ? () => finishBatch() : () => {},
+      );
+    });
   }
 
   // 清扫描 UI（三处统一入口：400 回退 / auto 提交 / scanSubmit 成功路径）
@@ -4440,11 +4491,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // 「扫描目录」400 回退：所选服务读不到本机路径（浏览器电脑的盘符路径）→ 本机提取后上传
-  function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string }) {
+  function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string },
+    meta?: Map<string, { name: string; size: number }>,
+  ) {
     const queue: FolderFile[] = files.map((p) => {
-      const it = state.scanItems.find((i) => i.path === p);
-      const f = new File([new Blob()], it ? it.name : p.split(/[\\/]/).pop() || p) as FolderFile;
-      if (it) Object.defineProperty(f, "size", { value: it.size, configurable: true });
+      // 0.2.52 M1：多组提交时第二组起 state.scanItems 已被首组 clearScanUi 清空 →
+      // 调用方预捕获的 name/size 优先（size 缺失会误导 effectiveMode 判 local）
+      const m = meta?.get(p);
+      const it = m ? undefined : state.scanItems.find((i) => i.path === p);
+      const f = new File([new Blob()], m ? m.name : (it ? it.name : p.split(/[\\/]/).pop() || p)) as FolderFile;
+      if (m || it) Object.defineProperty(f, "size", { value: m ? m.size : it!.size, configurable: true });
       f._localPath = p;
       return f;
     });
@@ -4460,9 +4516,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         ? `回退完成：本机提取上传已提交 ${okN}/${total} 项，见「字幕任务」`
         : `回退完成：成功 ${okN}/${total} 项，其余失败`,
       () => {
-        state.busy = false;
-        updateGo();
-        watchPump();
+        watchPump(); // 0.2.52 M1：busy 由泵引用计数收口（exitSubmitQueue），不再在此复位
       },
     );
   }
@@ -4501,20 +4555,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     engine: string,
     batch: { id: string; label: string },
     subStatus?: Record<string, string>,
+    meta?: Map<string, { name: string; size: number }>,
   ): void {
     // auto 无可用服务（全离线 / 无 Key / 全退出均衡）：不建主任务（与 0.2.46 前同口径）
     if (engine === "auto" && !scanAutoCandidates(new Set<string>()).length) {
       toast("自动均衡没有可用服务：全部离线，或都没有勾选「参与均衡」", "err");
       return;
     }
-    state.busy = true;
-    updateGo();
+    enterSubmitQueue(); // 0.2.52 M1：多组提交引用计数 busy（首个组进入置位）
     localStorage.setItem("javweb_engine", engine);
-    // 清扫描 UI 前捕获 name/size（clearScanUi 后 state.scanItems 为空，回退时不能再查）
+    // 清扫描 UI 前捕获 name/size（clearScanUi 后 state.scanItems 为空，回退时不能再查）；
+    // 0.2.52 M1：多组提交时第二组起 state.scanItems 已被首组清空 → 调用方预捕获的 meta 优先
     const queueFiles: FolderFile[] = files.map((p) => {
-      const it = state.scanItems.find((i) => i.path === p);
-      const name = it ? it.name : p.split(/[\\/]/).pop() || p;
-      return scanPathToFile(name, it ? it.size : 0, p);
+      const m = meta?.get(p);
+      const it = m ? undefined : state.scanItems.find((i) => i.path === p);
+      const name = m ? m.name : (it ? it.name : p.split(/[\\/]/).pop() || p);
+      return scanPathToFile(name, m ? m.size : (it ? it.size : 0), p);
     });
     const total = queueFiles.length;
     const pend = createPendingRows(batch, queueFiles, engine);
@@ -4559,8 +4615,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (canceledN) notes.push(`${canceledN} 项已取消（未提交服务）`);
       notes.push(...errors);
       toast(notes.length ? notes.join("；") : "无已入队项", okN > 0 ? "ok" : "err");
-      state.busy = false;
-      updateGo();
+      exitSubmitQueue(); // 0.2.52 M1：引用计数退出（替换原 busy 复位；单组行为一致）
       watchPump();
       refresh();
       webShowView("jobs");
@@ -6137,39 +6192,69 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const subStatus: Record<string, string> = {};
     for (const i of subItems) subStatus[i.path] = i.subtitle_status || "embedded";
     scanSubmit.disabled = true;
-    // 主任务（batch）：扫描提交恒生成（label=扫描目录名）；声明在 try 外——
-    // 400 回退 catch 里要复用同一 batch（回退不断父任务）
-    const batch = { id: genBatchId(), label: batchLabelForScan() };
+    // 0.2.52 M1：按盘拆 batch——按 diskKeyOf(扫描路径) 分组，每组独立 batch + 逐组提交/回退；
+    // 单组（Linux 单挂载常态）label 维持现状口径（扫描目录名），零噪音。
+    const groups = groupByDisk(files, (p) => diskKeyOf(p), scanPathDirName);
+    const multi = groups.length > 1;
+    // 分组循环前预捕获 name/size：runScanQueue 内部 clearScanUi 会清空 state.scanItems，
+    // 第二组起再查即空（size 丢失会误导 effectiveMode 判 local）
+    const fileMeta = new Map<string, { name: string; size: number }>();
+    for (const p of files) {
+      const it = state.scanItems.find((i) => i.path === p);
+      fileMeta.set(p, { name: it ? it.name : p.split(/[\\/]/).pop() || p, size: it ? it.size : 0 });
+    }
     try {
       if (platform.kind === "desktop") {
         // desktop（10-18-javscribe-0246 B）：auto / 显式引擎统一实时派发队列——提交时刻实时选机
-        //（受 queue_cap 闸），400 候选耗尽回退本机提取上传；主任务 + N 子行可暂停/取消
-        runScanQueue(files, engine, batch, subStatus);
+        //（受 queue_cap 闸），400 候选耗尽回退本机提取上传；主任务 + N 子行可暂停/取消。
+        // 0.2.52 M1：逐组起泵；400 回退 catch 按组复用本组 batch（回退不断父任务，不变式按组成立）
+        for (const g of groups) {
+          const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan() };
+          try {
+            runScanQueue(g.items, engine, batch, subStatus, fileMeta);
+          } catch (e) {
+            if (e instanceof TransportError && e.code === "not-found") {
+              toast(engine === "auto"
+                ? "所选服务读不到这些本机路径，已改为本机提取后上传（自动均衡分发）"
+                : "所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
+              dispatchLocalScanPaths(engine, g.items, batch, fileMeta);
+            } else {
+              throw e; // 非 400 异常：抛给外层 catch 统一 toast
+            }
+          }
+        }
         return;
       }
-      // web：原样透传（含 "auto"——工作台 v0.2.11+ 已支持 per-task auto，派发时刻 pick_engine）
-      const d = await t.submitScan(engine, files, subStatus, batch);
-      if (d.skipped && d.skipped.length) {
-        const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
-        toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
-      }
-      if (d.files > 0) {
-        // web 分支：desktop 路径已在上方 return，这里恒为 web 文案
-        toast(d.jobId
-          ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
-          : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进`, "ok");
+      // web：原样透传（含 "auto"——工作台 v0.2.11+ 已支持 per-task auto，派发时刻 pick_engine）；
+      // 0.2.52 M1：逐组透传（单挂载自然退化单组，行为不变）；400 回退按组复用本组 batch
+      for (const g of groups) {
+        const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan() };
+        try {
+          const d = await t.submitScan(engine, g.items, subStatus, batch);
+          if (d.skipped && d.skipped.length) {
+            const names = d.skipped.slice(0, 3).join("、") + (d.skipped.length > 3 ? ` 等 ${d.skipped.length} 项` : "");
+            toast(`已跳过 ${d.skipped.length} 个在跑/排队的重复任务：${names}`, "");
+          }
+          if (d.files > 0) {
+            toast(d.jobId
+              ? `已入队 ${d.files} 项 → 任务 ${d.jobId}`
+              : `已入队 ${d.files} 项（本机扫描）→ 任务表中跟进`, "ok");
+          }
+        } catch (e) {
+          if (e instanceof TransportError && e.code === "not-found") {
+            toast(engine === "auto"
+              ? "所选服务读不到这些本机路径，已改为本机提取后上传（自动均衡分发）"
+              : "所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
+            dispatchLocalScanPaths(engine, g.items, batch, fileMeta);
+            continue;
+          }
+          throw e;
+        }
       }
       clearScanUi();
       refresh();
       webShowView("jobs"); // 提交即进任务看板
     } catch (e) {
-      if (platform.kind === "desktop" && e instanceof TransportError && e.code === "not-found") {
-        toast(engine === "auto"
-          ? "所选服务读不到这些本机路径，已改为本机提取后上传（自动均衡分发）"
-          : "所选服务读不到这些本机路径，已改为本机提取后上传到该服务", "");
-        dispatchLocalScanPaths(engine, files, batch); // 复用主任务 batch：回退不断父任务（旧 bug：回退另起新 batch）
-        return;
-      }
       toast((e as Error).message, "err");
     } finally {
       updateScanSummary();
