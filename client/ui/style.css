@@ -602,12 +602,12 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
   display: grid;
   min-width: 1100px;
   /* 列宽（10-18 F2 调优；0.2.47 再收）：日期两列 150px 保证 19 字符 datetime（实测 143px）完整可读；
-     操作列定宽 174px（「换服务重跑+取消」组合 max-content 实测 168px）——
+     操作列定宽 190px（0.2.50：缩标签后最宽组合 = done 行 下载+预览+重跑，实测 183px）——
      原 minmax(74px, max-content) 随行内按钮数漂移，表头/表体模板不同步、视觉错位；
-     更宽组合（桌面 done 行 下载+预览+重跑=251px、改派 select）由 .job-actions flex-wrap 自行换行；
+     更宽组合（改派 select 等）由 .job-actions flex-wrap 自行换行；
      文件列 min 120→60（flex 弹性列，窄容器下限收，长名 ellipsis）+ 位置 64→60 / 耗时 60→56 + 列距 8→7：
-     最小内容 1069px —— web 容器 1102px（main max-width 1160）与桌面 1440 容器 1146px 均无横滚 */
-  grid-template-columns: 28px 92px minmax(60px, 1fr) 92px 112px 60px 56px 150px 150px 174px;
+     最小内容 1085px —— web 容器 1102px（main max-width 1160）与桌面 1440 容器 1146px 均无横滚 */
+  grid-template-columns: 28px 92px minmax(60px, 1fr) 92px 112px 60px 56px 150px 150px 190px;
   gap: 7px;
   align-items: center;
   padding: 11px 16px;
@@ -665,12 +665,12 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
   display: grid;
   min-width: 1100px;
   /* 列宽（10-18 F2 调优；0.2.47 再收）：日期两列 150px 保证 19 字符 datetime（实测 143px）完整可读；
-     操作列定宽 174px（「换服务重跑+取消」组合 max-content 实测 168px）——
+     操作列定宽 190px（0.2.50：缩标签后最宽组合 = done 行 下载+预览+重跑，实测 183px）——
      原 minmax(74px, max-content) 随行内按钮数漂移，表头/表体模板不同步、视觉错位；
-     更宽组合（桌面 done 行 下载+预览+重跑=251px、改派 select）由 .job-actions flex-wrap 自行换行；
+     更宽组合（改派 select 等）由 .job-actions flex-wrap 自行换行；
      文件列 min 120→60（flex 弹性列，窄容器下限收，长名 ellipsis）+ 位置 64→60 / 耗时 60→56 + 列距 8→7：
-     最小内容 1069px —— web 容器 1102px（main max-width 1160）与桌面 1440 容器 1146px 均无横滚 */
-  grid-template-columns: 28px 92px minmax(60px, 1fr) 92px 112px 60px 56px 150px 150px 174px;
+     最小内容 1085px —— web 容器 1102px（main max-width 1160）与桌面 1440 容器 1146px 均无横滚 */
+  grid-template-columns: 28px 92px minmax(60px, 1fr) 92px 112px 60px 56px 150px 150px 190px;
   gap: 7px;
   padding: 0 16px 6px;
   font-size: 10.5px;
@@ -784,9 +784,10 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 }
 .dl-btn:hover { box-shadow: 0 3px 10px -3px var(--ok); }
 .dl-btn:active { transform: scale(0.96); }
+.dl-btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 
 .job-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; row-gap: 6px; }
-/* 按钮不压缩：窄列（1440 操作列 ~174px）下换行而非挤成竖排/溢出盖住相邻「完成于」列 */
+/* 按钮不压缩：窄列（1440 操作列 190px）下换行而非挤成竖排/溢出盖住相邻「完成于」列 */
 .job-actions > * { flex: 0 0 auto; }
 /* 「⏸ 暂停」（行级挂起排队任务）：中性灰，区别于绿色下载键 */
 .dl-btn.pause-job { border-color: var(--pause); color: var(--pause); background: var(--pause-soft); }

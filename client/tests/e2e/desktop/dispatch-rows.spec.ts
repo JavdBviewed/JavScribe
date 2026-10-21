@@ -186,7 +186,7 @@ test("批量本机提取回退（行优先）：提交即建主任务+3 子行 �
     const { dup, pos, seen } = await readSampler(page);
     expect(pos.some((t) => /^排队提取$/.test(t))).toBe(true);
     expect(pos.some((t) => /^本机提取 · \d+%$/.test(t))).toBe(true);
-    expect(pos.some((t) => /^上传音频 .+ MB · [\d.]+%$/.test(t))).toBe(true);
+    expect(pos.some((t) => /^上传音频 \d+ (?:B|KB|MB) \/ \d+ (?:B|KB|MB) · [\d.]+%$/.test(t))).toBe(true);
     expect(pos.some((t) => /^提交中…$/.test(t))).toBe(true);
     // 「已入队」与「交棒」是同一件事的两种落法：refresh 落在 提交中→job_id 那一拍窗内，
     // pending 行不留「已入队」帧，直接让位给 serve 真行（ serve 侧已收满 3 项即算到达）。

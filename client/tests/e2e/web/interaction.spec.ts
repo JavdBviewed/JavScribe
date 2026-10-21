@@ -156,7 +156,7 @@ test("单文件本地提音轨全流程：chip → 三步动画 → 完成 → �
   await expect(page.locator("#step-extract .step-name")).toHaveText("上传音频");
   // 「浏览器本地提取 · N%」是瞬态（小文件 <1s 提完，轮询抓不到），只断言终态
   await expect(page.locator("#step-upload.done")).toBeVisible({ timeout: 90_000 });
-  await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ MB/ })).toBeVisible();
+  await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ (?:B|KB|MB)/ })).toBeVisible();
   await expect(page.locator("#line-1.on")).toHaveCount(1);
 
   // 3. 音频上传 + 提交（「上传音频 X / Y MB」也是瞬态，断言终态）

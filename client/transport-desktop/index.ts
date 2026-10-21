@@ -163,7 +163,7 @@ export const desktopTransport: Transport = {
   async uploadAudio(file, engine, audio, onProgress, batch) {
     const b = audio as Blob & { _javOpusPath?: string; _javOpusSize?: number };
     const extra: Partial<UploadStatus> = b._javOpusSize != null
-      ? { audio_mb: Math.round(b._javOpusSize / 1048576) }
+      ? { audio_mb: b._javOpusSize / 1048576 }
       : {};
     const bArgs = batchArgs(batch);
     return dispatchUpload(file, engine, async (id) => {

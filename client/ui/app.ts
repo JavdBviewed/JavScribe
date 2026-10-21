@@ -286,7 +286,21 @@ function fmtJobDateTime(value: number | string | null | undefined): string {
     + `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
-function mb(b: number): number { return Math.round(b / 1048576); }
+/** 人类可读尺寸（F6：原 mb() 四舍五入，<1MB 一律显「0 MB」）：B / KB / MB(整数) / GB(1 位) */
+function fmtSize(b: number): string {
+  const n = isFinite(b) && b >= 0 ? b : 0;
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1048576) return `${Math.round(n / 1024)} KB`;
+  if (n < 1073741824) return `${Math.round(n / 1048576)} MB`;
+  return `${(n / 1073741824).toFixed(1)} GB`;
+}
+/** MB 精度尺寸的展示：服务端 audio_mb/size_mb 按 0.1MB（web）或 1MB（desktop 旧口径）舍入，
+ *  小文件会舍成 0.0（非 null）——直接换字节会误显「0 B」→ 统一兜底「<1 MB」（真上界，两种口径都成立） */
+function mbText(mb: number | null | undefined): string {
+  if (mb == null) return "";
+  if (mb <= 0) return "<1 MB";
+  return fmtSize(mb * 1048576);
+}
 
 // 下载/写回统一命名：<源视频名>.zh.srt（与服务端落盘、写回源目录一致）
 // 优先用 label（上传时 X-Source-Name 的原始视频名；扫描任务 label 为「文件夹扫描 · N 项」，退回 file 路径）。
@@ -1321,10 +1335,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 服务单任务挂起：行 status 仍是 pending，展示态归一为「已暂停」
     const st = j.paused ? "paused" : j.status;
     const paused = st === "paused";
-    // 位置列：运行中/已暂停显示当前处理阶段（服务端日志事件驱动），终态显示时间轴位置
+    // 位置列：运行中/已暂停显示当前处理阶段（服务端日志事件驱动）；
+    // 终态（done/skipped/canceled）不显陈旧时间轴位置（F2：「position / duration」在 60px 列折 2 行）；
+    // error 保留失败位置（排障价值）；文本位置（「已跳过（主任务取消）」等，无 duration_s）原样保留
+    const posPair = j.duration_s != null && j.position
+      ? `${j.position} / ${fmtDuration(j.duration_s)}` : "";
     const pos = isRun || paused
       ? (j.phase_detail || (paused ? "已暂停（等待继续）" : "—"))
-      : (j.duration_s != null && j.position ? `${j.position} / ${fmtDuration(j.duration_s)}` : (j.position || "—"));
+      : (posPair && (j.status === "done" || j.status === "skipped" || j.status === "canceled")
+        ? "—" : (posPair || j.position || "—"));
     const createdSeconds = timestampSeconds(j.created);
     const finishedSeconds = timestampSeconds(j.finished);
     const elapsed = createdSeconds != null
@@ -1352,11 +1371,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       : j.status === "skipped" && j.message ? j.message
       : (!labelMain && j.message) ? j.message : "";
     const dl = j.status === "done" && j.job_id
-      ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}">&#8595; 下载 srt</a>`
+      ? `<a class="dl-btn" href="${t.getResultUrl(j.engine, j.job_id)}" download="${esc(srtNameFor(j))}" title="下载生成的字幕（.srt）">&#8595; 下载</a>`
       : "";
     // 预览：done 且有任务 id → 走 result 端点拉内容（本地扫描/远端任务通用）
     const pv = j.status === "done" && j.job_id
-      ? `<button type="button" class="srt-pv" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="预览生成的字幕（时间轴 + 全文）">预览 srt</button>`
+      ? `<button type="button" class="srt-pv" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" title="预览生成的字幕（时间轴 + 全文）">预览</button>`
       : "";
     // 本地扫描任务：工作台本机字幕回写状态（ok / skipped_exists / skipped / failed:…）
     const WB_TAG: Record<string, string> = { ok: "已落回本机", skipped_exists: "字幕已存在，未覆盖", skipped: "生成被跳过" };
@@ -1382,7 +1401,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const jobActive = isServeRow && state._jobActive.get(retryKey) === true;
     // 跳过（服务行）：删旧字幕重新生成
     const retry = isServeRow && j.status === "skipped" && !state.retried.has(retryKey)
-      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" data-mode="regen" title="删除已存在字幕并重新生成">&#8635; 仍要重新生成</button>`
+      ? `<button type="button" class="dl-btn retry" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id)}" data-mode="regen" title="删除已存在字幕并重新生成">&#8635; 仍要生成</button>`
       : (isServeRow && j.status === "skipped" ? `<span class="retried-note">已重新提交</span>` : "");
     // 失败（服务行，serve 0.2.3+）：直接重新入队，不删已生成字幕
     const srvRetry = isServeRow && j.status === "error" && !state.retried.has(retryKey)
@@ -1425,7 +1444,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rerunBtn = (platform.kind === "desktop" && j.file && !isPendingRow && !isGhost
       && j.local !== false
       && ((j.status === "done" || j.status === "error" || j.status === "skipped") || rerunNonTerminal))
-      ? `<button type="button" class="dl-btn rerun" data-file="${esc(primary)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" data-status="${esc(st)}" title="${rerunNonTerminal ? "先取消原服务上的任务（排队中立即终止；运行中检查点中止，已生成字幕保留），再复用本地音轨缓存提交到另一个服务端" : "复用该影片的本地音轨缓存，选择另一个服务端重新提交"}">&#8644; 换服务重跑</button>`
+      ? `<button type="button" class="dl-btn rerun" data-file="${esc(primary)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" data-status="${esc(st)}" title="${rerunNonTerminal ? "先取消原服务上的任务（排队中立即终止；运行中检查点中止，已生成字幕保留），再复用本地音轨缓存提交到另一个服务端" : "复用该影片的本地音轨缓存，选择另一个服务端重新提交"}">&#8644; 重跑</button>`
       : "";
     // 行优先 pending 子行（未开始、未提交服务）：单行取消 = 不进队列、不占在途（链已开跑不给按钮）
     const pendCancel = pendQueued
@@ -1511,8 +1530,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           status = "error";
           // 行优先：整批都没提交成功（取消 + 主任务取消跳过的链）= 主任务「已取消」；
           // 混有真失败仍是「完成（部分失败）」
+          // F1：「完成（部分失败）」pill ~119px 溢出 92px 状态列叠压进度条 → 缩短 label，完整语义进 pill title
           label = children.every((j) => j.status === "canceled" || j.status === "skipped")
-            ? "已取消" : "完成（部分失败）";
+            ? "已取消" : "部分失败";
         }
       } else {
         status = "pending";
@@ -1536,13 +1556,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   ): string {
     const timeTitle = (created ? `开始 ${fmtJobDateTime(created)}` : "")
       + (finished ? ` · 完成 ${fmtJobDateTime(finished)}` : "");
+    // F1：label 缩短后完整语义进 pill title（hover 可见）
+    const pillTitle = agg.label
+      ? (agg.label === "已取消" ? "整批已取消：子任务未开始或被终止" : "整批结束：部分子任务失败或取消，其余完成")
+      : "";
     return `
       <button type="button" class="batch-caret" data-bid="${esc(g.bid)}" title="${collapsed ? "展开子任务" : "收起子任务"}">${collapsed ? "&#9656;" : "&#9662;"}</button>
       <div class="job-cell mono batch-sub-n">${g.children.length} 子任务</div>
       <div class="job-name"><div class="fn">${esc(label)}</div>${g.stale ? '<div class="sub">子任务已过期（记录保留）</div>' : ""}</div>
-      <div><span class="pill p-${esc(agg.status)}"><i></i>${esc(agg.label || STATUS_ZH[agg.status] || agg.status)}</span></div>
+      <div><span class="pill p-${esc(agg.status)}"${pillTitle ? ` title="${esc(pillTitle)}"` : ""}><i></i>${esc(agg.label || STATUS_ZH[agg.status] || agg.status)}</span></div>
       <div class="prog"><div class="bar${agg.status === "running" ? " live" : ""}"><div style="width:${agg.pct}%"></div></div><span class="pct mono">${agg.pct}%</span></div>
-      <div class="job-cell mono cell-pos cell-bt"${timeTitle ? ` title="${esc(timeTitle)}"` : ""}>${created ? (fmtJobDateTime(created).split(" ")[1] || "—") : "—"}</div>
+      <div class="job-cell mono cell-pos cell-bt"${timeTitle ? ` title="${esc(timeTitle)}"` : ""}>—</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
       <div class="job-cell mono cell-created">${created ? esc(fmtJobDateTime(created)) : "—"}</div>
       <div class="job-cell mono cell-finished${agg.status === "done" && finished ? " is-done" : ""}">${finished ? esc(fmtJobDateTime(finished)) : "—"}</div>
@@ -1762,7 +1786,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   /** 服务端提取阶段收尾文案（与原 markExtractDone 一致） */
   function extractDoneMeta(audioMb: number | null | undefined): string {
-    return audioMb != null ? `音频 ${audioMb} MB` : "音频提取完成";
+    return audioMb != null ? `音频 ${mbText(audioMb)}` : "音频提取完成";
   }
 
   const STEP_IDS = ["step-upload", "step-extract", "step-dispatch"];
@@ -2653,6 +2677,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   const BULK_ACT_ZH: Record<string, string> = { pause: "暂停", resume: "继续", retry: "重试", cancel: "取消", assign: "改派" };
 
+  /** F4：批量操作可用性 = 选中行中至少一行可操作（口径与服务端 api_jobs_bulk 逐条语义一致；
+   *  不可操作行仍会逐条失败提示，不拖垮整批）。旧行为 5 按钮恒启用 → 点了必弹「暂无可操作任务」 */
+  function bulkActEnabled(): Record<"pause" | "resume" | "retry" | "cancel" | "assign", boolean> {
+    const en = { pause: false, resume: false, retry: false, cancel: false, assign: false };
+    for (const r of state._jobs) {
+      if (!state.selected.has(jobKey(r))) continue;
+      if (r.job_id) {
+        // 服务行：挂起仅限排队中；恢复仅限已挂起；重试=失败/跳过；取消=排队/运行中
+        if (!r.paused && r.status === "pending") en.pause = true;
+        if (r.paused) en.resume = true;
+        if (r.status === "error" || r.status === "skipped") en.retry = true;
+        if (!r.paused && (r.status === "pending" || r.status === "running")) en.cancel = true;
+      } else if (r.task_id) {
+        // 本机管线行：暂停=进行中；继续/重试=暂停/失败；改派=排队/已暂停（未提交服务）
+        if (r.status === "running") en.pause = true;
+        if (r.status === "paused" || r.status === "error") { en.resume = true; en.retry = true; }
+        if (r.phase === "queued" || r.phase === "paused") en.assign = true;
+      }
+    }
+    return en;
+  }
+
   function renderBulkBar() {
     const bar = $("job-bulk-bar");
     const n = state.selected.size;
@@ -2670,6 +2716,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         sel.innerHTML = `<option value="auto">⚖ 自动均衡（实时选最闲）</option>`
           + opts.map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${e.online ? "" : "（离线）"}</option>`).join("");
       }
+    }
+    // F4：按选中行状态启用/禁用（renderJobs 尾部恒调本函数，数据刷新后自动同步）
+    const en = bulkActEnabled();
+    for (const b of Array.from(bar.querySelectorAll<HTMLButtonElement>(".bulk-act"))) {
+      b.disabled = !en[b.dataset.act as keyof typeof en];
     }
   }
 
@@ -3033,9 +3084,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (!e.is_dir && e.size_mb != null) {
           const sz = document.createElement("span");
           sz.className = "dir-size";
-          sz.textContent = e.size_mb >= 1024
-            ? (e.size_mb / 1024).toFixed(1) + " GB"
-            : e.size_mb.toFixed(1) + " MB";
+          sz.textContent = fmtSize(e.size_mb * 1048576);
           row.appendChild(sz);
         }
         if (e.is_dir) {
@@ -3187,7 +3236,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       `<span class="srt-stat">起始 <b class="mono">${fmtSrtTime(first)}</b></span>` +
       `<span class="srt-stat">结束 <b class="mono">${fmtSrtTime(last)}</b></span>` +
       `<span class="srt-stat">跨 <b class="mono">${fmtSrtSpan(last - first)}</b></span>` +
-      (sizeMb != null ? `<span class="srt-stat">文件 <b class="mono">${sizeMb.toFixed(2)} MB</b></span>` : "");
+      (sizeMb != null ? `<span class="srt-stat">文件 <b class="mono">${mbText(sizeMb)}</b></span>` : "");
     // 时间轴：cue 段纯视觉（密集时仅 1-2px，无独立点击面）；交互挂在轨道上——
     // 悬停显示时间游标 + tooltip，点击按横坐标反查 cue（命中优先、就近兜底 ≤5s）
     srtCues = cues;
@@ -3321,8 +3370,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // 提取阶段收尾（轮询可能跳过 extracting 直接到 dispatching/done，需兜底补齐）
   function markExtractDone(audioMb: number | null | undefined) {
-    setStep("step-extract", "done", "\u2713",
-      audioMb != null ? `音频 ${audioMb} MB` : "音频提取完成");
+    setStep("step-extract", "done", "\u2713", extractDoneMeta(audioMb));
     line2.classList.add("on");
   }
 
@@ -3345,7 +3393,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (state.folderFiles) clearFolder();
     $("file-chip").hidden = false;
     $("chip-name").textContent = f.name;
-    $("chip-size").textContent = mb(f.size) + " MB";
+    $("chip-size").textContent = fmtSize(f.size);
     drop.classList.add("has-file");
     resetPipeline();
     updateGo();
@@ -3494,7 +3542,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             <tr class="${folderHasSub(v) ? "has-sub" : ""}${v.too_small ? " too-small" : ""}">
               <td class="col-check"><input type="checkbox" data-key="${esc(folderKey(v))}"${state.folderChecked.has(folderKey(v)) ? " checked" : ""}></td>
               <td class="scan-name mono" title="${esc(folderKey(v))}">${esc(v.file.name)}${v.too_small ? '<span class="tag tinytag" title="低于「忽略小于」阈值，不默认选中；可手动勾选提交">过小</span>' : ""}</td>
-              <td class="mono">${mb(v.file.size)} MB</td>
+              <td class="mono">${fmtSize(v.file.size)}</td>
               <td class="col-sub">${folderSubCell(v)}</td>
             </tr>`).join("")}
         </tbody>
@@ -4414,12 +4462,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const s = sink || pipelineSink();
     return new Promise<[boolean, UploadStatus]>((resolve) => {
       t.uploadAudio(f, engine, blob, (loaded, total, pct) => {
-        s.stage(2, `${prefix}上传音频 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`, pct / 100, pct + "%");
+        s.stage(2, `${prefix}上传音频 ${fmtSize(loaded)} / ${fmtSize(total)} · ${pct.toFixed(1)}%`, pct / 100, pct + "%");
       }, batch).then((d) => {
         if (d.ok) {
           // 提交前取消闸：上传完成后主任务已取消 → 服务侧不再建 job
           if (s.abort()) { resolve([false, { error: "主任务已取消，未提交服务" } as UploadStatus]); return; }
-          s.stageDone(2, d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}音频 ${d.sizeMb} MB 已接收`);
+          s.stageDone(2, d.cached ? `${prefix}服务端已缓存，免上传` : `${prefix}音频 ${fmtSize(blob.size)} 已接收`);
           s.stage(3, "提交中…", 1, "100%");
           pollUpload(d.uploadId, engine, prefix, resolve, s);
         } else {
@@ -4436,7 +4484,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const prefix = labelPrefix || "";
     return new Promise<DispatchOutcome>((resolve) => {
       t.uploadFile(f, engine, (loaded, total, pct) => {
-        s.stage(1, `${prefix}${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`, pct / 100, pct + "%");
+        s.stage(1, `${prefix}${fmtSize(loaded)} / ${fmtSize(total)} · ${pct.toFixed(1)}%`, pct / 100, pct + "%");
       }, batch).then((d) => {
         if (d.ok) {
           // 提交前取消闸：整片上传完成后主任务已取消 → 服务侧不再提取提交
@@ -4493,7 +4541,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             s.mode("server");
             return serverUpload(f, engine, prefix, batch, s);
           }
-          s.stageDone(1, `${prefix}本地提取完成 · 音频 ${mb(r.size)} MB`);
+          s.stageDone(1, `${prefix}本地提取完成 · 音频 ${fmtSize(r.size)}`);
           // 主任务取消闸门：本机提取（或整片上传前的回退判定）跑完即止，不再提交服务
           if (s.abort()) return [false, { error: "主任务已取消，未提交服务" }];
           // 主任务暂停闸门：提取完成时仍在暂停 → 音频上传前冻结（行显「已暂停」），「继续」后放行
@@ -4591,7 +4639,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const nonTerminal = !!curJobId && (curStatus === "pending" || curStatus === "running" || curStatus === "paused");
     const cands = (state.engines || []).filter((e) => e.name !== curEngine && e.online);
     const statusHtml = hit.opusValid
-      ? `<div class="set-note">音轨缓存命中：<b>${mb(hit.audioBytes)} MB</b>·来源 ${esc(hit.videoPath)}</div>`
+      ? `<div class="set-note">音轨缓存命中：<b>${fmtSize(hit.audioBytes)}</b>·来源 ${esc(hit.videoPath)}</div>`
       : `<div class="set-note">无有效音轨缓存（源视频已变更）。源视频在本机，将重新提取音轨后提交。</div>`;
     if (!cands.length) {
       body.innerHTML = statusHtml + '<div class="set-note err">没有其他在线服务可选（仅登记了本行服务，或其他服务均离线）</div>';
@@ -4671,7 +4719,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         // 预登记：上传请求发出前先持久化登记（job 出具后 rekey 正式键）
         registerWriteBack(preKeyOf(eng, videoName), { engine: eng, videoName, dirHandle: null, videoPath: h.videoPath });
         const d = await t.uploadAudio(upFile, eng, audio, (loaded, total, pct) => {
-          prog.textContent = `上传音轨 ${mb(loaded)} / ${mb(total)} MB · ${pct.toFixed(1)}%`;
+          prog.textContent = `上传音轨 ${fmtSize(loaded)} / ${fmtSize(total)} · ${pct.toFixed(1)}%`;
         });
         if (!d.ok) throw new Error(d.error || "音频上传失败");
         if (d.cached) prog.textContent = "服务端已缓存，免上传";
@@ -5599,7 +5647,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             <tr class="${i.has_subtitle ? "has-sub" : ""}${i.too_small ? " too-small" : ""}">
               <td class="col-check"><input type="checkbox" data-path="${esc(i.path)}"${state.scanChecked.has(i.path) ? " checked" : ""}></td>
               <td class="scan-name mono" title="${esc(i.path)}">${esc(i.name)}${i.too_small ? '<span class="tag tinytag" title="低于「忽略小于」阈值，不默认选中；可手动勾选提交">过小</span>' : ""}</td>
-              <td class="col-size mono muted">${mb(i.size)} MB</td>
+              <td class="col-size mono muted">${fmtSize(i.size)}</td>
               <td class="col-sub">${subCell}</td>
             </tr>`;
           }).join("")}

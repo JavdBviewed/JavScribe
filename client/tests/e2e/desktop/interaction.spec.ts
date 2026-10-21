@@ -29,7 +29,7 @@ test("单文件全流程（auto→本机提取）：chip → 三步动画 → �
   await expect(page.locator("#sec-jobs")).toHaveClass(/view-on/);
   await goView(page, "dispatch");
   await expect(page.locator("#step-upload.done")).toBeVisible();
-  await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ MB/ })).toBeVisible();
+  await expect(page.locator("#meta-upload", { hasText: /本地提取完成 · 音频 \d+ (?:B|KB|MB)/ })).toBeVisible();
   await expect(page.locator("#step-extract.done")).toBeVisible();
   await expect(page.locator("#step-dispatch.done")).toBeVisible();
   await expect(page.locator("#meta-dispatch", { hasText: /^任务 [\w-]+$/ })).toBeVisible();

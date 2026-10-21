@@ -156,7 +156,7 @@ function makeTask(path, opts = {}) {
     message: opts.message || "",
     duration_s: opts.duration_s ?? 120,
     position_s: null,
-    position: "",
+    position: opts.position ?? "",
     output_files: opts.output_files || [],
     started: opts.started ?? Date.now() / 1000,
     finished: opts.finished ?? null,
@@ -352,12 +352,15 @@ const server = http.createServer((req, res) => {
       if (sub === "seed") {
         return readBody().then((b) => {
           // 前 skipped 个 skipped、再 errors 个 error、再 pending 个 pending、其余 status
-          const { n = 25, status = "done", skipped = 0, errors = 0, pending = 0, progress = 0 } = b ? JSON.parse(b) : {};
+          const { n = 25, status = "done", skipped = 0, errors = 0, pending = 0, progress = 0,
+                  position = "", paused = 0, batch_id = null, batch_label = null } = b ? JSON.parse(b) : {};
             const batch = ++state.seedSeq;
           for (let i = 0; i < n; i++) {
-            const st = i < skipped ? "skipped"
-              : i < skipped + errors ? "error"
-              : i < skipped + errors + pending ? "pending"
+            // 0.2.50：paused 个（排队+挂起）优先，再 skipped/errors/pending，其余 status
+            const st = i < paused ? "pending"
+              : i < paused + skipped ? "skipped"
+              : i < paused + skipped + errors ? "error"
+              : i < paused + skipped + errors + pending ? "pending"
               : status;
             const t = makeTask(`/media/jav/seed-${String(i + 1).padStart(3, "0")}.mp4`, {
               status: st, progress: st === "done" ? 1 : (st === "running" ? progress : 0),
@@ -367,8 +370,10 @@ const server = http.createServer((req, res) => {
               output_files: st === "done" ? [`/mock/out/seed-${String(i + 1).padStart(3, "0")}.zh.srt`] : [],
               message: st === "skipped" ? "字幕已存在 /media/jav/seed-x.zh.srt"
                 : st === "error" ? "转写失败（mock）：模拟的推理错误" : "",
+              position: position || "",
             });
-            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${batch}-${String(i + 1).padStart(3, "0")}` });
+            const j = jobOf([t], { source_kind: "watch", label: `监听目录 · seed-${i + 1}`, id: `20260905-seed-${batch}-${String(i + 1).padStart(3, "0")}`, batch_id, batch_label });
+            if (i < paused) j.paused = true;
             // 确定性 created（间隔 60s，seed-n 最新）：created 降序的分页断言不依赖真实毫秒
             j.created = Date.now() / 1000 - (n - i) * 60;
           }
