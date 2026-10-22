@@ -108,14 +108,21 @@ export class ExtractAbortError extends Error {
 
 /**
  * 池任务钩子：onQueue = 入队等槽时回调一次（ahead=前方等待数，UI 展示「提取排队（前方 N）」）；
- * onStart = 拿到槽、task 真正执行前回调（UI 从「排队」切「执行中」，状态与真实并发对齐）。
+ * onStart = 拿到槽、task 真正执行前回调（UI 从「排队」切「执行中」，状态与真实并发对齐）；
+ * groupKey = 可选分组键（0.2.52 M2 按盘公平准入：文件所在盘，diskKeyOf 口径）。
  */
 export interface PoolHooks {
   onQueue?: (ahead: number) => void;
   onStart?: () => void;
+  /** 可选分组键（0.2.52 M2 按盘公平准入：文件所在盘，diskKeyOf 口径；空串/缺省 = 无盘维度独立组） */
+  groupKey?: string;
 }
 
-/** 可 resize 工作池：limit 每次获取时现读（热重载），FIFO，调大唤醒等待者，调小不中断在跑者。 */
+/** 可 resize 工作池：limit 每次获取时现读（热重载），FIFO，调大唤醒等待者，调小不中断在跑者。
+ * 分组准入（groupKey，可选）：有空闲槽时先为「在跑=0 且在队>0」的每组各放 1 个（保底 1 硬编码，
+ * 不加新配置项），剩余槽按原 FIFO 补——防单盘独占多槽、他盘等待者饥饿（0.2.52 M2）；
+ * 全局 limit 上限与任务最终状态/结果均不变；不传 groupKey 的调用方行为与改动前逐字节一致。
+ */
 export interface WorkerPool {
   run<T>(task: () => Promise<T>, hooks?: PoolHooks): Promise<T>;
   /** 换 limit 读数函数（app 注入 state.ccfg 实时读者；注入后旧读者作废）。 */
@@ -129,24 +136,38 @@ export interface WorkerPool {
 export function createPool(limitOf: () => number): WorkerPool {
   let reader = limitOf;
   let active = 0;
-  const waiters: Array<() => void> = [];
+  const waiters: Array<{ res: () => void; key: string }> = []; // key=""=无盘维度（独立组）
+  const groupActive = new Map<string, number>(); // 各组在跑计数（含 "" 组）
+  const bumpGroup = (key: string, d: number): void => {
+    const n = (groupActive.get(key) || 0) + d;
+    if (n <= 0) groupActive.delete(key);
+    else groupActive.set(key, n);
+  };
   const limit = (): number => {
     const n = Math.trunc(Number(reader()));
     return Number.isFinite(n) && n >= 1 ? n : 2; // 脏读数（NaN/负/0）防御：回落默认 2
   };
   const tryWake = (): void => {
     while (waiters.length > 0 && active < limit()) {
-      const w = waiters.shift()!;
+      // 组保底：按队列顺序找最早一个「本组在跑=0」的等待者（每组各 1 个，多组抢槽 FIFO 决胜）；
+      // 无合格组（各组都有在跑者）→ 原 FIFO 补，恒有进展不饿死
+      let idx = -1;
+      for (let i = 0; i < waiters.length; i++) {
+        if (!(groupActive.get(waiters[i].key) || 0)) { idx = i; break; }
+      }
+      const w = idx >= 0 ? waiters.splice(idx, 1)[0] : waiters.shift()!;
       active += 1;
-      w();
+      bumpGroup(w.key, 1);
+      w.res();
     }
   };
   return {
     run<T>(task: () => Promise<T>, hooks?: PoolHooks): Promise<T> {
+      const key = typeof hooks?.groupKey === "string" ? hooks.groupKey : "";
       const acquired = active < limit()
-        ? ((active += 1), Promise.resolve())
+        ? ((active += 1), bumpGroup(key, 1), Promise.resolve())
         : new Promise<void>((res) => {
-          waiters.push(res);
+          waiters.push({ res, key });
           hooks?.onQueue?.(waiters.length - 1);
         });
       return acquired.then(async () => {
@@ -155,6 +176,7 @@ export function createPool(limitOf: () => number): WorkerPool {
           return await task();
         } finally {
           active -= 1;
+          bumpGroup(key, -1);
           tryWake();
         }
       });

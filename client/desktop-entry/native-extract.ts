@@ -8,6 +8,7 @@
 import type { ExtractHooks, ExtractOpts, JavExtractAPI } from "../ui/extract";
 import type { JavDesktop } from "../core/desktop-bridge";
 import { CLIENT_CFG_DEFAULTS, createPool, ExtractAbortError } from "../core/concurrency";
+import { diskKeyOf } from "../core/disk-key";
 
 const desktop: JavDesktop = (window as unknown as { javDesktop: JavDesktop }).javDesktop;
 
@@ -30,6 +31,10 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
   if (f.size > MAX_BYTES) return Promise.resolve({ skipped: true } as const);
   const o = (typeof opts === "function" ? { onProgress: opts } : opts) as ExtractHooks | undefined;
   const id = genExtId();
+  // 本机路径在入队前定稿（池分组键 groupKey 要用；desktop.filePath 为同步桥接，提前解析无副作用）
+  const localPath = (f as File & { _localPath?: string })._localPath || desktop.filePath(f);
+  // 0.2.52 M2：按盘公平准入——同盘文件不独占全部提取槽（保底 1/盘）；无本机路径 → ""（无分组，纯 FIFO）
+  const groupKey = diskKeyOf(localPath);
   const run = async (): Promise<Blob> => {
     // 池拿到槽、执行前：中止闸（主任务取消）→ 不起 ffmpeg
     if (o?.isAborted?.()) throw new ExtractAbortError();
@@ -38,7 +43,6 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
       await o.waitReady();
       if (o?.isAborted?.()) throw new ExtractAbortError();
     }
-    const localPath = (f as File & { _localPath?: string })._localPath || desktop.filePath(f);
     activeExtracts.set(localPath || f.name, { id });
     try {
       const res = localPath
@@ -57,7 +61,7 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
       activeExtracts.delete(localPath || f.name);
     }
   };
-  return pool.run(run, { onQueue: o?.onQueue, onStart: o?.onStart }) as Promise<Blob | { skipped: true }>;
+  return pool.run(run, { onQueue: o?.onQueue, onStart: o?.onStart, groupKey }) as Promise<Blob | { skipped: true }>;
 }
 
 const api: JavExtractAPI = {
