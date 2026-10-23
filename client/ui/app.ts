@@ -2280,7 +2280,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
     renderFilterBar(rows2);
     renderSourceFilter(rows2);
-    renderPauseAllBtn();
+    renderPauseAllBtn(rows2);
     renderClearDoneBtn();
 
     // 单任务挂起可用性：同任务任一文件运行中 → 服务侧拒绝挂起（409），行级「暂停」隐藏
@@ -2924,11 +2924,15 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // ---------- 全局暂停 / 继续（web 工作台：本机管线闸 + 各在线服务队列代理） ----------
   // 按钮显隐跟随 transport 能力（desktop 形态无 /api/pause → 恒隐藏，像素不变）
-  function renderPauseAllBtn() {
+  function renderPauseAllBtn(rows: JobRow[]) {
     const btn = $("job-pause-all") as HTMLButtonElement;
     if (!t.pauseAll) { btn.hidden = true; return; }
     // 无在途任务（运行中/排队中/已暂停）→ 隐藏：空列表或全终态时无暂停对象
-    const hasActive = state._jobs.some(
+    // F-12（0.2.55）：判定行集对齐看板展示行集 rows2（serve 行 + 本机 pending 子行 + 账本行 + ghost 行），
+    // 不再 state._jobs —— 桌面形态 state._jobs 仅 serve 行，本机提取/派发中的子行只活在 state._pending；
+    // 旧口径「只看 serve 行」：批次处在本机提取/上传阶段（serve 行未生成）时「暂停所有」被误隐藏，
+    // 用户在最高频的暂停窗口（提交/提取进行中）找不到入口（「暂停没效果」的另一变体）。
+    const hasActive = rows.some(
       (r) => r.status === "running" || r.status === "pending" || r.status === "paused" || r.paused,
     );
     if (!hasActive) { btn.hidden = true; return; }

@@ -141,3 +141,74 @@ test("F-10：派发在途期「暂停所有」保持可用（不受 busy 门控�
   await expect(btn).toBeVisible({ timeout: 10_000 });
   await expect(btn).toBeEnabled({ timeout: 15_000 });
 });
+
+/**
+ * F-12（0.2.55）：「暂停所有」可见性口径对齐看板展示行集 —— 仅本机 pending 子行在途
+ * （serve 行全终态）时按钮必须可见。旧实现只看 state._jobs（桌面形态 serve-only）：
+ * 批次处在本机提取/上传阶段（serve 行未生成）时按钮被误隐藏，提交/提取进行中恰是
+ * 最高频暂停窗口，用户找不到入口（「暂停没效果」的另一变体）。
+ * 造法：seed 1 条 done 行（serve 侧全终态 → 基线按钮隐藏）+ mockUploadDelay 撑住
+ * 上传帧 + 真实派发 2 项文件夹批（提取并发=1）→ 窗口 = [建行 → 首项提交]（≈12s，
+ * serve 侧恒全终态、本机子行恒在途）→ 断按钮可见（旧口径此处恒隐藏 = 回归红）
+ * → 暂停冻结生效（管线闸持久化 + 按钮翻「继续任务」）→ 继续恢复 → 上传撑持结束
+ * 后首项提交 → serve 活跃行接管，按钮持续可见。
+ * 注：排队行「已暂停（全局暂停）」显示副本在 fixture 里只存活 <1s（提取极快即离队），
+ * 不做 DOM 断言（必然竞态）；冻结态以按钮文案 + 持久化两个稳定口径覆盖。
+ */
+test("F-12：仅本机 pending 子行在途（serve 行全终态）「暂停所有」可见 + 冻结生效", async ({ page, request, userData }) => {
+  await mockPause(request); // 冻结 tick：种子行/派发 serve 行不会自行跑完
+  await mockSeed(request, { n: 1, status: "done" }); // serve 侧只有一条终态行
+  await mockUploadDelay(request, 12_000); // 撑住上传帧：拉长「仅本机子行在途」窗口
+
+  await goView(page, "jobs");
+  const btn = page.locator(BTN);
+  await expect(btn).toBeHidden({ timeout: 15_000 }); // 基线：只有终态行 → 无暂停对象 → 隐藏
+
+  // 真实派发：文件夹批 2 项 + 批次提取并发=1 → 提取/上传/提交链串行
+  await goView(page, "dispatch");
+  await page.setInputFiles("#folder", FIXTURES);
+  await expect(page.locator("#folder-table tbody tr")).toHaveCount(3, { timeout: 20_000 });
+  await page.locator("#folder-table tbody tr", { hasText: "video-a.mp4" }).locator("input[type=checkbox]").check();
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
+  await page.fill("#batch-extract-workers", "1");
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect(page.locator(".job-batch-row")).toHaveCount(1, { timeout: 20_000 });
+
+  // F-12 窗口不变式：serve 行全终态 + 本机 pending 子行在途（无 job_id）
+  await expect
+    .poll(() => page.evaluate(() => {
+      const s = (window as any).state;
+      const pend = Array.from(s?._pending?.values?.() ?? []);
+      const local = pend.filter((p: any) => p.row.dispatch_pending && !p.row.job_id);
+      const term = (st: string) => ["done", "skipped", "error", "canceled"].includes(st);
+      return (
+        (s?._jobs ?? []).length > 0 && (s?._jobs ?? []).every((j: any) => !j.job_id || term(j.status)) &&
+        local.length >= 1 && local.some((p: any) => p.row.status === "running" || p.row.status === "pending")
+      );
+    }), { timeout: 45_000, intervals: [300] })
+    .toBe(true);
+  await expect(btn).toBeVisible({ timeout: 15_000 }); // 旧口径（仅 serve 行）此处恒隐藏 = 回归红
+
+  // 暂停生效：管线闸冻结（持久化）+ 按钮翻「继续任务」（paused_all 稳定口径）
+  page.on("dialog", (d) => d.accept());
+  await btn.click();
+  await expect(page.locator("#toasts .toast.ok").last()).toContainText("已暂停");
+  await expect.poll(() => pipelinePaused(userData), { timeout: 10_000 }).toBe(true);
+  await expect(btn).toHaveText("▶ 继续任务", { timeout: 15_000 });
+
+  // 继续：闸放行、持久化清除、按钮复位
+  await btn.click();
+  await expect(page.locator("#toasts .toast.ok").last()).toContainText("已继续");
+  await expect.poll(() => pipelinePaused(userData), { timeout: 10_000 }).toBe(false);
+  await expect(btn).toHaveText("⏸ 暂停所有", { timeout: 15_000 });
+
+  // 上传撑持结束后首项提交成功 → serve 活跃行接管（frozen running）→ 按钮持续可见
+  await expect
+    .poll(() => page.evaluate(() => {
+      const s = (window as any).state;
+      return (s?._jobs ?? []).some((r: any) => r.job_id && !["done", "skipped", "error", "canceled"].includes(r.status));
+    }), { timeout: 90_000, intervals: [500] })
+    .toBe(true);
+  await expect(btn).toBeVisible({ timeout: 15_000 });
+});
