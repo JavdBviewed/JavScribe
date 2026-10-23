@@ -13,9 +13,10 @@ import { diskKeyOf } from "../core/disk-key";
 const desktop: JavDesktop = (window as unknown as { javDesktop: JavDesktop }).javDesktop;
 
 const MAX_BYTES = Infinity;
-// S4：串行队列 → 可 resize 池（extract_workers 消费点）。与 web 不同：main 侧每次 IPC 起
-// 独立系统 ffmpeg（无共享实例），池上限 = N 路真并行；cacheStore 原子 rename 保证并发
-// 同文件安全（last-writer-wins）。skipped 分支不进池。
+// S4：串行队列 → 可 resize 池（extract_workers 消费点）；上限读者由 app.ts 注入
+//（0.2.53 需求③：客户端设置基线 + Σ 活跃主任务本机提取预算，主任务收尾即回落基线）。
+// 与 web 不同：main 侧每次 IPC 起独立系统 ffmpeg（无共享实例），池上限 = N 路真并行；
+// cacheStore 原子 rename 保证并发同文件安全（last-writer-wins）。skipped 分支不进池。
 const pool = createPool(() => CLIENT_CFG_DEFAULTS.extract_workers);
 // 在跑提取登记（key=本机路径或文件名；主任务「取消」按名匹配逐条 kill）
 const activeExtracts = new Map<string, { id: string }>();

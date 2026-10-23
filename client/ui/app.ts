@@ -598,6 +598,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   if (platform.kind === "desktop") scanPath.placeholder = "本机绝对路径（如 D:\\Videos 或 /media/jav）";
   const scanGo = $("scan-go") as HTMLButtonElement;
   const scanSubmit = $("scan-submit") as HTMLButtonElement;
+  // 0.2.53 需求③：「本机提并发」框跟随 scan-submit 显隐（初始无扫描结果时占 0 高度，布局零漂移）
+  const scanWorkersCtl = $("scan-extract-workers-ctl") as HTMLLabelElement;
+  const setScanSubmitHidden = (v: boolean): void => { scanSubmit.hidden = v; scanWorkersCtl.hidden = v; };
   const scanSelectAll = $("scan-select-all") as HTMLInputElement;
   const scanTaskStatus = $("scan-task-status") as HTMLElement | null;
   const scanTaskText = $("scan-task-text") as HTMLElement | null;
@@ -4105,6 +4108,38 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 行优先批次操作登记：batch_id -> { 取消整批未开始子行 / 单行取消后续发 / 暂停冻结 / 继续放行 }
   const batchQueues = new Map<string, { cancel: () => number; onRowCancel: () => void; pause: () => void; resume: () => void }>();
   const pumpSlots = new Set<() => void>(); // 泵重触发槽（文件夹批量/扫描实时队列各占一槽；触发源=refresh 5s/链结算/设置保存）
+  // 0.2.53 需求③：主任务级本机提取并发（预算）——池上限读者 = 客户端设置基线 + Σ 活跃主任务预算；
+  // 各批泵入口闸把「该批」池内在途限制在自己预算内（单文件/监听 = __single__，预算 = 注册时刻 ccfg 现值）。
+  // 批次收尾注销 → 读者即回落基线（setExtractLimit 内含 wake）；inFlight 计数只圈本机提取链
+  //（extractLocal 同步段 +1、Promise .finally -1 并 pumpDispatch 重驱），不改池结构与任务结果。
+  const SINGLE_EXTRACT_KEY = "__single__";
+  const batchExtractBudgets = new Map<string, number>(); // batchId → 本机提取预算（注册 = 泵活跃）
+  const batchExtractInFlight = new Map<string, number>(); // batchId → extractLocal 池内链计数
+  function parseExtractWorkers(value: string): number | undefined {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : undefined;
+  }
+  function extractBudgetDefault(): number {
+    return state.ccfg?.extract_workers ?? CLIENT_CFG_DEFAULTS.extract_workers;
+  }
+  // 池上限读者（定义一次存常量）：闭包实时读 state.ccfg，设置变更自动生效；
+  // 批次注册/注销变化后重注入（setExtractLimit 内部 = setLimitReader + wake）。
+  const extractLimitReader = (): number =>
+    extractBudgetDefault() + [...batchExtractBudgets.values()].reduce((a, b) => a + b, 0);
+  function injectExtractLimit(): void {
+    jav()?.setExtractLimit?.(extractLimitReader);
+  }
+  function registerExtractBudget(b: { id: string; extractWorkers?: number }): void {
+    batchExtractBudgets.set(b.id, b.extractWorkers ?? extractBudgetDefault());
+    injectExtractLimit();
+  }
+  function unregisterExtractBudget(id: string): void {
+    if (batchExtractBudgets.delete(id)) injectExtractLimit();
+    batchExtractInFlight.delete(id);
+  }
+  const extractBudgetOf = (b: { id: string }): number =>
+    batchExtractBudgets.get(b.id) ?? extractBudgetDefault();
+  const extractInFlightOf = (id: string): number => batchExtractInFlight.get(id) || 0;
   let singleQueuedFile: File | null = null;       // 等 cap 槽位的单文件（文件变更/重新派发即失效，身份匹配防误发）
   // 0.2.52 M1：按盘拆组 → 一次提交可起多个 runDispatchQueue/runScanQueue（每组一泵）；
   // busy 改引用计数：首个组进入置位、末个组退出复位（单组 = 与现状逐拍一致）。
@@ -4249,6 +4284,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     singleQueuedFile = null; // 显式派发（含泵触发）：排队标记作废
     state.fileDispatching = true; // 0.2.53 需求①：单文件在途标记
     enterSubmitQueue(); // 0.2.53 需求①：引用计数 busy（与批次泵并存，全部退出才复位）
+    registerExtractBudget({ id: SINGLE_EXTRACT_KEY }); // 0.2.53 需求③：单文件预算 = ccfg 现值（派发口径）
     localStorage.setItem("javweb_engine", engine);
     preparePipeline();
     // 预登记：上传请求发出前先持久化登记（job 受理后 ok 分支 rekey 正式键）
@@ -4287,11 +4323,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function runDispatchQueue(
     queue: FolderFile[],
     engine: string,
-    batch: { id: string; label: string },
+    batch: { id: string; label: string; extractWorkers?: number },
     finishNote: (okN: number, total: number, canceledN: number) => string,
     afterDone: (okN: number) => void,
   ): void {
     enterSubmitQueue(); // 0.2.52 M1：多组提交引用计数 busy（首个组进入置位）
+    registerExtractBudget(batch); // 0.2.53 需求③：主任务本机提取预算（池上限上浮 base + N）
     localStorage.setItem("javweb_engine", engine);
     const total = queue.length;
     const rowFirst = platform.kind === "desktop";
@@ -4305,7 +4342,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       done = true;
       pumpSlots.delete(startNext);
       batchQueues.delete(batch.id);
-      pausedBatches.delete(batch.id);
+      pausedBatches.delete(batch.id); // 0.2.53 coord 修复：恢复基线清理（暂停后收尾的批次不残留）
+      unregisterExtractBudget(batch.id); // 0.2.53 需求③：预算注销，池上限回落基线
       const canceledN = rowFirst
         ? pend.filter((p) => p.row.status === "canceled" || p.row.status === "skipped").length : 0;
       showStatus(finishNote(okN, total, canceledN), okN ? "ok" : "err");
@@ -4321,6 +4359,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       while (started < total) {
         // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
         if (rowFirst && pend[started].row.status === "canceled") { settle(started); started++; continue; }
+        // 0.2.53 需求③：主任务本机提取预算已满 → 本轮不派发（不消费索引，下次泵重驱重判）；
+        // 提取链 .finally 计数归零即 pumpDispatch 重驱；server 模式 / 非 local 项不受闸影响
+        if (effectiveMode(queue[started]) === "local" && extractInFlightOf(batch.id) >= extractBudgetOf(batch)) break;
         // auto：canDispatch("auto")=任一在线+参与均衡有空位；再解析出最闲者落具体服务
         let realName: string | null = engine;
         if (engine === "auto") {
@@ -4477,8 +4518,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       folderFileDirName,
     );
     const multi = groups.length > 1;
+    // 0.2.53 需求③：本主任务本机提音轨并发（空/非法 = 跟随客户端设置，不写入 batch）
+    const batchExtractWorkers = parseExtractWorkers(($("batch-extract-workers") as HTMLInputElement).value);
     groups.forEach((g, gi) => {
-      const batch = { id: genBatchId(), label: folderGroupLabel(g, multi, singleLabel) };
+      const batch = { id: genBatchId(), label: folderGroupLabel(g, multi, singleLabel), extractWorkers: batchExtractWorkers };
       runDispatchQueue(
         g.items,
         engine,
@@ -4504,7 +4547,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     state.scanFilter = "all";
     $("scan-pager").hidden = true;
     $("scan-results").hidden = true;
-    $("scan-submit").hidden = true;
+    setScanSubmitHidden(true);
     $("scan-table").innerHTML = "";
   }
 
@@ -4548,7 +4591,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // 「扫描目录」400 回退：所选服务读不到本机路径（浏览器电脑的盘符路径）→ 本机提取后上传
-  function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string },
+  function dispatchLocalScanPaths(engine: string, files: string[], batch: { id: string; label: string; extractWorkers?: number },
     meta?: Map<string, { name: string; size: number }>,
   ) {
     const queue: FolderFile[] = files.map((p) => {
@@ -4620,6 +4663,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return;
     }
     enterSubmitQueue(); // 0.2.52 M1：多组提交引用计数 busy（首个组进入置位）
+    registerExtractBudget(batch); // 0.2.53 需求③：主任务本机提取预算（池上限上浮 base + N）
     localStorage.setItem("javweb_engine", engine);
     // 清扫描 UI 前捕获 name/size（clearScanUi 后 state.scanItems 为空，回退时不能再查）；
     // 0.2.52 M1：多组提交时第二组起 state.scanItems 已被首组清空 → 调用方预捕获的 meta 优先
@@ -4660,7 +4704,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       done = true;
       pumpSlots.delete(startNext);
       batchQueues.delete(batch.id);
-      pausedBatches.delete(batch.id);
+      pausedBatches.delete(batch.id); // 0.2.53 coord 修复：恢复基线清理（暂停后收尾的批次不残留）
+      unregisterExtractBudget(batch.id); // 0.2.53 需求③：预算注销，池上限回落基线
       const canceledN = pend.filter((p) => p.row.status === "canceled" || p.row.status === "skipped").length;
       const fallbackN = items.filter((i) => i.fallback).length;
       const notes: string[] = [];
@@ -4687,6 +4732,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const r = it.pend.row;
             // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
             if (r.status === "canceled") { settle(started); started++; continue; }
+            // 0.2.53 需求③：同 runDispatchQueue（回退项也走本机提取链，统一受批预算闸）
+            if (effectiveMode(it.file) === "local" && extractInFlightOf(batch.id) >= extractBudgetOf(batch)) break;
             // —— 回退项：本机提取上传（与 runDispatchQueue 的 auto/显式分支同口径）——
             if (it.fallback) {
               let fbName: string | null = engine;
@@ -4904,6 +4951,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function extractLocal(f: File, prefix: string, sink?: ChainSink, batchId?: string): Promise<Blob | { skipped: true }> {
+    // 0.2.53 需求③：主任务本机提取池内计数（单文件/监听 = __single__）；.finally 归零并
+    // pumpDispatch 重驱（闸等待的批次立即补位，不等 5s refresh）
+    const extractKey = batchId || SINGLE_EXTRACT_KEY;
+    batchExtractInFlight.set(extractKey, (batchExtractInFlight.get(extractKey) || 0) + 1);
     const s = sink || pipelineSink();
     return new Promise<Blob | { skipped: true }>((resolve, reject) => {
       let t0: number | null = null;
@@ -4934,6 +4985,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           waitReady: batchId ? () => (s.holdWhilePaused ? s.holdWhilePaused() : Promise.resolve()) : undefined,
         }).then(resolve, reject);
       })();
+    }).finally(() => {
+      const n = (batchExtractInFlight.get(extractKey) || 1) - 1;
+      if (n <= 0) batchExtractInFlight.delete(extractKey);
+      else batchExtractInFlight.set(extractKey, n);
+      pumpDispatch();
     });
   }
 
@@ -5049,6 +5105,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 0.2.53 需求①：单文件在途引用计数收口（与批次并存，全部退出才复位 busy）
     state.fileDispatching = false;
     exitSubmitQueue();
+    unregisterExtractBudget(SINGLE_EXTRACT_KEY); // 0.2.53 需求③：单文件预算注销
     if (ok && (!file || state.file === file)) {
       // 用户中途未换文件才清单文件槽（防误清新选文件 UI）
       state.file = null;
@@ -6030,7 +6087,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     scanGo.disabled = true;
     $("scan-results").hidden = false;
     $("scan-table").innerHTML = '<div class="muted small scan-loading">正在建立后台扫描任务…页面可以刷新，扫描不会丢失。</div>';
-    $("scan-submit").hidden = false;
+    setScanSubmitHidden(false);
     scanSubmit.disabled = true;
     try {
       if (t.startScanTask && t.getScanTask) {
@@ -6046,7 +6103,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     } catch (err) {
       $("scan-table").innerHTML = "";
       $("scan-results").hidden = true;
-      $("scan-submit").hidden = true;
+      setScanSubmitHidden(true);
       state.scanTask = null; renderScanTaskStatus(null);
       toast((err as Error).message, "err");
       updateScanGo();
@@ -6177,7 +6234,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       renderScanPager(items.length);
     }
     $("scan-results").hidden = false;
-    $("scan-submit").hidden = false;
+    setScanSubmitHidden(false);
     updateScanSummary(d.truncated);
   }
 
@@ -6268,6 +6325,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const engine = engineSelect.value;
     const files = [...state.scanChecked];
     if (!engine || !files.length) return; // 0.2.53 需求①：批次在跑可提交扫描
+    // 0.2.53 需求③：本主任务本机提音轨并发（分组循环前捕获一次，desktop/web 两构造点共用）
+    const scanExtractWorkers = parseExtractWorkers(($("scan-extract-workers") as HTMLInputElement).value);
     // 已有字幕确认：所选含字幕文件（外部 srt / 内嵌轨 / 文件名 C 版）须用户确认
     const subItems = state.scanItems.filter(
       (i) => state.scanChecked.has(i.path) && i.has_subtitle,
@@ -6306,7 +6365,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         //（受 queue_cap 闸），400 候选耗尽回退本机提取上传；主任务 + N 子行可暂停/取消。
         // 0.2.52 M1：逐组起泵；400 回退 catch 按组复用本组 batch（回退不断父任务，不变式按组成立）
         for (const g of groups) {
-          const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan() };
+          const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan(), extractWorkers: scanExtractWorkers };
           try {
             runScanQueue(g.items, engine, batch, subStatus, fileMeta);
           } catch (e) {
@@ -6325,7 +6384,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       // web：原样透传（含 "auto"——工作台 v0.2.11+ 已支持 per-task auto，派发时刻 pick_engine）；
       // 0.2.52 M1：逐组透传（单挂载自然退化单组，行为不变）；400 回退按组复用本组 batch
       for (const g of groups) {
-        const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan() };
+        const batch = { id: genBatchId(), label: multi ? multiGroupLabel(g) : batchLabelForScan(), extractWorkers: scanExtractWorkers };
         try {
           const d = await t.submitScan(engine, g.items, subStatus, batch);
           if (d.skipped && d.skipped.length) {
@@ -7169,8 +7228,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
   }
 
-  // S4：提取并发读者注入（闭包实时读 state.ccfg，注入一次不缓存值）+ 启动读回客户端设置（验收 d）
-  jav()?.setExtractLimit?.(() => state.ccfg?.extract_workers ?? CLIENT_CFG_DEFAULTS.extract_workers);
+  // S4：提取并发读者注入（闭包实时读 state.ccfg，注入一次不缓存值）+ 启动读回客户端设置（验收 d）；
+  // 0.2.53 需求③：读者 = 客户端设置基线 + Σ 活跃主任务预算（批次注册/注销后重注入，内含 wake）
+  jav()?.setExtractLimit?.(extractLimitReader);
   if (t.getClientConfig) void t.getClientConfig()
     .then((cc) => { state.ccfg = normalizeClientConfig(cc); })
     .catch(() => {});
