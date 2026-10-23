@@ -48,6 +48,7 @@ logs/
 !playwright.config.ts
 !vite.desktop.config.ts
 !playwright.desktop.config.ts
+!playwright.audit.config.ts
 *.m2ts
 *.mov
 *.avi
@@ -67,8 +68,10 @@ logs/
 node_modules/
 test-results/
 test-results-desktop/
+test-results-audit/
 playwright-report/
 playwright-report-desktop/
+playwright-report-audit/
 
 # ---------- 桌面端构建产物（pnpm build:desktop 生成） ----------
 client/dist-desktop/
