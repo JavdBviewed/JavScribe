@@ -661,6 +661,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // 桌面端的「客户端部署机」就是当前这台电脑，帮助文案去掉 Web 形态的部署区别。
   if (platform.kind === "desktop") {
+    // 桌面端可见文案去 web 口径（「不是当前浏览器电脑」在桌面形态语义不成立）
+    const sn = $("scan-scope-text") as HTMLElement | null;
+    if (sn) sn.textContent = "扫描这台电脑。";
     const sh = $("scan-help") as HTMLElement | null;
     if (sh) sh.dataset.tip =
       "扫描这台电脑上的目录。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理另一台电脑里的文件，请改用「选择文件 / 选择文件夹」。";
@@ -1686,7 +1689,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rerunBtn = (platform.kind === "desktop" && j.file && !isPendingRow && !isGhost
       && j.local !== false
       && ((j.status === "done" || j.status === "error" || j.status === "skipped") || rerunNonTerminal))
-      ? `<button type="button" class="dl-btn rerun" data-file="${esc(primary)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" data-status="${esc(st)}" title="${rerunNonTerminal ? "先取消原服务上的任务（排队中立即终止；运行中检查点中止，已生成字幕保留），再复用本地音轨缓存提交到另一个服务端" : "复用该影片的本地音轨缓存，选择另一个服务端重新提交"}">&#8644; 重跑</button>`
+      ? `<button type="button" class="dl-btn rerun" data-file="${esc(primary)}" data-eng="${esc(j.engine)}" data-jid="${esc(j.job_id || "")}" data-status="${esc(st)}" data-fp="${esc(j.file_path || "")}" title="${rerunNonTerminal ? "先取消原服务上的任务（排队中立即终止；运行中检查点中止，已生成字幕保留），再向另一个服务端重新提交（音轨缓存或源视频直读）" : "复用该影片的本地音轨缓存或源视频，选择另一个服务端重新提交"}">&#8644; 重跑</button>`
       : "";
     // 行优先 pending 子行（未开始、未提交服务）：单行取消 = 不进队列、不占在途（链已开跑不给按钮）
     const pendCancel = pendQueued
@@ -1712,7 +1715,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="job-name"><div class="fn">${esc(primary)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
       <div><span class="pill p-${esc(st)}"><i></i>${STATUS_ZH[st] || esc(st)}</span>${srcTag}${wb}${ss}${offTag}</div>
       <div class="prog"><div class="bar${isRun ? " live" : ""}"><div style="width:${pct}%"></div></div><span class="pct mono">${pct}%</span><span class="eta"></span></div>
-      <div class="job-cell mono cell-pos">${esc(pos)}</div>
+      <div class="job-cell mono cell-pos" title="${esc(pos)}">${esc(pos)}</div>
       <div class="job-cell mono cell-elapsed">${esc(elapsed)}</div>
       <div class="job-cell mono cell-created">${esc(createdAt) || "—"}</div>
       <div class="job-cell mono cell-finished${j.status === "done" && finishedAt ? " is-done" : ""}">${esc(finishedAt) || "—"}</div>
@@ -1725,10 +1728,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (bar) bar.style.width = pct + "%";
     const pctEl = row.querySelector(".pct");
     if (pctEl && pctEl.textContent !== pct + "%") pctEl.textContent = pct + "%";
-    const etaEl = row.querySelector(".eta");
-    if (etaEl && etaEl.textContent !== eta) etaEl.textContent = eta;
-    const posEl = row.querySelector(".cell-pos");
-    if (posEl && posEl.textContent !== pos) posEl.textContent = pos;
+    const etaEl = row.querySelector<HTMLElement>(".eta");
+    if (etaEl) {
+      if (etaEl.textContent !== eta) etaEl.textContent = eta;
+      if (etaEl.title !== eta) etaEl.title = eta; // 窄列截断时全文进 tooltip
+    }
+    const posEl = row.querySelector<HTMLElement>(".cell-pos");
+    if (posEl) {
+      if (posEl.textContent !== pos) posEl.textContent = pos;
+      if (posEl.title !== pos) posEl.title = pos;
+    }
     const elEl = row.querySelector(".cell-elapsed");
     if (elEl && elEl.textContent !== elapsed) elEl.textContent = elapsed;
   }
@@ -1864,7 +1873,32 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   function pendingRows(): JobRow[] {
-    return Array.from(state._pending.values()).map((p) => p.row);
+    // 全局暂停（pause-all）：待派发 pending 行套「已暂停」显示副本——行 pill/批次 pill/已暂停桶
+    // 同步反映冻结态（用户「暂停没效果」修复）。不 mutate 原行：批次级 pause/resume 记账靠
+    // r.status="paused"+_prevStatus；summary 翻转后副本自然消失，恢复自愈。
+    // 仅 queued 态（status=pending）：提取中/上传中的行 ffmpeg/传输在真跑，管线闸只冻新派发，
+    // 标「已暂停」是假话。summary 为 null（接口失败）→ 不套副本，回退现状。
+    const gp = !!state._summary?.paused_all;
+    return Array.from(state._pending.values()).map((p) =>
+      gp && p.row.dispatch_pending && !p.row.job_id && p.row.status === "pending"
+        ? { ...p.row, paused: true, position: "已暂停（全局暂停）", phase_detail: "已暂停（全局暂停）", message: "全局暂停中：点「继续任务」恢复" }
+        : p.row,
+    );
+  }
+
+  // 服务队列挂起（serve /health.paused=true，serve 0.2.3+；桌面/工作台快照均带此字段）：
+  // 该服务上的排队中行（有 job_id、非终态、非 running）在服务端恢复前不会开跑 → 显示
+  // 「已暂停（服务队列挂起）」（仅显示副本，不 mutate 原行；恢复后下轮 refresh 自愈）。
+  // running 行不标：真 serve 队列暂停语义是「运行中跑完、不开新」，其进度仍属实。
+  // 与全局暂停（paused_all 套本机 pending 行显示副本）互补：全文件已提交服务的批次
+  // 暂停所有后主行不再卡「运行中」（用户「暂停没效果」诉求的另一半）。
+  function applyQueuePauseDisplay(rows: JobRow[]): JobRow[] {
+    const pausedEngines = new Set(state.engines.filter((e) => e.online && e.paused).map((e) => e.name));
+    if (!pausedEngines.size) return rows;
+    return rows.map((j) =>
+      j.job_id && !j.paused && j.status === "pending" && pausedEngines.has(j.engine)
+        ? { ...j, paused: true, position: "已暂停（服务队列挂起）", phase_detail: "已暂停（服务队列挂起）", message: "服务队列挂起：点「继续任务」恢复" }
+        : j);
   }
 
   /** 排序桶：pending 活跃子行与 running 同级置顶（终态 pending 行不抢位） */
@@ -2240,7 +2274,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           && sup.includes(j.engine + "|" + String(j.job_id))))
       : rows;
     // 行优先：pending 子行 + 账本恢复行并入看板（serve 真行出现后让位删除，不双行）
-    const rows2 = mergePendingRows(rowsIn);
+    const rows2 = applyQueuePauseDisplay(mergePendingRows(rowsIn));
     lastMergedRows = rows2;
     // 统计与筛选合一（renderFilterBar）：终态计数走 serve 累计 summary（200 内存窗
     // 下行计数必少算），活跃态按现行计数；按钮内带数字，不再另设一套统计条。
@@ -2393,10 +2427,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const localBatch = batchQueues.has(g.bid); // 本端行优先批次（serve 尚不认识）：暂停/继续/取消本端即时生效
       // 孤儿行（兜底 0 子任务）：手动清除入口（删本地 batches.json 记录；子任务已过期）
       const canClear = typeof t.batchClear === "function" && !!g.stale;
+      // 全局暂停期：批次「暂停/继续」隐藏——继续一个主任务在管线闸冻结下不会真跑，点了也是空操作
+      const globalPaused = !!state._summary?.paused_all;
       const ops = [
-        canOp && (servedGroup || localBatch) && agg.status !== "paused" && !allTerminal
+        canOp && (servedGroup || localBatch) && agg.status !== "paused" && !allTerminal && !globalPaused
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="pause" title="暂停主任务：运行中的子任务跑完，排队中冻结">&#9208; 暂停</button>` : "",
-        canOp && (servedGroup || localBatch) && agg.status === "paused"
+        canOp && (servedGroup || localBatch) && agg.status === "paused" && !globalPaused
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="resume" title="继续主任务：解除排队冻结，恢复开跑">&#9654; 继续</button>` : "",
         canOp && servedGroup && hasFailed
           ? `<button type="button" class="dl-btn batch-op" data-bid="${esc(g.bid)}" data-bact="retry" title="重试本主任务中失败的子任务">&#8635; 重试失败</button>` : "",
@@ -2829,7 +2865,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const rb = (ev.target as HTMLElement).closest(".rerun") as HTMLButtonElement | null;
     if (rb && !rb.disabled) {
       if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
-      void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "", rb.dataset.status || "");
+      void openRerunModal(rb.dataset.file || "", rb.dataset.eng || "", rb.dataset.jid || "", rb.dataset.status || "", rb.dataset.fp || "");
       return;
     }
     const cb = (ev.target as HTMLElement).closest(".cancel") as HTMLButtonElement | null;
@@ -2901,12 +2937,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     btn.classList.toggle("on", pausedAll);
     const label = pausedAll ? "▶ 继续任务" : "⏸ 暂停所有";
     if (btn.textContent !== label) btn.textContent = label;
-    btn.disabled = state.busy; // busy 结束后必须复位，否则按钮永久禁用（P2-2 补漏）
+    // 0.2.54（F-10）：不受 busy 门控——暂停的语义就是冻结运行中的本机管线（提取/派发泵）
+    // 与服务队列，提交进行中恰是最高频使用场景；主进程管线闸 pipelineGateWait 挂起等待
+    // （不中断在途阶段）是唯一控制面。busy 只门控「新提交」类动作，不适用于本按钮。
+    //（此前 busy 期间按钮禁用，大批次提交中用户无法暂停 = 「暂停没效果」的另一入口）
+    btn.disabled = false;
   }
 
   ($("job-pause-all") as HTMLButtonElement).onclick = async () => {
     if (!t.pauseAll) return;
-    if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    // F-10：暂停/继续不受 busy 门控（管线闸挂起等待语义，见 renderPauseAllBtn 注释）
     const want = !state._summary?.paused_all;
     const btn = $("job-pause-all") as HTMLButtonElement;
     if (want) {
@@ -2937,7 +2977,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     } catch (e) {
       toast(`${want ? "暂停" : "继续"}失败：${(e as Error).message}`, "err");
     } finally {
-      btn.disabled = state.busy;
+      // F-10：与 renderPauseAllBtn 同口径——有在途任务即可用，不受 busy 门控
+      btn.disabled = false;
     }
   };
 
@@ -5162,24 +5203,48 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   };
 
   // ---------- 任务表「换服务重跑」：复用本地音轨缓存向另一个服务端提交新任务（仅 desktop） ----------
-  async function openRerunModal(videoName: string, curEngine: string, curJobId: string, curStatus = "") {
+  // F-11：路径直读提交的任务无音轨缓存，源视频路径恢复三通道（优先级从高到低）：
+  // ① 音轨缓存 meta hit.videoPath ② serve 任务行 file_path（job-rows 透传 task.path）
+  // ③ 写回登记（在途任务；完成回写后消费删除）。file_path 可能指向已删文件 → fileExists 验证。
+  function findWriteBackVideoPath(videoName: string): string {
+    let best = "";
+    let bestAt = -1;
+    for (const [k, info] of state.writeBackJobs) {
+      if (info.videoName !== videoName || !info.videoPath) continue;
+      const at = wbAt.get(k) || 0;
+      if (at > bestAt) { bestAt = at; best = info.videoPath; }
+    }
+    return best;
+  }
+
+  async function openRerunModal(videoName: string, curEngine: string, curJobId: string, curStatus = "", filePath = "") {
     showModal(`换服务重跑 · ${videoName}`);
     const body = $("modal-body");
-    body.innerHTML = '<div class="muted">检测本地音轨缓存中…</div>';
+    body.innerHTML = '<div class="muted">检测本地音轨缓存 / 源视频路径中…</div>';
     let hit: AudioCacheHit | null = null;
     try { hit = await platform.findAudioCache(videoName); } catch { hit = null; }
-    if (!hit || (!hit.opusValid && !hit.videoExists)) {
+    // F-11：源视频路径恢复（三通道，首个验证有效者胜出）
+    let srcPath = hit && (hit.opusValid || hit.videoExists) ? hit.videoPath : "";
+    if (!srcPath) {
+      for (const c of [filePath, findWriteBackVideoPath(videoName)]) {
+        if (!c || c === srcPath) continue;
+        try { if (await platform.fileExists(c)) { srcPath = c; break; } } catch { /* 视为不存在 */ }
+      }
+    }
+    if (!hit?.opusValid && !srcPath) {
       body.innerHTML = `
-      <div class="set-note err">本地没有该影片的音轨缓存${hit && hit.videoExists ? "" : "（源视频也不在本机）"}</div>
-      <div class="muted small">重跑复用的是本机提取的音轨缓存（7 天保留）。该任务若是整片直传提交、或缓存已过期，就没有可复用的音轨。</div>`;
+      <div class="set-note err">本地没有该影片的音轨缓存（源视频也不在本机）</div>
+      <div class="muted small">重跑复用的是本机提取的音轨缓存（7 天保留）或本机源视频。该任务若是从其他机器整片直传提交、或缓存已过期且源视频已删除，就没有可复用的音轨。</div>`;
       return;
     }
+    // F-11：cache=opus 缓存直接复用；video=源视频直读优先，服务读不到（400）自动转本机提取上传
+    const mode: "cache" | "video" = hit?.opusValid ? "cache" : "video";
     // 0.2.47：非终态行（排队/运行/暂停）→ cancel-first：先取消原任务再重交，防双活
     const nonTerminal = !!curJobId && (curStatus === "pending" || curStatus === "running" || curStatus === "paused");
     const cands = (state.engines || []).filter((e) => e.name !== curEngine && e.online);
-    const statusHtml = hit.opusValid
-      ? `<div class="set-note">音轨缓存命中：<b>${fmtSize(hit.audioBytes)}</b>·来源 ${esc(hit.videoPath)}</div>`
-      : `<div class="set-note">无有效音轨缓存（源视频已变更）。源视频在本机，将重新提取音轨后提交。</div>`;
+    const statusHtml = mode === "cache"
+      ? `<div class="set-note">音轨缓存命中：<b>${fmtSize(hit!.audioBytes)}</b>·来源 ${esc(hit!.videoPath)}</div>`
+      : `<div class="set-note">无可用音轨缓存（源视频在本机：${esc(srcPath)}）。将先尝试让所选服务直读源视频；服务读不到时自动转本机提取后上传。</div>`;
     if (!cands.length) {
       body.innerHTML = statusHtml + '<div class="set-note err">没有其他在线服务可选（仅登记了本行服务，或其他服务均离线）</div>';
       return;
@@ -5209,7 +5274,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         goBtn.disabled = false;
       };
       try {
-        const h = hit!;
+        const h = hit; // F-11：video 模式可为 null（源路径由任务行 file_path / 写回登记恢复）
         // 0.2.47 cancel-first：非终态行先取消原任务。
         // 404/409 = 原任务已不存在/已结束 → 视同取消成功，直接重交；其余失败一律中止（防双活）
         if (nonTerminal) {
@@ -5226,54 +5291,76 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             }
           }
         }
-        // 第一段：取 opus（缓存命中直接复用；错开从源视频重提）
-        let opusPath: string; let audioBytes: number;
-        if (h.opusValid) {
-          opusPath = h.opusPath; audioBytes = h.audioBytes;
+        // 预登记：请求发出前先持久化登记（job 出具后 rekey 正式键）；
+        // F-11：上移到模式分支前——video 模式直读提交与 cache 模式上传提交都要，videoPath 统一登记恢复的源路径
+        registerWriteBack(preKeyOf(eng, videoName), { engine: eng, videoName, dirHandle: null, videoPath: srcPath });
+        // 等接受出具 job_id（desktop transport：201 即列 done；兼容 web 轮询语义多轮几次）
+        const waitJobId = async (uploadId: string): Promise<string> => {
+          let id = "";
+          for (let i = 0; i < 20 && !id; i++) {
+            const st = await t.getUpload(uploadId);
+            if (st.phase === "done") id = st.job_id || "";
+            else if (st.phase === "error") throw new Error(st.error || "提交失败");
+            else await new Promise((r) => setTimeout(r, 300));
+          }
+          if (!id) throw new Error("提交接受超时（可在任务表查看）");
+          return id;
+        };
+        // 复用现有上传通道提交（字节进度回显）→ 轮询出具 job_id
+        const uploadAndPoll = async (video: string, opusPath: string, audioBytes: number): Promise<string> => {
           prog.textContent = "上传音轨中…";
-        } else {
-          prog.textContent = "重新提取音轨中…";
-          const shim = new File([], h.videoName) as File & { _localPath?: string };
-          Object.defineProperty(shim, "size", { value: h.videoBytes || 1, configurable: true });
-          shim._localPath = h.videoPath;
+          const upFile = new File([], video) as File & { _localPath?: string };
+          Object.defineProperty(upFile, "size", { value: audioBytes, configurable: true });
+          const audio = new Blob([]) as Blob & { _javOpusPath?: string; _javOpusSize?: number };
+          Object.defineProperty(audio, "size", { value: audioBytes, configurable: true });
+          audio._javOpusPath = opusPath;
+          audio._javOpusSize = audioBytes;
+          const d = await t.uploadAudio(upFile, eng, audio, (loaded, total, pct) => {
+            prog.textContent = `上传音轨 ${fmtSize(loaded)} / ${fmtSize(total)} · ${pct.toFixed(1)}%`;
+          });
+          if (!d.ok) throw new Error(d.error || "音频上传失败");
+          if (d.cached) prog.textContent = "服务端已缓存，免上传";
+          return waitJobId(d.uploadId);
+        };
+        // 本机提取音轨（video 模式直读 400 回退用；shim 口径同 ghostRetryCore）
+        const extractLocal = async (): Promise<{ opusPath: string; audioBytes: number }> => {
+          prog.textContent = "本机提取音轨中…";
+          const shim = new File([], videoName) as File & { _localPath?: string };
+          if (h?.videoBytes) Object.defineProperty(shim, "size", { value: h.videoBytes, configurable: true });
+          shim._localPath = srcPath;
           const res = await new Promise<Blob | { skipped: true }>((resolve, reject) => {
             jav()!.extractAudio(shim, (pr) => {
-              prog.textContent = `重新提取音轨 · ${Math.round(pr * 100)}%`;
+              prog.textContent = `本机提取音轨 · ${Math.round(pr * 100)}%`;
             }).then(resolve, reject);
           });
           if (!res || "skipped" in res) throw new Error("音轨提取被跳过（文件为空或超限）");
           const b = res as Blob & { _javOpusPath?: string; _javOpusSize?: number };
-          opusPath = b._javOpusPath || "";
-          audioBytes = b._javOpusSize || 0;
+          const opusPath = b._javOpusPath || "";
+          const audioBytes = b._javOpusSize || 0;
           if (!opusPath) throw new Error("音轨提取没有产生可用音频");
-          prog.textContent = "上传音轨中…";
-        }
-        // 第二段：复用现有上传通道提交到目标服务（字节进度回显）
-        const upFile = new File([], h.videoName) as File & { _localPath?: string };
-        Object.defineProperty(upFile, "size", { value: audioBytes, configurable: true });
-        const audio = new Blob([]) as Blob & { _javOpusPath?: string; _javOpusSize?: number };
-        Object.defineProperty(audio, "size", { value: audioBytes, configurable: true });
-        audio._javOpusPath = opusPath;
-        audio._javOpusSize = audioBytes;
-        // 预登记：上传请求发出前先持久化登记（job 出具后 rekey 正式键）
-        registerWriteBack(preKeyOf(eng, videoName), { engine: eng, videoName, dirHandle: null, videoPath: h.videoPath });
-        const d = await t.uploadAudio(upFile, eng, audio, (loaded, total, pct) => {
-          prog.textContent = `上传音轨 ${fmtSize(loaded)} / ${fmtSize(total)} · ${pct.toFixed(1)}%`;
-        });
-        if (!d.ok) throw new Error(d.error || "音频上传失败");
-        if (d.cached) prog.textContent = "服务端已缓存，免上传";
-        // 等接受出具 job_id（desktop transport：201 即列 done；兼容 web 轮询语义多轮几次）
+          return { opusPath, audioBytes };
+        };
+        // 提交到目标服务：cache 模式=opus 缓存复用上传；video 模式=源视频直读优先
         let jobId = "";
-        for (let i = 0; i < 20 && !jobId; i++) {
-          const st = await t.getUpload(d.uploadId);
-          if (st.phase === "done") jobId = st.job_id || "";
-          else if (st.phase === "error") throw new Error(st.error || "提交失败");
-          else await new Promise((r) => setTimeout(r, 300));
+        if (mode === "cache") {
+          // cache 模式 hit 必非空且 opusValid（mode 判定保证）
+          jobId = await uploadAndPoll(h!.videoName, h!.opusPath, h!.audioBytes);
+        } else {
+          prog.textContent = "提交源视频到所选服务…";
+          try {
+            const d = await t.submitScan(eng, [srcPath]);
+            jobId = d.jobId || "";
+            if (!jobId) throw new Error("提交接受失败（可在任务表查看）");
+          } catch (e) {
+            // 400 not-found = 服务读不到该路径（跨机 / 文件已删）→ 回退本机提取 + 上传（ghostRetryCore 同口径）
+            if (!(e instanceof TransportError && e.code === "not-found")) throw e;
+            const ex = await extractLocal();
+            jobId = await uploadAndPoll(videoName, ex.opusPath, ex.audioBytes);
+          }
         }
-        if (!jobId) throw new Error("提交接受超时（可在任务表查看）");
         rekeyWriteBack(preKeyOf(eng, videoName), eng + "|" + jobId);
         registerWriteBack(eng + "|" + jobId, {
-          engine: eng, videoName, dirHandle: null, videoPath: h.videoPath,
+          engine: eng, videoName, dirHandle: null, videoPath: srcPath,
         });
         // 0.2.47：非终态行的旧任务写回登记迁移到新键（镜像 retry handler：强制写回集/登记不丢）
         if (nonTerminal && curJobId) {
@@ -5707,8 +5794,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     if (it.type === "enum") {
       const zh = ENUM_ZH[it.path] || {};
-      const opts = (it.options || []).map((o: string) =>
-        `<option value="${esc(o)}"${o === it.value ? " selected" : ""}>${esc(zh[o] || o)}</option>`).join("");
+      // 空值 → 「（未设置）」占位（否则浏览器默认选第一项，误导「当前=第一项」且保存时静默改写）；
+      // value 不在 options（serve schema 变更/旧自定义值）→ 前插当前值合成项，显示真实值
+      const cur = it.value == null ? "" : String(it.value);
+      const emptyOpt = cur === "" ? `<option value="" selected>（未设置）</option>` : "";
+      const curOpt = cur !== "" && !(it.options || []).includes(cur)
+        ? `<option value="${esc(cur)}" selected>${esc(zh[cur] || cur)}</option>` : "";
+      const opts = [emptyOpt, curOpt,
+        ...(it.options || []).map((o: string) =>
+          `<option value="${esc(o)}"${o === cur ? " selected" : ""}>${esc(zh[o] || o)}</option>`),
+      ].join("");
       return `<div class="cfg-row" data-path="${esc(it.path)}" data-base="${esc(base)}">
       ${lab(it.label)}
       <select id="${id}">${opts}</select></div>`;
@@ -5751,6 +5846,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         values[it.path] = v;
       } else if (it.type === "secret") {
         if (f.value === "") continue; // 空 = 保持
+        values[it.path] = f.value;
+      } else if (it.type === "enum") {
+        const cur = it.value == null ? "" : String(it.value);
+        if (f.value === "" || f.value === cur) continue; // 未设置/未改动不送（见上方注释）
         values[it.path] = f.value;
       } else {
         values[it.path] = f.value;

@@ -88,7 +88,8 @@ test("扫描面板结构（客户端部署机目录语义 + 桌面本机文案�
   await expect(page.locator("#scan-path")).toHaveAttribute("placeholder", "本机绝对路径（如 D:\\Videos 或 /media/jav）");
   await expect(page.locator("#scan-go")).toBeDisabled();
   await expect(page.locator("#scan-results")).toBeHidden();
-  await expect(page.locator(".scan-head .muted")).toHaveText(/扫描运行 JavScribe 的这台机器/);
+  // 桌面形态：app.ts 桌面分支把 scope 文案覆盖为「本机」口径（web 形态保留「运行 JavScribe 的这台机器」）
+  await expect(page.locator(".scan-head .muted")).toHaveText(/扫描这台电脑/);
   // 桌面形态：app.ts 桌面分支把 help 覆盖为「本机」文案
   await expect(page.locator(".scan-head .help")).toHaveAttribute("data-tip", /扫描这台电脑上的目录/);
 });

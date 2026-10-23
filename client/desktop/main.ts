@@ -1761,6 +1761,8 @@ function registerIpc(): void {
               engines.push({ engine: entry.name, ok: false, error: `服务不可达: ${(e as Error).message || e}` });
             }
           }
+          lastSnap = null; // 队列暂停态已变更 → 弃 TTL 快照：下一轮 listEngines/listJobs 立得新 paused
+          //（否则 ≤3s 陈旧快照 + 5s 轮询，「暂停生效」的看板反馈最坏延迟 ~8s，用户感知「暂停没效果」）
           return { ok: true, data: { ok: true, paused: pipelinePaused, engines } };
         }
         // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）
@@ -1976,6 +1978,12 @@ function registerIpc(): void {
       if (srtName.includes("/") || srtName.includes("\\")) return false;
       return fs.existsSync(path.join(path.dirname(videoPath), srtName));
     } catch { return false; }
+  });
+
+  // 只读探测文件存在（换服务重跑恢复源视频路径；stat 失败一律 false）
+  ipcMain.handle("file-exists", (_ev, p: unknown) => {
+    if (typeof p !== "string" || !p) return false;
+    try { return fs.statSync(p).isFile(); } catch { return false; }
   });
 
   // 原生对话框
@@ -3094,6 +3102,7 @@ async function batchOpAll(action: string, bid: string): Promise<unknown> {
       engines.push({ engine: entry.name, ok: false, error: (e as Error).message || String(e) });
     }
   }
+  lastSnap = null; // 服务侧 batch 暂停标记已变更（health.batch_paused）→ 弃快照，行上 batch_paused 立即刷新
   return { ok: true, batch_id: bid, action, engines, local: {} };
 }
 

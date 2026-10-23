@@ -72,6 +72,7 @@ export function jobRows(infos: JobSourceInfo[]): any[] {
         rows.push({
           ...base,
           file: job.label || String(job.id),
+          file_path: null,
           status: finished ? "done" : "running",
           progress: total ? done / total : finished ? 1 : 0,
           position: "",
@@ -85,6 +86,8 @@ export function jobRows(infos: JobSourceInfo[]): any[] {
           rows.push({
             ...base,
             file: t?.name || "",
+            // F-11：serve 任务行的本机源路径（task.to_dict 的 path；换服务重跑恢复源视频用）
+            file_path: typeof t?.path === "string" ? t.path : null,
             status: t?.status,
             phase: t?.phase ?? null,
             progress: t?.progress || 0,

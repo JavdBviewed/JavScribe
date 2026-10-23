@@ -103,4 +103,6 @@ export const webPlatform: PlatformAdapter = {
 
   // 浏览器形态无持久本地盘符号，音轨不可复用 → 恒 null
   findAudioCache: () => Promise.resolve(null),
+  // 浏览器形态无持久本地盘，存在探测恒 false
+  fileExists: () => Promise.resolve(false),
 };

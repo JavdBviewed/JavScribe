@@ -73,4 +73,9 @@ export interface PlatformAdapter {
    * web 形态无持久 FS，恒返回 null；desktop 查 main 侧 audio-cache/。
    */
   findAudioCache(videoName: string): Promise<AudioCacheHit | null>;
+  /**
+   * 只读探测文件是否存在（换服务重跑：恢复 serve 任务行上的本机源视频路径）。
+   * web 形态无持久 FS，恒 false。
+   */
+  fileExists(p: string): Promise<boolean>;
 }

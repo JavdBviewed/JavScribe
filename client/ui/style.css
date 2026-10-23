@@ -744,9 +744,10 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 .job-batch-row .batch-caret:hover { color: var(--accent); }
 .job-batch-row .batch-sub-n { color: var(--muted); }
 .job-row.paused { opacity: 0.78; }
-.prog { display: flex; align-items: center; gap: 8px; }
+.prog { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .bar {
   flex: 1;
+  min-width: 24px;
   height: 6px;
   border-radius: 4px;
   background: var(--line);
@@ -766,9 +767,11 @@ a.tag.tag-up:hover { transform: translate(1px, -1px); box-shadow: 0 2px 6px rgba
 }
 @keyframes sheen { to { background-position: -200% 0; } }
 .prog .pct { font-size: 11.5px; color: var(--muted); min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
-.eta { font-size: 11px; color: var(--muted); margin-left: 2px; }
+.eta { font-size: 11px; color: var(--muted); margin-left: 2px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eta:empty { display: none; }
-.job-cell { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); }
+.job-cell { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); min-width: 0; }
+/* 位置列：阶段文案（「剩 ~0:15 转写中」类）在窄列截断，全文进 title；不抬列宽（web 1102px / 桌面 1440 无横滚预算） */
+.cell-pos { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dl-btn {
   font: inherit;
   font-size: 12px;
@@ -1769,7 +1772,7 @@ body.desktop main > section.view-on { display: block; }
 }
 .cc-watch-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cc-watch-row #cc-watch-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cc-card .cfg-row input { width: 100%; max-width: 560px; }
+.cc-card .cfg-row input:not([type="checkbox"]) { width: 100%; max-width: 560px; }
 .set-note-title { font-weight: 700; margin-bottom: 4px; }
 
 /* 帮助图标 tooltip 方向变体（由 JS 按视口空间临时加类） */

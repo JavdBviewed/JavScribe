@@ -56,6 +56,8 @@ export const desktopPlatform: PlatformAdapter = {
     ? desktop.srtExists(info.videoPath, srtName)
     : Promise.resolve(false)),
 
+  fileExists: (p) => desktop.fileExists(p),
+
   // 保存对话框（main 进程拉 srt + 清洗 + 写盘）；取消/失败静默（与 web <a download> 一致）
   downloadSrt(url, filename) {
     void desktop.download(url, filename);

@@ -98,13 +98,15 @@ test("暂停所有/继续往返 + 本机管线闸 + 持久化 + 单端离线降�
 });
 
 /**
- * 回归（P2-2 补漏）：renderPauseAllBtn 曾在 busy 期间置 btn.disabled=true 后从不复位——
- * 派发在途期渲染过按钮的客户端，之后 busy 结束按钮永久禁用（真机 0.2.38 V4 90s 点击卡死）。
+ * F-10（0.2.54）：「暂停所有/继续任务」不再受 busy 门控——提交进行中恰是最高频暂停场景，
+ * 主进程管线闸 pipelineGateWait 挂起等待（不中断在途阶段）是唯一控制面。
+ * 回归口径随行为更新：busy 期按钮必须保持可用（防 busy 门控回归；历史 0.2.38 V4「busy 期
+ * disabled 从不复位永久卡死」的根因——busy 门控本身——已移除）→ settled 后仍可用。
  * 造法：mockPause 冻结一条 running 行（hasActive 恒真、按钮恒可见）→ 真实派发 2 项文件夹批
- * （state.busy=true 直至整批 settled，行优先 300ms pending 渲染保证 busy 期必渲染）→
- * busy 期断按钮禁用（新旧代码均可达，防假通过）→ settled 后断按钮恢复可用（旧代码恒禁用→超时红）。
+ * （state.busy=true 直至整批 settled，mockUploadDelay 撑住 busy 窗口，300ms pending 合帧渲染保证 busy 期必渲染）→
+ * poll state.busy=true（防 busy 从未置位的假通过）→ busy 期断按钮可用 → settled 后断仍可用。
  */
-test("回归：派发在途期「暂停所有」禁用 → 派发 settled 后必须恢复可用（busy 复位）", async ({ page, request }) => {
+test("F-10：派发在途期「暂停所有」保持可用（不受 busy 门控）→ settled 后仍可用", async ({ page, request }) => {
   await mockPause(request); // 冻结 mock tick：种子行与派发行都不会自行跑完
   await mockSeed(request, { n: 1, status: "running", progress: 40 });
   await mockUploadDelay(request, 1500); // 撑住「上传中」帧：busy 窗口足够长，稳定捕获 busy 期渲染
@@ -124,16 +126,18 @@ test("回归：派发在途期「暂停所有」禁用 → 派发 settled 后必
   await page.click("#dispatch-go");
   await expect(page.locator(".job-batch-row")).toHaveCount(1, { timeout: 20_000 });
 
-  // busy 期：pending 行 300ms 合帧渲染 → renderPauseAllBtn 在 state.busy=true 下执行 → 禁用
-  await expect(btn).toBeDisabled({ timeout: 30_000 });
+  // F-10：busy 期按钮保持可用——若回归为 busy 门控（busy 期置 disabled），此处超时红
+  await expect
+    .poll(() => page.evaluate(() => (window as any).state?.busy), { timeout: 30_000, intervals: [200] })
+    .toBe(true);
+  await expect(btn).toBeEnabled({ timeout: 10_000 });
 
   // 整批 settled（提交/失败即结，不等 serve 终态）→ state.busy=false
   await expect
     .poll(() => page.evaluate(() => (window as any).state?.busy), { timeout: 120_000, intervals: [500] })
     .toBe(false);
 
-  // 冻结的 running 行仍在途 → 按钮仍可见；修复后下一拍渲染（serve 轮询 ≤5s）必须复位为可用。
-  // 旧代码（if busy → disabled=true，从不复位）会在此恒禁用 → toBeEnabled 超时失败 = 回归生效。
+  // 冻结的 running 行仍在途 → 按钮仍可见且可用
   await expect(btn).toBeVisible({ timeout: 10_000 });
   await expect(btn).toBeEnabled({ timeout: 15_000 });
 });

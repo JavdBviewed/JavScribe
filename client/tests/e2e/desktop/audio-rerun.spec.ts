@@ -180,10 +180,49 @@ test("换服务重跑：仅登记一个服务 → modal 提示无其他在线服
   await expect(page.locator("#modal-body .set-note.err", { hasText: "没有其他在线服务可选" })).toBeVisible();
 });
 
-test("换服务重跑：源视频已变更 → 缓存失效 → 重新提取音轨后提交", async ({ request }) => {
+test("换服务重跑：源视频已变更 → 缓存失效 → 服务读不到（400）→ 回退重新提取音轨后提交", async ({ request }) => {
   const dir = freshUserData();
   // 复位必须在 launch 之前：app 首帧轮询会吞掉前序 test 留在双 mock 上的 job（mock 8302 ← test3、
   // second 8305 ← test2），任务表先渲染出残留「video-a.mp4」行，子串 + .first() 定位会误点残留行
+  await resetMocks(request);
+  const { app, page } = await launch(dir);
+  try {
+    // 文件名含 __notfound__：mock /scan/submit 对该路径回 400「文件不存在」（与真实远程 serve
+    // 读不到客户端本机路径同形）→ F-11 video 模式直读提交 400 → 回退本机重提上传
+    const video = join(dir, "src-video-a-__notfound__.mp4");
+    cpSync(join(FIXTURES, "video-a.mp4"), video);
+    await dispatchFile(page, video);
+    expect(cacheCount(dir, ".opus")).toBe(1);
+    const firstUp = await mockUploads(request, MOCK);
+
+    // 变更源视频 mtime → 缓存条目失效 → 重跑走 F-11 video 模式（源路径由任务行 file_path 恢复）
+    const t = new Date(Date.now() + 3600_000);
+    utimesSync(video, t, t);
+
+    await goView(page, "jobs");
+    const row = page.locator(".job-row", { has: page.locator(".fn", { hasText: /^src-video-a-__notfound__\.mp4$/ }) }).first();
+    await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
+
+    await row.locator(".rerun").click();
+    // F-11 video 模式文案（原「无有效音轨缓存」已升级为直读优先 + 自动回退口径）
+    await expect(page.locator("#modal-body .set-note", { hasText: "无可用音轨缓存（源视频在本机：" })).toBeVisible();
+    await page.locator('input[name="rerun-engine"][value="second"]').check();
+    await page.click("#rerun-go");
+    await expect(page.locator("#toasts .toast.ok", { hasText: "换服务重跑" })).toBeVisible({ timeout: 30_000 });
+
+    // 直读 400 回退 = 本机重提取 opus 上传 second；源字节未变（仅 mtime）→ 与首次提取一致
+    const up2 = await mockUploads(request, SECOND);
+    expect(up2).toHaveLength(1);
+    expect(up2[0].head).toBe(OGG_HEAD);
+    expect(up2[0].size).toBe(firstUp[0].size);
+  } finally {
+    await app.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("换服务重跑：缓存失效 + 源视频可读 → 直读提交目标服务（F-11 video 模式免本地提取）", async ({ request }) => {
+  const dir = freshUserData();
   await resetMocks(request);
   const { app, page } = await launch(dir);
   try {
@@ -191,9 +230,8 @@ test("换服务重跑：源视频已变更 → 缓存失效 → 重新提取音�
     cpSync(join(FIXTURES, "video-a.mp4"), video);
     await dispatchFile(page, video);
     expect(cacheCount(dir, ".opus")).toBe(1);
-    const firstUp = await mockUploads(request, MOCK);
 
-    // 变更源视频 mtime → 缓存条目失效（源仍在 → 走重提分支）
+    // 变更源视频 mtime → 缓存条目失效；源可读 → F-11 video 模式优先直读（不走本机提取）
     const t = new Date(Date.now() + 3600_000);
     utimesSync(video, t, t);
 
@@ -202,16 +240,26 @@ test("换服务重跑：源视频已变更 → 缓存失效 → 重新提取音�
     await expect(row.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
 
     await row.locator(".rerun").click();
-    await expect(page.locator("#modal-body .set-note", { hasText: "无有效音轨缓存" })).toBeVisible();
+    // video 模式文案：直读优先 + 服务读不到时自动转本机提取
+    const note = page.locator("#modal-body .set-note", { hasText: "无可用音轨缓存（源视频在本机：" });
+    await expect(note).toBeVisible();
+    await expect(note).toContainText("直读源视频");
     await page.locator('input[name="rerun-engine"][value="second"]').check();
     await page.click("#rerun-go");
     await expect(page.locator("#toasts .toast.ok", { hasText: "换服务重跑" })).toBeVisible({ timeout: 30_000 });
 
-    const up2 = await mockUploads(request, SECOND);
-    expect(up2).toHaveLength(1);
-    expect(up2[0].head).toBe(OGG_HEAD);
-    // 源字节未变（仅 mtime）→ 重提结果与首次提取一致
-    expect(up2[0].size).toBe(firstUp[0].size);
+    // second 收到的是直读任务（源路径透传），无 opus 上传
+    await expect
+      .poll(async () => ((await (await request.get(`${SECOND}/jobs?detail=1`)).json()) as any[]).length, { timeout: 30_000 })
+      .toBe(1);
+    const jobs2 = (await (await request.get(`${SECOND}/jobs?detail=1`)).json()) as any[];
+    expect(jobs2[0].files.map((f: any) => f.path)).toContain(video);
+    expect(await mockUploads(request, SECOND)).toHaveLength(0);
+
+    // 任务表出现 second 的直读任务行，跑到完成
+    const secondRow = page.locator(".job-row", { has: page.locator(".fn", { hasText: /^src-video-a\.mp4$/ }) })
+      .filter({ has: page.locator(".job-cell", { hasText: "second" }) });
+    await expect(secondRow.locator(".pill.p-done")).toBeVisible({ timeout: 30_000 });
   } finally {
     await app.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });

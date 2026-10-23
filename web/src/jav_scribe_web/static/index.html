@@ -6,8 +6,8 @@
 <title>JavScribe 字幕工作台</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 
-  <script type="module" crossorigin src="/assets/index-Jy7WhbQr.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-CAYsy20t.css">
+  <script type="module" crossorigin src="/assets/index-CAPDhTm0.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DrlLUyZP.css">
 </head>
 <body>
 <header>
@@ -123,7 +123,7 @@
 
     <div id="folder-pending" hidden>
       <div class="scan-summary">
-        <label class="chk-row"><input type="checkbox" id="folder-select-all"><span>全选</span></label>
+        <label class="chk-row" title="全选（所有页）"><input type="checkbox" id="folder-select-all"><span>全选</span></label>
         <span id="folder-count" class="muted small mono"></span>
       </div>
       <div id="folder-table" class="table-wrap"></div>
@@ -145,6 +145,10 @@
         </select>
       </label>
       <button id="dispatch-go" class="btn btn-primary" disabled>&#9654; 开始生成</button>
+      <label class="field" style="flex-direction:row;align-items:center;gap:7px;padding-bottom:11px">
+        <span class="field-label">本机提并发<span class="help" tabindex="0" data-tip="本主任务本机提音轨并发，空=客户端设置音轨并发（1-8）">?</span></span>
+        <input id="batch-extract-workers" type="number" min="1" max="8" step="1" class="mono" placeholder="跟随设置" style="width:4.5em;height:21px;padding:0 6px">
+      </label>
       <label class="chk-row autosave-chk">
         <input type="checkbox" id="autosave"><span>完成后写回源目录</span>
         <span class="help" tabindex="0" data-tip="仅对「选择文件 / 选择文件夹」上传的影片有效：任务完成后把 srt 自动写回影片原目录（页面需以 https 访问并保持打开；拖入或浏览器不支持时改为自动下载，需手动放到影片旁）。「扫描目录」任务无需勾选——完成后字幕自动落回客户端部署机影片旁（Web 形态即本页面所在机器）。">?</span>
@@ -154,7 +158,7 @@
     <div id="scan-panel">
       <div class="scan-head">
         <span class="scan-title">扫描客户端目录</span>
-        <span class="muted small">扫描运行 JavScribe 的这台机器，不是当前浏览器电脑。<span class="help" tabindex="0" id="scan-help" data-tip="这里扫描的是运行 JavScribe 客户端的机器。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理浏览器电脑里的文件，请使用上方「选择文件 / 选择文件夹」。">?</span></span>
+        <span class="muted small"><span id="scan-scope-text">扫描运行 JavScribe 的这台机器，不是当前浏览器电脑。</span><span class="help" tabindex="0" id="scan-help" data-tip="这里扫描的是运行 JavScribe 客户端的机器。普通扫描只读取文件名、大小和同目录字幕文件，不会打开视频，也不会触发网盘下载。要处理浏览器电脑里的文件，请使用上方「选择文件 / 选择文件夹」。">?</span></span>
       </div>
       <div class="scan-bar">
         <label class="field grow">
@@ -177,7 +181,7 @@
         <div class="scan-safety-note" role="status">本次只检查文件名、大小和同目录字幕；内嵌字幕暂不检查，不会因扫描触发网盘下载。</div>
         <div id="scan-tabs" class="scan-tabs" hidden></div>
         <div class="scan-summary">
-          <label class="chk-row"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
+          <label class="chk-row" title="全选（当前视图所有页）"><input type="checkbox" id="scan-select-all"><span>全选</span></label>
           <span id="scan-count" class="muted small mono"></span>
         </div>
         <div id="scan-table" class="table-wrap"></div>
@@ -185,6 +189,10 @@
       </div>
       <div class="scan-actions">
         <button id="scan-submit" class="btn btn-primary" hidden disabled>&#9654; 生成字幕（已选择 0 项）</button>
+        <label class="field" id="scan-extract-workers-ctl" hidden style="flex-direction:row;align-items:center;gap:7px">
+          <span class="field-label">本机提并发<span class="help" tabindex="0" data-tip="本主任务本机提音轨并发，空=客户端设置音轨并发（1-8）">?</span></span>
+          <input id="scan-extract-workers" type="number" min="1" max="8" step="1" class="mono" placeholder="跟随设置" style="width:4.5em;height:21px;padding:0 6px">
+        </label>
         <button id="scan-writeback" class="btn" hidden disabled title="把已选「已生成未落盘」项的已完成任务结果写回影片同目录（已有 .zh.srt 不覆盖）；不重新生成">&#8617; 回写所选（0）</button>
       </div>
     </div>

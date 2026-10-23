@@ -70,14 +70,19 @@ test("全局暂停 UI：暂停所有 → 服务卡/行态 → 提交任务挂起
   await page.locator("#scan-select-all").check();
   await page.click("#scan-submit");
   await expectToast(page, "已入队 3 项");
-  // 3 条本机扫描任务停在闸前显示「已暂停」；seed 的服务侧排队任务保持 pending——
-  // serve 队列挂起只冻新开任务、不改已入队 job 状态（mock 与 serve 0.2.3+ 同语义）
-  await expect(page.locator(".job-row .pill.p-paused")).toHaveCount(3, { timeout: 20_000 });
+  // 3 条本机扫描任务停在闸前显示「已暂停」；seed 的服务侧排队任务按 Fix C（F-09）
+  // 套「已暂停（服务队列挂起）」显示副本（job 真实状态仍 pending：serve 队列挂起只冻
+  // 新开任务、不改已入队 job 状态，mock 与 serve 0.2.3+ 同语义——看板行要体现队列挂起）
+  await expect(page.locator(".job-row .pill.p-paused")).toHaveCount(4, { timeout: 20_000 });
   await expect(
     page.locator(".job-row .cell-pos", { hasText: "已暂停（等待继续）" }).first(),
   ).toBeVisible({ timeout: 20_000 });
+  // Fix C 口径：serve 排队行位置列文案（显示副本，恢复后自愈回 pending）
+  await expect(
+    page.locator(".job-row .cell-pos", { hasText: "已暂停（服务队列挂起）" }),
+  ).toBeVisible({ timeout: 20_000 });
   // 合并筛选条：「已暂停」按钮内嵌计数（旧 #job-stats 统计行已删）
-  await expect(page.locator('#job-filter button[data-f="paused"]')).toContainText("已暂停 3", { timeout: 20_000 });
+  await expect(page.locator('#job-filter button[data-f="paused"]')).toContainText("已暂停 4", { timeout: 20_000 });
   // 3. 继续任务（resume 无 confirm）
   await page.click("#job-pause-all");
   await expectToast(page, "已继续所有任务");

@@ -97,6 +97,8 @@ export interface JobRow {
   task_id?: string | null;
   /** 本机视频路径（仅本机扫描/监听行有；浏览器上传任务为 null → 无重试/继续按钮） */
   local_path?: string | null;
+  /** serve 任务行的本机源视频路径（task.path 透传，desktop 直读提交才有；换服务重跑恢复源视频用，可能指向已删文件） */
+  file_path?: string | null;
   /** 本地扫描任务：提交前检测到的字幕状态（external/embedded/named）——制作图「已有字幕」提示 */
   sub_status?: string | null;
   output_files?: string[];
