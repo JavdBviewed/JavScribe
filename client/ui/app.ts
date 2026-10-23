@@ -37,6 +37,8 @@ interface AppState {
   folderFiles: FolderVideo[] | null;
   folderChecked: Set<string>;      // 文件夹待选表勾选项（key=rel；有字幕/过小默认不勾，与扫描表同口径）
   folderPage: number;              // 文件夹待选表当前页（0 起；勾选态全局维护，与翻页互不影响）
+  folderGen: number;               // 文件夹选择代际号（setFolder/clearFolder 用户动作递增；批次收尾按代际决定是否清 UI，防已完批误清中途新选文件夹）
+  fileDispatching: boolean;        // 单文件在途标记（startSingle 派发置位 / finishDispatch 清位；防批次并行期单文件二次提交）
   filter: string;
   source: string;                  // 任务来源筛选：all / local（本机派发）/ serve（他端任务）
   busy: boolean;
@@ -91,9 +93,11 @@ const state: AppState = {
   folderFiles: null,
   folderChecked: new Set(),
   folderPage: 0,
+  folderGen: 0,
   filter: "all",
   source: "all",
   busy: false,
+  fileDispatching: false,
   knownJobs: new Map(),
   retried: new Set(),
   engines: [],
@@ -3396,7 +3400,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   function updateGo() {
     const n = pendingCount();
-    const ok = !state.busy && n > 0 && !!engineSelect.value;
+    const ok = n > 0 && !!engineSelect.value; // 0.2.53 需求①：批次在跑不再门控入口（可并发建新主任务）
     dispatchGo.disabled = !ok;
     dispatchGo.innerHTML = n > 1 ? "&#9654; 开始生成（" + n + " 项）" : "&#9654; 开始生成";
     updateScanGo();
@@ -3405,7 +3409,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function updateScanGo() {
     const scanActive = !!state.scanTask && ["queued", "running", "paused"].includes(state.scanTask.status);
     scanGo.disabled =
-      !scanPath.value.trim() || !engineSelect.value || state.busy || scanActive;
+      !scanPath.value.trim() || !engineSelect.value || scanActive; // 0.2.53 需求①：批次在跑可发起新扫描任务
   }
 
   engineSelect.onchange = () => {
@@ -3791,29 +3795,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   drop.onclick = (ev) => {
     if (ev.target instanceof Element && ev.target.closest(".help")) return; // 帮助图标不触发选文件
-    if (!state.busy) pickFile();
+    pickFile(); // 0.2.53 需求①：批次在跑可选单文件
   };
   drop.onkeydown = (ev) => {
-    if ((ev.key === "Enter" || ev.key === " ") && !state.busy) { ev.preventDefault(); pickFile(); }
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pickFile(); } // 0.2.53 需求①
   };
   fileInput.onchange = (ev) => {
     const files = (ev.target as HTMLInputElement).files;
     setFile(files ? files[0] : null);
   };
   for (const name of ["dragover", "dragenter"] as const) {
-    drop.addEventListener(name, (ev) => { ev.preventDefault(); if (!state.busy) drop.classList.add("hover"); });
+    drop.addEventListener(name, (ev) => { ev.preventDefault(); drop.classList.add("hover"); }); // 0.2.53 需求①
   }
   for (const name of ["dragleave", "drop"] as const) {
     drop.addEventListener(name, (ev) => { ev.preventDefault(); drop.classList.remove("hover"); });
   }
   drop.addEventListener("drop", (ev) => {
     const dt = ev.dataTransfer;
-    if (!state.busy && dt) setFile(dt.files[0]);
+    if (dt) setFile(dt.files[0]); // 0.2.53 需求①
   });
 
   chipX.onclick = () => {
-    if (state.busy) return;
-    state.file = null;
+    state.file = null; // 0.2.53 需求①：批次在跑可清除（在途派发已持 File 引用）
     state._fsFileDir = null;
     fileInput.value = "";
     $("file-chip").hidden = true;
@@ -3847,6 +3850,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function clearFolder() {
+    state.folderGen++; // 0.2.53 需求①：用户清除动作 → 代际递增
     state.folderFiles = null;
     state.folderChecked = new Set();
     state.folderPage = 0;
@@ -3885,6 +3889,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       toast("该文件夹里没有支持的视频文件（可到「设置 → 客户端 → 扫描规则」调整扩展名）", "err");
       return;
     }
+    state.folderGen++; // 0.2.53 需求①：用户选择动作 → 代际递增
     state.folderFiles = vids;
     // 默认勾选 = 无字幕项（外部 srt / 标记（名）默认不勾；过小默认不勾可手勾）——与扫描表同口径
     state.folderChecked = new Set(vids.filter((v) => !folderHasSub(v) && !v.too_small).map(folderKey));
@@ -3909,6 +3914,23 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     return '<span class="muted" title="本地不检查内嵌字幕轨">未检查</span>';
   }
 
+  // 本页全选派生回写（0.2.53 需求②）：render 与全局「全选」共用——全局全选手动同步行框
+  // 不重渲染，表头框须同步重派生，否则残留上一渲染态（首击 page-all 会被误判为取消）
+  function syncFolderPageAll(): void {
+    const pa = $("folder-table").querySelector("#folder-page-all") as HTMLInputElement | null;
+    if (!pa) return;
+    const items = state.folderFiles || [];
+    const PAGE = state.scanPageSize;
+    const pages = Math.max(1, Math.ceil(items.length / PAGE));
+    const pg = Math.min(Math.max(0, state.folderPage), pages - 1);
+    const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
+    const pageSelKeys = pageItems.filter((v) => !v.too_small).map(folderKey);
+    const nSel = pageSelKeys.filter((k) => state.folderChecked.has(k)).length;
+    pa.disabled = pageSelKeys.length === 0;
+    pa.indeterminate = nSel > 0 && nSel < pageSelKeys.length;
+    pa.checked = pageSelKeys.length > 0 && nSel === pageSelKeys.length;
+  }
+
   function renderFolderTable(): void {
     const items = state.folderFiles || [];
     const PAGE = state.scanPageSize; // 复用扫描表每页行数档位（同一 localStorage 键）
@@ -3917,7 +3939,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
     $("folder-table").innerHTML = pageItems.length ? `
       <table class="scan-table">
-        <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
+        <thead><tr><th class="col-check"><input type="checkbox" id="folder-page-all" aria-label="本页全选" title="勾选本页全部可选项（过小项需手动勾选）"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
         <tbody>
           ${pageItems.map((v) => `
             <tr class="${folderHasSub(v) ? "has-sub" : ""}${v.too_small ? " too-small" : ""}">
@@ -3930,12 +3952,27 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </table>` : '<div class="muted small">该文件夹里没有视频文件</div>';
     $("folder-table").querySelectorAll("input[type=checkbox]").forEach((cb) => {
       const input = cb as HTMLInputElement;
+      if (input.id === "folder-page-all") return; // 0.2.53 需求②：表头本页全选走独立绑定
       input.onchange = () => {
         if (input.checked) state.folderChecked.add(input.dataset.key || "");
         else state.folderChecked.delete(input.dataset.key || "");
         updateFolderSummary();
+        syncFolderPageAll(); // 0.2.53 需求②：行级勾选不重渲染，表头框须重派生
       };
     });
+    // 本页全选（0.2.53 需求②）：只作用「当前页 ∩ 可选项」（too_small 需手动勾选）；取消只清当前页
+    {
+      const pa = $("folder-table").querySelector("#folder-page-all") as HTMLInputElement | null;
+      if (pa) {
+        const pageSelKeys = pageItems.filter((v) => !v.too_small).map(folderKey);
+        syncFolderPageAll();
+        pa.onchange = () => {
+          if (pa.checked) for (const k of pageSelKeys) state.folderChecked.add(k);
+          else for (const k of pageSelKeys) state.folderChecked.delete(k);
+          renderFolderTable();
+        };
+      }
+    }
     renderFolderPager(items.length);
     updateFolderSummary();
   }
@@ -4003,15 +4040,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     $("folder-table").querySelectorAll("input[type=checkbox]")
       .forEach((cb) => {
         const input = cb as HTMLInputElement;
+        if (input.id === "folder-page-all") return; // 0.2.53 需求②：表头框由 renderFolderTable 回写
         input.checked = state.folderChecked.has(input.dataset.key || "");
       });
     updateFolderSummary();
+    syncFolderPageAll(); // 0.2.53 需求②：不重渲染路径也要重派生表头框
   };
 
   pickFolder.onclick = async (ev) => {
     ev.stopPropagation();
-    if (state.busy) return;
-    const r = await platform.pickVideoFolder();
+    const r = await platform.pickVideoFolder(); // 0.2.53 需求①：批次在跑可选文件夹
     if (r === "fallback") { folderInput.click(); return; }
     if (r) setFolder(r);
   };
@@ -4035,7 +4073,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   dispatchGo.onclick = () => {
     const engine = engineSelect.value;
-    if (!engine || state.busy) return;
+    if (!engine) return; // 0.2.53 需求①：批次在跑可提交（单文件重复提交由 fileDispatching 挡）
     if (state.folderFiles) { startBatch(engine); return; }
     if (!state.file) return;
     startSingle(engine);
@@ -4181,7 +4219,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   /** 泵重触发入口（refresh / 链结算 / 设置保存均调）：只释放排队项，不产生新任务 */
   function pumpDispatch(): void {
     for (const fn of [...pumpSlots]) fn();
-    if (singleQueuedFile && !state.busy && state.file === singleQueuedFile && !state.folderFiles) {
+    if (singleQueuedFile && state.file === singleQueuedFile && !state.folderFiles) { // 0.2.53 需求①：去 busy 门控，保留 canDispatch 封顶
       const engine = engineSelect.value;
       if (engine && canDispatch(engine)) startSingle(engine);
     }
@@ -4190,6 +4228,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function startSingle(engine: string) {
     const file = state.file;
     if (!file) { singleQueuedFile = null; return; }
+    if (state.fileDispatching) return; // 0.2.53 需求①：单文件在途防二次提交（不挡文件夹/扫描并发）
     if (engine === "auto") {
       const real = resolveAutoEngine();
       if (!real) {
@@ -4208,8 +4247,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       return;
     }
     singleQueuedFile = null; // 显式派发（含泵触发）：排队标记作废
-    state.busy = true;
-    updateGo();
+    state.fileDispatching = true; // 0.2.53 需求①：单文件在途标记
+    enterSubmitQueue(); // 0.2.53 需求①：引用计数 busy（与批次泵并存，全部退出才复位）
     localStorage.setItem("javweb_engine", engine);
     preparePipeline();
     // 预登记：上传请求发出前先持久化登记（job 受理后 ok 分支 rekey 正式键）
@@ -4228,13 +4267,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         showStatus(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
         toast(`已提交到「${engine}」· ${up.name} → 任务 ${up.job_id}`, "ok");
         webShowView("jobs"); // 提交即进任务看板
-        finishDispatch(true);
+        finishDispatch(true, file);
         refresh();
       } else {
         const msg = (d as { error?: string }).error || "上传失败";
         showStatus(`${file.name}：${msg}`, "err");
         toast(`${file.name}：${msg}`, "err");
-        finishDispatch(false);
+        finishDispatch(false, file);
       }
     });
   }
@@ -4407,11 +4446,29 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   function startBatch(engine: string) {
     // 待选表：只提交勾选的项（旧「全有字幕自动跳过」改由表内勾选表达）
-    const queue = (state.folderFiles || [])
-      .filter((v) => state.folderChecked.has(folderKey(v)))
-      .map((v) => v.file);
+    const checked = (state.folderFiles || [])
+      .filter((v) => state.folderChecked.has(folderKey(v)));
     singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
-    if (!queue.length) return;
+    if (!checked.length) return;
+    // 0.2.53 需求①：消费勾选前先取现状 label 口径——消费后 state.folderFiles 可能为空，
+    // 单组兜底再调 batchLabelForFolder() 会落「文件夹」
+    const singleLabel = batchLabelForFolder();
+    // 0.2.53 需求①：发送时刻消费已勾选项（泵闭包已持 queue 拷贝不受影响）；
+    // 未勾选剩余留表可再勾再发，支持「批次运行中继续建主任务」
+    const consumed = new Set(checked.map(folderKey));
+    state.folderFiles = (state.folderFiles || []).filter((v) => !consumed.has(folderKey(v)));
+    for (const k of consumed) state.folderChecked.delete(k);
+    if (!state.folderFiles.length) {
+      // 全部消费：收口文件夹 UI（单文件槽不动；批次收尾按代际决定清否）
+      state.folderFiles = null;
+      $("folder-chip").hidden = true;
+      $("folder-pending").hidden = true;
+    }
+    renderFolderTable();
+    updateFolderSummary();
+    updateGo(); // 消费后即时刷新按钮态（剩余 0 勾选 → 开始生成禁用，重复点击天然 no-op）
+    const queue = checked.map((v) => v.file);
+    const gen = state.folderGen; // 捕获代际：批次收尾比对代际决定是否清文件夹 UI（防误清中途新选）
     // 0.2.52 M1：按盘拆 batch——按 diskKeyOf(_localPath) 分组，每组独立 batch + 各自泵；
     // 单组（web 形态无 _localPath 全空键 / 单目录选择）label 维持现状口径，零噪音。
     const groups = groupByDisk(
@@ -4421,7 +4478,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     );
     const multi = groups.length > 1;
     groups.forEach((g, gi) => {
-      const batch = { id: genBatchId(), label: folderGroupLabel(g, multi, batchLabelForFolder()) };
+      const batch = { id: genBatchId(), label: folderGroupLabel(g, multi, singleLabel) };
       runDispatchQueue(
         g.items,
         engine,
@@ -4431,8 +4488,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           : okN === total
           ? `批量完成：已提交 ${okN}/${total} 项，见「字幕任务」`
           : `批量完成：成功 ${okN}/${total} 项，其余失败（可重新选择文件夹）`,
-        // 末组收尾清文件夹 UI（busy 由泵引用计数收口）；非末组空收尾
-        gi === groups.length - 1 ? () => finishBatch() : () => {},
+        // 末组收尾清文件夹 UI（busy 由泵引用计数收口）；非末组空收尾；代际决定清否
+        gi === groups.length - 1 ? () => finishBatch(gen) : () => {},
       );
     });
   }
@@ -4814,14 +4871,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (settled === total) finish(); // 空队列
   }
 
-  function finishBatch() {
-    state.busy = false;
-    state.folderFiles = null;
-    state.folderChecked = new Set();
-    state.folderPage = 0;
-    folderInput.value = "";
-    $("folder-chip").hidden = true;
-    $("folder-pending").hidden = true;
+  function finishBatch(gen?: number) {
+    // 0.2.53 需求①：busy 由泵引用计数收口（exitSubmitQueue），不再在此直接复位；
+    // 代际比对：期间用户重选/清除过文件夹则保留其 UI（防已完批误清新选文件夹）
+    const stale = gen !== undefined && gen !== state.folderGen;
+    if (!stale) {
+      state.folderFiles = null;
+      state.folderChecked = new Set();
+      state.folderPage = 0;
+      folderInput.value = "";
+      $("folder-chip").hidden = true;
+      $("folder-pending").hidden = true;
+    }
     updateGo();
     watchPump();
   }
@@ -4984,9 +5045,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     el.textContent = text;
   }
 
-  function finishDispatch(ok: boolean) {
-    state.busy = false;
-    if (ok) {
+  function finishDispatch(ok: boolean, file?: File) {
+    // 0.2.53 需求①：单文件在途引用计数收口（与批次并存，全部退出才复位 busy）
+    state.fileDispatching = false;
+    exitSubmitQueue();
+    if (ok && (!file || state.file === file)) {
+      // 用户中途未换文件才清单文件槽（防误清新选文件 UI）
       state.file = null;
       fileInput.value = "";
       $("file-chip").hidden = true;
@@ -5941,7 +6005,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   scanGo.onclick = async () => {
     const engine = engineSelect.value;
     const path = scanPath.value.trim();
-    if (!engine || !path || state.busy) return;
+    if (!engine || !path) return; // 0.2.53 需求①：批次在跑可发起新扫描（入口 disabled 判定已同步放开）
     if (engine === "auto") {
       const cands = (state.engines || []).filter((x) => x.online && x.enabled !== false);
       if (!cands.length) {
@@ -5988,6 +6052,22 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       updateScanGo();
     }
   };
+
+  // 本页全选派生回写（0.2.53 需求②）：render 与全局「全选」共用（口径同 renderScanResults 表头块）
+  function syncScanPageAll(): void {
+    const pa = $("scan-table").querySelector("#scan-page-all") as HTMLInputElement | null;
+    if (!pa) return;
+    const items = scanViewItems();
+    const PAGE = state.scanPageSize;
+    const pages = Math.max(1, Math.ceil(items.length / PAGE));
+    const pg = Math.min(Math.max(0, state.scanPage), pages - 1);
+    const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
+    const selPaths = pageItems.filter((i) => !i.too_small && !i.reconciled_job_id).map((i) => i.path);
+    const nSel = selPaths.filter((p) => state.scanChecked.has(p)).length;
+    pa.disabled = selPaths.length === 0;
+    pa.indeterminate = nSel > 0 && nSel < selPaths.length;
+    pa.checked = selPaths.length > 0 && nSel === selPaths.length;
+  }
 
   function renderScanResults(d: ScanResult) {
     const items = scanViewItems();
@@ -6041,7 +6121,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const pageItems = items.slice(pg * PAGE, (pg + 1) * PAGE);
       $("scan-table").innerHTML = `
       <table class="scan-table">
-        <thead><tr><th class="col-check"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
+        <thead><tr><th class="col-check"><input type="checkbox" id="scan-page-all" aria-label="本页全选" title="勾选本页全部可选项（过小 / 已生成未落盘项需手动勾选）"></th><th>文件</th><th class="col-size">大小</th><th class="col-sub">字幕</th></tr></thead>
         <tbody>
           ${pageItems.map((i) => {
             const langs = (i.embedded_langs || []).join("/") || "—";
@@ -6073,12 +6153,27 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </table>`;
       $("scan-table").querySelectorAll("input[type=checkbox]").forEach((cb) => {
         const input = cb as HTMLInputElement;
+        if (input.id === "scan-page-all") return; // 0.2.53 需求②：表头本页全选走独立绑定
         input.onchange = () => {
           if (input.checked) state.scanChecked.add(input.dataset.path || "");
           else state.scanChecked.delete(input.dataset.path || "");
           updateScanSummary();
+          syncScanPageAll(); // 0.2.53 需求②：行级勾选不重渲染，表头框须重派生
         };
       });
+      // 本页全选（0.2.53 需求②）：只作用「当前页 ∩ 当前视图域 ∩ 可选项」（视图域已由 scanViewItems 过滤）
+      {
+        const pa = $("scan-table").querySelector("#scan-page-all") as HTMLInputElement | null;
+        if (pa) {
+          const selPaths = pageItems.filter((i) => !i.too_small && !i.reconciled_job_id).map((i) => i.path);
+          syncScanPageAll();
+          pa.onchange = () => {
+            if (pa.checked) for (const p of selPaths) state.scanChecked.add(p);
+            else for (const p of selPaths) state.scanChecked.delete(p);
+            if (state.lastScan) renderScanResults(state.lastScan);
+          };
+        }
+      }
       renderScanPager(items.length);
     }
     $("scan-results").hidden = false;
@@ -6131,7 +6226,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (truncated) text += (text ? " · " : "") + "列表已截断（仅前 5000 项）";
     $("scan-count").textContent = text;
     const button = scanSubmit;
-    button.disabled = n === 0 || !engineSelect.value || state.busy;
+    button.disabled = n === 0 || !engineSelect.value; // 0.2.53 需求①：批次在跑可提交扫描
     button.innerHTML = "&#9654; 生成字幕（已选择 " + n + " 项）";
     // 「回写所选」：desktop-only；已选中 ∩ 已生成未落盘 ≥1 才可点（回写不重跑生成）
     const wbBtn = $("scan-writeback") as HTMLButtonElement;
@@ -6162,15 +6257,17 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     $("scan-table").querySelectorAll("input[type=checkbox]")
       .forEach((cb) => {
         const input = cb as HTMLInputElement;
+        if (input.id === "scan-page-all") return; // 0.2.53 需求②：表头框由 renderScanResults 回写
         input.checked = state.scanChecked.has(input.dataset.path || "");
       });
     updateScanSummary();
+    syncScanPageAll(); // 0.2.53 需求②：不重渲染路径也要重派生表头框
   };
 
   scanSubmit.onclick = async () => {
     const engine = engineSelect.value;
     const files = [...state.scanChecked];
-    if (!engine || !files.length || state.busy) return;
+    if (!engine || !files.length) return; // 0.2.53 需求①：批次在跑可提交扫描
     // 已有字幕确认：所选含字幕文件（外部 srt / 内嵌轨 / 文件名 C 版）须用户确认
     const subItems = state.scanItems.filter(
       (i) => state.scanChecked.has(i.path) && i.has_subtitle,

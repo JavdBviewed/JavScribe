@@ -334,7 +334,7 @@ test("扫描翻页：105 文件 → 默认 10/页 11 页 → 切档 100 → 翻�
   await expect(page.locator("#scan-table .scan-name")).toHaveCount(100);
   // 默认全选 105 → 取消第 1 行勾选 → 翻页 → 计数保持（勾选态与页无关）
   await expect(page.locator("#scan-count")).toContainText("105 / 105");
-  await page.locator("#scan-table input[type=checkbox]").first().uncheck();
+  await page.locator("#scan-table tbody input[type=checkbox]").first().uncheck(); // 0.2.53 thead 新增本页全选框：限定 tbody（原意图=首行数据框）
   await expect(page.locator("#scan-count")).toContainText("104 / 105");
   await page.click("#spg-next");
   await expect(page.locator("#scan-pager .pg-info")).toHaveText("第 2 / 2 页 · 共 105 个文件");
@@ -343,7 +343,7 @@ test("扫描翻页：105 文件 → 默认 10/页 11 页 → 切档 100 → 翻�
   // 回第 1 页：未勾选项保持未勾选
   await page.click("#spg-prev");
   await expect(page.locator("#scan-table .scan-name")).toHaveCount(100);
-  await expect(page.locator("#scan-table input[type=checkbox]").first()).not.toBeChecked();
+  await expect(page.locator("#scan-table tbody input[type=checkbox]").first()).not.toBeChecked(); // 0.2.53 thead 新增本页全选框：限定 tbody
   rmSync(dir, { recursive: true, force: true });
 });
 
