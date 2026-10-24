@@ -13,7 +13,7 @@ import crypto from "node:crypto";
 
 const PORT = Number(process.argv[2] || 8304);
 // 慢渠道实例：所有 GET 响应前统一延迟（TTFB），供「谁快用谁」择优用例
-const DELAY = Number(process.env.MOCK_UPDATE_FEED_DELAY_MS || 0);
+const DELAY = Number(process.env.MOCK_UPDATE_FEED_DELAY_MS || process.argv[3] || 0);
 const VERSION = "9.9.9";
 const SIZE = 1_572_864;
 const CHUNK = 64 * 1024;

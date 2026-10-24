@@ -38,7 +38,7 @@ export default defineConfig({
     },
     {
       // 更新渠道择优 e2e：慢渠道（TTFB 延迟 2s，探测超时 3s 内仍可用但更慢）；快渠道=8304 无延迟实例
-      command: "MOCK_UPDATE_FEED_DELAY_MS=2000 node client/tests/e2e/mock-update-feed.mjs 8303",
+      command: "node client/tests/e2e/mock-update-feed.mjs 8303 2000", // argv 传延迟：webServer command 走平台 shell，win 不认 VAR=x 前缀
       url: "http://127.0.0.1:8303/latest-linux.yml",
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
