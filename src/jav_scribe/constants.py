@@ -1,6 +1,6 @@
 APP_NAME = "JavScribe"
 APP_ORG = "JavScribe"
-APP_VERSION = "0.2.12"
+from . import __version__ as APP_VERSION  # 单一真源：包 __init__.__version__（与 pyproject 版本同步）
 
 AUDIO_EXTS = ["mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "mka"]
 VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m2ts", "mpg", "mpeg"]
