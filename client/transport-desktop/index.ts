@@ -212,6 +212,7 @@ export const desktopTransport: Transport = {
   loadWriteBackMirror: async () => (await call<string>("loadWriteBackMirror")) || null,
   saveLedgerMirror: (json) => { void call("saveLedgerMirror", json); },
   loadLedgerMirror: async () => (await call<string>("loadLedgerMirror")) || null,
+  fsExists: async (p) => (await call<boolean>("fsExists", p)) === true,
   // 全局暂停/继续（桌面形态）：本机管线闸 + 全部已登记服务队列扇出，单端失败逐条降级不 throw
   pauseAll: (paused) => call<PauseAllResult>("pauseAll", String(paused)),
   // 看板统计（口径对齐工作台 /api/jobs/summary；pauseAll 按钮方向依赖 paused_all）

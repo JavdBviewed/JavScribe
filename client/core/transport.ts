@@ -105,6 +105,8 @@ export interface Transport {
   saveLedgerMirror?(json: string): void;
   /** 读派发账本镜像（启动兜底）；未实现 / 无镜像返回 null */
   loadLedgerMirror?(): Promise<string | null>;
+  /** 文件是否存在（中断重跑前校验源文件；web 形态未实现，UI 门控跳过） */
+  fsExists?(path: string): Promise<boolean>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */

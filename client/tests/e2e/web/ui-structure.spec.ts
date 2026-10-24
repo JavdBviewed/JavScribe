@@ -131,9 +131,9 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
   // 全局暂停按钮：无在途任务时隐藏（10-09 需求；有任务可见性见 interaction 全局暂停用例）
   await expect(page.locator("#job-pause-all")).toBeHidden();
   const filters = page.locator("#job-filter button");
-  await expect(filters).toHaveCount(9);
+  await expect(filters).toHaveCount(10); // 0.2.57：新增「中断」桶
   expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual([
-    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0",
+    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0", "中断 0",
   ]);
   await expect(filters.nth(0)).toHaveClass(/on/);
   await expect(page.locator("#job-pager")).toBeHidden();

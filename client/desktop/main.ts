@@ -1703,6 +1703,10 @@ function registerIpc(): void {
           batchesSave();
           return { ok: true };
         }
+        // 文件存在性（中断重跑前校验源文件；不存在则走新文件上传路径）
+        case "fsExists": {
+          try { return { ok: true, data: fs.existsSync(String(a0 || "")) }; } catch { return { ok: true, data: false }; }
+        }
         // 写回登记镜像（10-17-javscribe-0242-batch-bugs B）：renderer localStorage 异步落盘，
         // SIGKILL 丢最后一次写入 → renderer 每次保存同步镜像到 main 磁盘，启动丢失时以此兜底
         case "saveWriteBackMirror": {

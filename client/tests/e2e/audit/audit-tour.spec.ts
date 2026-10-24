@@ -363,9 +363,11 @@ test("T3 任务表（暂停立即性/换服务重跑/搜索/双时间列/清理/
     log(KIND, `筛选桶计数 = [${filterTxt}]`);
 
     // ---- 清理已完成（终态行：本机账本 + 服务端同步清理）----
-    await page.locator("#job-clear-done").click(); // confirm 自动受理
+    await page.locator("#job-clear-done").click(); // 0.2.57：历史清理对话框
+    await expect(page.locator("#job-cleanup-backdrop")).toBeVisible();
+    await page.locator("#job-cleanup-ok").click();
     await expect(page.locator("#job-list")).not.toContainText("TB-001.mp4", { timeout: 30_000 });
-    log(KIND, "清理已完成：TB 批次行消失");
+    log(KIND, "历史清理：TB 批次行消失");
     await shot(page, KIND, "12-after-clear-done");
 
     // ---- 密集列表（40 条完成，分页截图，人工目检 UI 交叉/重叠）----

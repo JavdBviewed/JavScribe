@@ -45,12 +45,12 @@ test("任务行显示添加时间与完成时间", async ({ page }) => {
   await expect(row.locator(".cell-finished")).toHaveClass(/is-done/);
 });
 
-test("筛选条：9 个状态按钮（内嵌计数）取代旧统计行，点击筛选生效", async ({ page }) => {
+test("筛选条：10 个状态桶（含中断，内嵌计数）取代旧统计行，点击筛选生效", async ({ page }) => {
   await seedSix(page);
 
   // 旧「统计行」已删除，与筛选条合一
   expect(await page.locator("#job-stats").count()).toBe(0);
-  await expect(page.locator("#job-filter button")).toHaveCount(9);
+  await expect(page.locator("#job-filter button")).toHaveCount(10); // 0.2.57：新增「中断」桶
 
   // 按钮内计数：活跃态按现行、终态走 serve 累计 summary（mock 口径=行计数）
   // running×2=转译中、pending×2=排队中、error×1=失败、skipped×1=跳过
@@ -63,6 +63,8 @@ test("筛选条：9 个状态按钮（内嵌计数）取代旧统计行，点击
   await expect(filterBtn(page, "skipped")).toContainText("1");
   await expect(filterBtn(page, "failed")).toContainText("1");
   await expect(filterBtn(page, "paused")).toContainText("0");
+  // 0.2.57：中断桶（仅账本行；seed 无中断 → 0）
+  await expect(filterBtn(page, "interrupted")).toContainText("0");
 
   // 点击筛选：只留对应桶的行
   await filterBtn(page, "queued").click();

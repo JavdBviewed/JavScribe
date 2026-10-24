@@ -1,9 +1,10 @@
 // 桌面端派发账本专测（10-21-javscribe-0251-task-history）
 // 打的是用户痛点链：多端客户端任务跑一半退出 → 重开主任务/子行/状态全丢。
-//   A. 派发未提交阶段杀进程 → 重启：主任务行 + 全部子行按最后本地状态恢复（账本兜底）
-//   B. 已提交任务杀进程 → 重启：服务端行优先不双行；服务失忆（mockReset）后账本行兜底
-//   C. 主任务取消（全终态未提交）→ 重启：终态账本行可单行「清除」，「清理已完成」整批清 + fan-out
-//   D. 清理已完成：终态行清除、非终态不动、服务端任务表收缩、抑制集重启后仍生效
+//   A. 派发未提交阶段杀进程 → 重启：非终态账本行迁移为「中断」（0.2.57 起不再渲染僵尸行），
+//      主任务组全中断 → 组级 [重跑全部][清除] + 「N 中断 · 重跑」按钮
+//   B. 已提交任务杀进程 → 重启：服务端行优先不双行；服务失忆（mockReset）后账本行兜底（中断态）
+//   C. 主任务取消（全终态未提交）→ 重启：终态账本行可单行「清除」，「历史清理」对话框整批清 + fan-out
+//   D. 历史清理：终态行清除、非终态不动、服务端任务表收缩、抑制集重启后仍生效
 // 账本键：localStorage javweb_dispatch_ledger_v1（desktop 另有 main 进程 ledger.json 镜像，
 // 本套断言走 localStorage 口径——renderer 侧同步写，kill 前至少一次 transition 已落盘）。
 import {
@@ -109,11 +110,16 @@ test("A：派发中退出（未提交服务）→ 重启主任务 + 3 子行恢�
       await expect(page2.locator(".job-batch-row .batch-sub-n")).toHaveText("3 子任务");
       // 4 行 = 3 账本子行 + 1 pre ghost（杀前提取已 pre 登记 → F4「未提交」占位行，既有行为）
       await expect(page2.locator(".job-row")).toHaveCount(4);
-      // 非终态账本行带「本地记录」提示；账本组无主任务操作按钮（无 pending 队列、serve 不认识）
-      const noted = page2.locator(".job-row .sub", { hasText: "本地记录（服务端记录不可用" });
-      await expect(noted).toHaveCount(3, { timeout: 20_000 });
+      // 0.2.57：非终态账本行启动时迁移为「中断」（不再渲染「运行中 0%」僵尸行），sub 显中断原因
+      await expect(page2.locator(".job-row .pill.p-interrupted")).toHaveCount(3, { timeout: 20_000 });
+      // app.close() 为优雅关闭 → renderer pagehide 迁移先落「客户端退出」（启动迁移幂等不覆盖），
+      // 与 jobs-recovery 口径一致（截图实锤 04:42 轮次：sub「客户端退出，…」）
+      await expect(page2.locator(".job-row .sub", { hasText: "客户端退出，任务链路断开" })).toHaveCount(3);
       await expect(page2.locator(".job-row .pill.p-unsubmitted")).toHaveCount(1);
-      await expect(page2.locator(".job-batch-row .batch-op")).toHaveCount(0);
+      // 主任务组全中断 → 组级 [重跑全部][清除]
+      await expect(page2.locator(".job-batch-row .batch-op")).toHaveCount(2);
+      // 「N 中断 · 重跑」按钮出现（3 条中断账本行）
+      await expect(page2.locator("#job-rerun-interrupted")).toBeVisible();
       const ls = await ledgerState(page2);
       expect(ls && ls.children).toBe(3);
     } finally {
@@ -153,12 +159,13 @@ test("B：已提交任务退出 → 重启服务端行优先不双行；服务�
       const ls = await ledgerState(page2);
       expect(ls && ls.children).toBe(3); // 账本条目仍在（隐藏态，供服务失忆时兜底）
 
-      // 服务失忆（重启丢非终态 / 200 窗挤出 的同形模拟）→ 账本行兜底出现
+      // 服务失忆（重启丢非终态 / 200 窗挤出 的同形模拟）→ 账本行兜底出现（pagehide 迁移为「中断」）
       await mockReset(request);
       await expect
-        .poll(async () => page2.locator(".job-row .sub", { hasText: "本地记录（服务端记录不可用" }).count(),
+        .poll(async () => page2.locator(".job-row .sub", { hasText: "客户端退出，任务链路断开" }).count(),
           { timeout: 30_000 })
         .toBe(3);
+      await expect(page2.locator(".job-row .pill.p-interrupted")).toHaveCount(3);
       // 同一文件恒一行（serve 行与账本行不同时出现）
       await expect(page2.locator(".job-row")).toHaveCount(3);
     } finally {
@@ -194,7 +201,7 @@ test("C：全终态未提交批 → 重启终态账本行可单行清除；「�
     try {
       const page2 = await app2.firstWindow();
       await waitForReady(page2);
-      page2.on("dialog", (d) => d.accept()); // 「清理已完成」走 window.confirm：无监听时 Playwright 默认 dismiss（confirm=false，静默不执行）
+      page2.on("dialog", (d) => d.accept()); // 兜底：万一有 confirm 自动受理
       await goView(page2, "jobs");
       // 4 行 = 3 终态账本行 + 1 pre ghost（跑完提取阶段被跳过 → pre 登记残留 → F4 占位行）
       await expect(page2.locator(".job-row")).toHaveCount(4, { timeout: 20_000 });
@@ -208,9 +215,11 @@ test("C：全终态未提交批 → 重启终态账本行可单行清除；「�
       await clears.first().click();
       await expect(page2.locator("#toasts .toast.ok", { hasText: "已清除该本地记录" })).toBeVisible();
       await expect(page2.locator(".job-row")).toHaveCount(3);
-      // 「清理已完成」：余下 2 条终态整清（服务侧无任务可清）；ghost 占位行非账本终态，保留
+      // 「历史清理」对话框：余下 2 条终态整清（服务侧无任务可清）；ghost 占位行非账本终态，保留
       await page2.locator("#job-clear-done").click();
-      await expect(page2.locator("#toasts .toast.ok", { hasText: "已清理 2 条本机已完成任务" })).toBeVisible({ timeout: 15_000 });
+      await expect(page2.locator("#job-cleanup-backdrop")).toBeVisible();
+      await page2.locator("#job-cleanup-ok").click();
+      await expect(page2.locator("#toasts .toast.ok", { hasText: "已清理 2 条本机任务" })).toBeVisible({ timeout: 15_000 });
       await expect(page2.locator(".job-row")).toHaveCount(1);
       await expect(page2.locator(".job-row .pill.p-unsubmitted")).toHaveCount(1);
       const ls = await ledgerState(page2);
@@ -257,9 +266,11 @@ test("D：清理已完成 = 终态清除 + 非终态不动 + 服务端表收缩 
     // clear 前确认服务端侧只有 running seed 一条非终态（UI 文本有重名 seed-001，走 mock 口径更稳）
     const nonFinished = (await mockJobs(request)).filter((j) => j.state !== "finished");
     expect(nonFinished, "clear 前 running seed 不应完成（step 0.0005 限速失效？）").toHaveLength(1);
-    // 「清理已完成」：3 条终态（2 seed done + 1 本机 done）；running 不动
+    // 「历史清理」对话框：3 条终态（2 seed done + 1 本机 done）；running 不动
     await page.locator("#job-clear-done").click();
-    await expect(page.locator("#toasts .toast.ok", { hasText: "已清理 3 条本机已完成任务；服务侧 1/1 成功（清 3 条）" }))
+    await expect(page.locator("#job-cleanup-backdrop")).toBeVisible();
+    await page.locator("#job-cleanup-ok").click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "已清理 3 条本机任务；服务侧 1/1 成功（清 3 条）" }))
       .toBeVisible({ timeout: 15_000 });
     // 服务端任务表收缩：只剩 running 那条
     await expect.poll(async () => (await mockJobs(request)).length).toBe(1);

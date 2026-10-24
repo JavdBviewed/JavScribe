@@ -25,7 +25,7 @@ const ledgerSuppress = (page: Page) =>
     return ((JSON.parse(raw) as { suppress?: string[] }).suppress || []).length;
   });
 
-test("清理已完成：3 终态清掉 + 1 非终态不动 + 服务表收缩 + 残留同 id 被抑制（刷新后仍生效）", async ({ page }) => {
+test("历史清理：3 终态清掉 + 1 非终态不动 + 服务表收缩 + 残留同 id 被抑制（刷新后仍生效）", async ({ page }) => {
   // 3 done（seed 批 1）+ 1 running（seed 批 2，减速保持不推进）
   await mockSeed(req, { n: 3, status: "done" });
   await mockSeed(req, { n: 1, status: "running", progress: 0.5 });
@@ -37,7 +37,9 @@ test("清理已完成：3 终态清掉 + 1 非终态不动 + 服务表收缩 + �
 
   page.on("dialog", (d) => d.accept());
   await page.locator("#job-clear-done").click();
-  await expect(page.locator("#toasts .toast.ok", { hasText: "已清理 3 条本机已完成任务；服务侧 1/1 成功（清 3 条）" }))
+  await expect(page.locator("#job-cleanup-backdrop")).toBeVisible();
+  await page.locator("#job-cleanup-ok").click();
+  await expect(page.locator("#toasts .toast.ok", { hasText: "已清理 3 条本机任务；服务侧 1/1 成功（清 3 条）" }))
     .toBeVisible({ timeout: 15_000 });
 
   // 服务端任务表收缩：只剩 running 那条
@@ -65,7 +67,7 @@ test("清理已完成：3 终态清掉 + 1 非终态不动 + 服务表收缩 + �
     .toBe(0);
 });
 
-test("无终态任务时「清理已完成」隐藏", async ({ page }) => {
+test("无终态任务时「历史清理」按钮隐藏", async ({ page }) => {
   await mockSeed(req, { n: 2, status: "running", progress: 0.2 });
   await mockSpeed(req, { step: 0.001, tickMs: 1000 });
   await page.goto("/");

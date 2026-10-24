@@ -238,9 +238,11 @@
       <div id="job-source-filter" class="seg" role="group" aria-label="筛选任务来源（本机派发 / 他端任务）" hidden></div>
       <input type="search" id="job-search" class="job-search mono" placeholder="搜索文件名 / 任务 id" aria-label="搜索任务" spellcheck="false" autocomplete="off">
       <button type="button" id="job-pause-all" class="btn job-pause-all" hidden
-        title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（服务端级操作：所有连接这些服务的客户端都会看到队列挂起；运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续">⏸ 暂停所有</button>
+        title="暂停/继续所有字幕任务：本机管线不再开新任务，各服务队列同步挂起（服务端级操作：所有连接这些服务的客户端都会看到队列挂起；运行中任务跑完当前影片）；入队中的批量任务不受影响，随时可继续；不重跑已中断任务（中断行请用行内「重跑」或「N 中断 · 重跑」）">⏸ 暂停所有</button>
       <button type="button" id="job-clear-done" class="btn job-clear-done" hidden
-        title="清理已完成任务：仅终态（完成/跳过/失败/已取消）——本机派发账本 + 各在线服务端任务表；进行中/排队/已暂停不动。清理后服务端残留的已完成行不再显示（重启后仍生效）">🧹 清理已完成</button>
+        title="历史清理：完成/跳过/失败/已取消/中断 五类终态可勾选（实时计数）；进行中/排队/已暂停不动。中断类服务端已忘（仅清本机）；可勾选同步清理在线服务端终态任务表。清理后服务端残留的已完成行不再显示（重启后仍生效）">🧹 历史清理</button>
+      <button type="button" id="job-rerun-interrupted" class="btn job-rerun-interrupted" hidden
+        title="重跑全部中断任务：重新提取音轨并提交服务（原服务在线回原服务，否则自动均衡）；无源文件路径的跳过并计数">⚡ 中断 · 重跑</button>
       <span id="last-updated" class="muted small mono"></span>
     </div>
     <div class="job-head mono">
@@ -261,6 +263,8 @@
       <button type="button" class="dl-btn bulk-act" data-act="resume" title="继续所选：本机暂停/失败行重新提取音轨并提交；服务挂起行恢复排队">&#9654; 继续</button>
       <button type="button" class="dl-btn bulk-act" data-act="retry" title="重试所选：失败/跳过的服务任务重新入队；本机失败行重新提取提交">&#8635; 重试</button>
       <button type="button" class="dl-btn bulk-act" data-act="cancel" title="取消所选服务任务：排队立即终止，运行中检查点中止，已生成字幕保留">&#10006; 取消</button>
+      <button type="button" class="dl-btn bulk-act" data-act="ledger-clear" title="清除所选本地记录行（本机派发账本，不通知服务端；终态与中断行均可）">&#10006; 清除记录</button>
+      <button type="button" class="dl-btn bulk-act" data-act="ledger-rerun" title="重跑所选中断行：重新提取音轨并提交服务（需源文件路径存在；原服务在线回原服务，否则自动均衡）">&#8635; 重跑</button>
       <select id="job-bulk-engine" class="bulk-engine-sel" title="改派目的地服务（仅本机排队/暂停行生效）"></select>
       <button type="button" class="dl-btn bulk-act assign" data-act="assign" title="把所选本机排队/暂停任务改派到左侧选定服务：排队中实时改道，自动=派发时刻按实时负载选最闲">&#8680; 改派</button>
       <button type="button" class="icon-btn bulk-clear" title="清除全部选择">&#10005;</button>
@@ -327,6 +331,27 @@
         </div>
       </div>
     </form>
+  </div>
+</div>
+<div id="job-cleanup-backdrop" hidden>
+  <div id="job-cleanup-modal" role="dialog" aria-modal="true" aria-labelledby="job-cleanup-title">
+    <div class="modal-head">
+      <h2 id="job-cleanup-title">历史清理</h2>
+      <span class="help" tabindex="0" data-tip="清除选中的本机任务记录（派发账本 + 内存任务行）；勾选「同步清理在线服务」时各在线服务端同步清终态。中断类任务服务端已忘（重启即丢），仅清本机。清理后服务端残留行不再显示（重启后仍生效）。">?</span>
+      <button type="button" id="job-cleanup-x" class="icon-btn" title="关闭">&#10005;</button>
+    </div>
+    <div class="modal-body cleanup-body">
+      <p class="cleanup-note">进行中/排队/已暂停的任务不受影响；已清任务在服务端将无法再下载/预览/重试，如仍需要结果请谨慎。</p>
+      <div id="job-cleanup-cats" class="cleanup-cats"></div>
+      <label class="cleanup-sync">
+        <input type="checkbox" id="job-cleanup-sync" checked>
+        <span>同步清理在线服务任务表（只清服务端终态；中断类服务端已忘）</span>
+      </label>
+      <div class="eng-add-actions">
+        <button type="button" id="job-cleanup-ok" class="btn btn-primary">清理</button>
+        <button type="button" id="job-cleanup-cancel" class="btn">取消</button>
+      </div>
+    </div>
   </div>
 </div>
 <div id="dir-backdrop" hidden>

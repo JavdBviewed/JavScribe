@@ -117,9 +117,10 @@ test("任务看板结构（列序/筛选/分页/空态）", async ({ page }) => 
   // 旧 #job-stats 统计行已删：计数内嵌筛选按钮（web/desktop 同一契约）
   expect(await page.locator("#job-stats").count()).toBe(0);
   const filters = page.locator("#job-filter button");
-  await expect(filters).toHaveCount(9);
+  // 0.2.57：新增「中断」筛选桶（仅账本行）
+  await expect(filters).toHaveCount(10);
   expect(await filters.evaluateAll((els) => els.map((e) => e.textContent))).toEqual([
-    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0",
+    "全部 0", "进行中 0", "排队中 0", "提取中 0", "转译中 0", "完成 0", "跳过 0", "失败 0", "已暂停 0", "中断 0",
   ]);
   await expect(filters.nth(0)).toHaveClass(/on/);
   await expect(page.locator("#job-pager")).toBeHidden();
