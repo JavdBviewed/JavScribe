@@ -1319,8 +1319,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </div>
       <div class="up-sec-label">高级</div>
       <label class="chk-row"><input type="checkbox" id="up-enabled"${upSettings?.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label>
-      <label class="field"><span class="field-label">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
-      <input id="up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upSettings?.mirror || "")}"></label>
+      <label class="field"><span class="field-label">自定义加速地址（URL 前缀，如 https://gh-proxy.example.com/；与内置 3 渠道自动择优，谁快用谁）</span>
+      <input id="up-mirror" class="mono" type="text" placeholder="留空仅用内置 3 渠道" value="${esc(upSettings?.mirror || "")}"></label>
       <label class="field"><span class="field-label">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
       <input id="up-proxy" class="mono" type="text" placeholder="留空直连 GitHub" value="${esc(upSettings?.proxy || "")}"></label>
       <div class="up-row">
@@ -1373,7 +1373,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     body.innerHTML = `
     <div class="set-note err">${esc(s.error || "检查更新失败")}</div>
-    <div class="muted small">若网络无法直连 GitHub，可设置镜像源或更新代理后重试。</div>`;
+    <div class="muted small">若网络无法直连 GitHub：内置加速渠道（gh.llkk.cc / gh-proxy.com / ghfast.top）与自定义加速地址自动择优，谁快用谁；全部不可用时走更新代理。</div>`;
   }
 
   upChip.onclick = () => {
@@ -7004,8 +7004,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="cfg-sec-body">
         <div class="cfg-row ccfg-row" data-base="${upCfg && upCfg.enabled ? "1" : "0"}">
         <label class="chk-row"><input type="checkbox" id="cc-up-enabled"${upCfg && upCfg.enabled ? " checked" : ""}><span>启动时自动检查更新</span></label></div>
-        <div class="cfg-row ccfg-row" data-base="${esc(upCfg?.mirror || "")}"><span class="cfg-lab">镜像源（URL 前缀，如 https://gh-proxy.example.com/；留空走官方）</span>
-        <input id="cc-up-mirror" class="mono" type="text" placeholder="留空使用 GitHub 官方" value="${esc(upCfg?.mirror || "")}"></div>
+        <div class="cfg-row ccfg-row" data-base="${esc(upCfg?.mirror || "")}"><span class="cfg-lab">自定义加速地址（URL 前缀，如 https://gh-proxy.example.com/；与内置 3 渠道自动择优，谁快用谁）</span>
+        <input id="cc-up-mirror" class="mono" type="text" placeholder="留空仅用内置 3 渠道" value="${esc(upCfg?.mirror || "")}"></div>
         <div class="cfg-row ccfg-row" data-base="${esc(upCfg?.proxy || "")}"><span class="cfg-lab">更新代理（socks5://127.0.0.1:10808 或 http://127.0.0.1:7890；留空直连）</span>
         <input id="cc-up-proxy" class="mono" type="text" placeholder="留空直连 GitHub" value="${esc(upCfg?.proxy || "")}"></div>
       </div>

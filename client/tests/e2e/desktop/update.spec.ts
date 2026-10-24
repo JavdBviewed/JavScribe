@@ -59,7 +59,11 @@ test("自动检查发现新版本 → 下载 → 重启安装 → 进程退出",
     await expect(page.locator("#up-restart")).toBeVisible();
     const pid = app.process().pid;
     if (pid === undefined) throw new Error("electron 进程 pid 不可用");
-    await page.click("#up-restart");
+    // 点击即 app.quit()（JAVSCRIBE_NO_UPDATE_RELUNCH=1）：上下文销毁与 click 收尾是竞态，
+    // 「page closed」= 进程已退出（正是本用例预期路径）；真实断言是下方进程退出 poll
+    await page.click("#up-restart").catch((e: Error) => {
+      if (!/closed/i.test(e.message)) throw e;
+    });
     await expect
       .poll(
         async () => {

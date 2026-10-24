@@ -37,6 +37,13 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
+      // 更新渠道择优 e2e：慢渠道（TTFB 延迟 2s，探测超时 3s 内仍可用但更慢）；快渠道=8304 无延迟实例
+      command: "MOCK_UPDATE_FEED_DELAY_MS=2000 node client/tests/e2e/mock-update-feed.mjs 8303",
+      url: "http://127.0.0.1:8303/latest-linux.yml",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+    {
       // GitHub Releases API（服务端新版本检查 e2e；8306——8305 被 engine-select 第二台 mock-serve 占用）
       // 版本 0.1.0 = mock-serve 默认 VERSION → 「同版本无角标」基线；用例内切 serve-v0.2.0 验证角标
       command: "node client/tests/e2e/mock-github.mjs 8306 0.1.0",

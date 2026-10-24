@@ -98,8 +98,15 @@ export async function waitForEngineOnline(page: Page) {
  * 再操作「生成字幕 / 字幕服务」区块前必须先切回对应 tab。
  */
 export async function goTab(page: Page, view: "dispatch" | "jobs" | "engines" | "ccfg") {
-  await page.locator(`#nav .view-tab[data-view="${view}"]`).click();
-  await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
+  const tab = page.locator(`#nav .view-tab[data-view="${view}"]`);
+  await tab.click();
+  try {
+    await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/, { timeout: 5_000 });
+  } catch {
+    // 罕见竞态：整套连跑高负载下首轮 click 未生效（视图 15s 未切换实测 1 例/93）→ 重点一次
+    await tab.click();
+    await expect(page.locator(`#sec-${view}`)).toHaveClass(/view-on/);
+  }
 }
 
 /**

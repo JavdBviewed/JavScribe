@@ -10,9 +10,9 @@ import {
   test as base, expect, _electron as electron,
   type Page, type APIRequestContext,
 } from "@playwright/test";
-import { cpSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -156,8 +156,22 @@ export async function launchApp(userData: string, extraEnv: Record<string, strin
 export const PACKED = join(ROOT, "release", "linux-unpacked");
 export const PACKED_BIN = join(PACKED, "jav-scribe-client");
 
+// electron-updater 下载缓存位于 userData 之外（appCacheDir/<updaterCacheDirName>，见打包产物
+// resources/app-update.yml），跨用例/跨轮次共享：缓存包与清单 sha 一致时 electron-updater 跳过
+// 网络请求直接 update-downloaded，会污染「下载走所选渠道」类断言（重跑必挂）。
+// 每次打包形态 launch 前整目录清空，保证用例自洽（仅 e2e 本地缓存，不触碰生产路径）。
+const UPDATER_CACHE_DIR = join(
+  (process.env.XDG_CACHE_HOME || "").trim() || join(homedir(), ".cache"),
+  "jav-scribe-client-updater",
+);
+/** 打包形态主进程 stderr 落盘（每次 launch 截断重写），供本机 e2e 失败取证 */
+const APP_STDERR_LOG = "/tmp/javscribe-e2e-app-stderr.log";
+
 export async function launchPackedApp(userData: string, extraEnv: Record<string, string> = {}) {
-  return electron.launch({
+  try {
+    rmSync(UPDATER_CACHE_DIR, { recursive: true, force: true });
+  } catch { /* 缓存清理失败不阻塞用例 */ }
+  const app = await electron.launch({
     executablePath: PACKED_BIN,
     args: ["--no-sandbox"],
     env: {
@@ -180,6 +194,11 @@ export async function launchPackedApp(userData: string, extraEnv: Record<string,
       ...extraEnv,
     },
   });
+  try {
+    writeFileSync(APP_STDERR_LOG, "");
+    app.process().stderr?.on("data", (d: Buffer) => appendFileSync(APP_STDERR_LOG, d));
+  } catch { /* ignore */ }
+  return app;
 }
 
 /** 打包形态冷启动 + 等引擎在线 */

@@ -2102,17 +2102,23 @@ function registerIpc(): void {
 
 // ---------------------------------------------------------------------------
 // 版本更新（electron-updater；仅打包形态生效）
-//   - feed：
-//     ① 默认无钩子无镜像 → 检查前经 GitHub Releases API 动态解析最新稳定 client-v* tag，
-//        切 generic 到该 tag 目录（避免 electron-updater 6.x「Atom feed 首条=仓库 latest release」
-//        被无 latest.yml 的 serve release 抢占导致 404；v0.2.6 事故根因）。解析失败静默回退
-//        app-update.yml 的 github provider（owner/repo 已固化）。
-//     ② 设置「镜像源」后切 generic provider：mirror + "https://github.com/JavdBviewed/JavScribe/releases/download/"
-//        （generic 按平台取清单：win=latest.yml，linux x64=latest-linux.yml——与 electron-builder 产物一致）
+//   - feed（upEnsureFeed 每次检查前三段解析；测试钩子形态短路）：
+//     ① tag：直连 GitHub Releases API（Electron net，认会话代理）；失败时经候选渠道代理
+//        releases/atom 兜底解析（国内无代理场景；渠道代理 api.github.com 为共享出口有限流，不作主源）
+//     ② 渠道择优：内置 3 个国内加速渠道（gh.llkk.cc / gh-proxy.com / ghfast.top）+ 自定义
+//        加速地址（设置 update_check.mirror，前缀形）并行探测 tag 目录清单，谁快用谁；
+//        结果落盘 settings.json（6h TTL 缓存，选中的渠道后续失败则失效重探）
+//     ③ feed = 最快渠道 + tag 目录（generic，按平台取清单：win=latest.yml，
+//        linux x64=latest-linux.yml）；全部渠道不可用 → 官方直连 tag 目录（流量走会话代理，
+//        即「都不能用就都不用，走设置的代理地址」）；tag 解析不到 → app-update.yml 的
+//        github provider（避免 electron-updater 6.x「Atom feed 首条=仓库 latest release」
+//        被无 latest.yml 的 serve release 抢占导致 404；v0.2.6 事故根因）
 //   - 代理：设置「更新代理」（socks5://127.0.0.1:10808 / http://host:port）→
-//        session.defaultSession.setProxy，electron.net 通道（updater 清单/下载 + 本模块 API）全走代理
+//        session.defaultSession.setProxy，electron.net 通道（渠道探测/updater 清单/下载 + 本模块 API）全走代理
 //   - 测试钩子：JAVSCRIBE_UPDATE_FEED 直接覆盖 feed base（e2e 指向本地 mock-update-feed，
-//     存在钩子时跳过 API 动态解析，CI 零外网依赖）；
+//     存在钩子时跳过 tag 解析与渠道择优，CI 零外网依赖）；JAVSCRIBE_UPDATE_CHANNELS（逗号分隔）
+//     覆盖内置渠道列表；JAVSCRIBE_UPDATE_TAG_API_BASE 覆盖直连 tag API；
+//     JAVSCRIBE_UPDATE_PROBE_TIMEOUT_MS / _PROBE_TTL_MS / _ATOM_TIMEOUT_MS 供 e2e 提速；
 //     JAVSCRIBE_NO_UPDATE_RELUNCH=1 时「重启安装」只退出不重启（e2e 断言进程退出用）
 //   - dev 形态（!app.isPackaged）：upState 恒 disabled，UI 角标恒隐藏（既有桌面基线零变化）
 // ---------------------------------------------------------------------------
@@ -2127,6 +2133,9 @@ interface UpState {
 
 interface UpSettings {
   update_check: { enabled: boolean; mirror: string; proxy: string };
+  /** 最优渠道缓存（内部字段，UI 不暴露）：上次探测最快的候选渠道 + 探测时刻（TTL 判定用） */
+  channel_best?: string;
+  channel_best_at?: number;
   ignored_versions: string[];
 }
 
@@ -2142,6 +2151,32 @@ const UP_CHECK_TIMEOUT_MS = (() => {
 let upState: UpState = { status: app.isPackaged ? "idle" : "disabled" };
 let upIgnored: string[] = [];
 let upSettingsPath = "";
+let upChannelBest: string | null = null;
+let upChannelBestAt = 0;
+
+// ---- 渠道择优（内置国内加速渠道 + 自定义加速地址，谁快用谁；全不可用走官方直连+会话代理） ----
+/** 内置加速渠道（前缀形：channel + "https://github.com/..."）；
+ *  env JAVSCRIBE_UPDATE_CHANNELS（逗号分隔）覆盖（e2e 指向本地 mock） */
+const UP_DEFAULT_CHANNELS = ["https://gh.llkk.cc", "https://gh-proxy.com", "https://ghfast.top"];
+const UP_GH_RELEASE_BASE = "https://github.com/JavdBviewed/JavScribe/releases";
+/** 单候选渠道探测超时（ms）；env 可覆盖（e2e 提速） */
+const UP_PROBE_TIMEOUT_MS = (() => {
+  const n = Number(process.env.JAVSCRIBE_UPDATE_PROBE_TIMEOUT_MS || "");
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 4_000;
+})();
+/** 最优渠道缓存 TTL（ms）；显式 0 = 每次检查都重探（e2e 开关）；未设置 = 生产默认 6h。
+ *  注意：Number("") = 0，未设置 env 时必须显式判空，否则默认值成死代码、缓存恒不命中。 */
+const UP_PROBE_TTL_MS = (() => {
+  const raw = process.env.JAVSCRIBE_UPDATE_PROBE_TTL_MS;
+  if (raw === undefined || raw.trim() === "") return 6 * 3_600_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : 6 * 3_600_000;
+})();
+/** 经渠道 atom 兜底解析 tag 的单渠道超时（ms） */
+const UP_ATOM_TIMEOUT_MS = (() => {
+  const n = Number(process.env.JAVSCRIBE_UPDATE_ATOM_TIMEOUT_MS || "");
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 5_000;
+})();
 
 function upLoadSettings(): UpSettings {
   const def: UpSettings = { update_check: { enabled: true, mirror: "", proxy: "" }, ignored_versions: [] };
@@ -2153,6 +2188,8 @@ function upLoadSettings(): UpSettings {
         mirror: typeof raw.update_check?.mirror === "string" ? raw.update_check.mirror : "",
         proxy: typeof raw.update_check?.proxy === "string" ? raw.update_check.proxy : "",
       },
+      channel_best: typeof raw.channel_best === "string" ? raw.channel_best : undefined,
+      channel_best_at: typeof raw.channel_best_at === "number" ? raw.channel_best_at : undefined,
       ignored_versions: Array.isArray(raw.ignored_versions)
         ? raw.ignored_versions.filter((v): v is string => typeof v === "string")
         : [],
@@ -2176,15 +2213,11 @@ function upSet(patch: Partial<UpState>): void {
   sendToWin("update-state", upState);
 }
 
-/** feed base：测试钩子 > 镜像源(generic) > 空(app-update.yml 的 github provider) */
+/** init 时 feed base：仅测试钩子（e2e 零外网）。镜像/内置渠道需 tag 目录（异步解析+探测），
+ *  统一由 upEnsureFeed 在每次检查前处理，init 不再同步切镜像。 */
 function upFeedBase(): string {
   const hook = process.env.JAVSCRIBE_UPDATE_FEED || "";
-  if (hook) return hook.replace(/\/+$/, "");
-  const mirror = upLoadSettings().update_check.mirror.replace(/\/+$/, "");
-  if (mirror) {
-    return mirror + "/https://github.com/JavdBviewed/JavScribe/releases/download/";
-  }
-  return "";
+  return hook ? hook.replace(/\/+$/, "") : "";
 }
 
 /** 应用「更新代理」到 Electron 全局会话：electron.net 通道（updater 清单/下载 + 本模块 API 请求）走该代理。
@@ -2212,6 +2245,154 @@ function upApplyProxy(): void {
   }
 }
 
+/** 最优渠道缓存：内存镜像 + 落盘（跨重启复用；TTL 内不重复测速） */
+function upReadChannelCache(): void {
+  const s = upLoadSettings();
+  upChannelBest = s.channel_best || null;
+  upChannelBestAt = s.channel_best_at || 0;
+}
+
+function upWriteChannelCache(): void {
+  try {
+    const cur = upLoadSettings();
+    if (upChannelBest) {
+      cur.channel_best = upChannelBest;
+      cur.channel_best_at = upChannelBestAt;
+    } else {
+      delete cur.channel_best;
+      delete cur.channel_best_at;
+    }
+    upSaveSettings(cur);
+  } catch { /* 缓存写失败不阻塞更新链路 */ }
+}
+
+/** 失效最优渠道（选中的渠道/直连请求失败时调用 → 下次检查重新择优自愈） */
+function upInvalidateChannelCache(): void {
+  if (!upChannelBest) return;
+  upChannelBest = null;
+  upChannelBestAt = 0;
+  upWriteChannelCache();
+}
+
+/** electron-updater 按平台取的清单文件名（与 electron-builder 产物对齐） */
+function upManifestName(): string {
+  if (process.platform === "win32") return "latest.yml";
+  if (process.platform === "darwin") return "latest-mac.yml";
+  return "latest-linux.yml";
+}
+
+/** 候选渠道并集：内置 3 个（env 可覆盖）+ 自定义加速地址（mirror）；去重，仅 http(s) 前缀 */
+function upCandidateChannels(): string[] {
+  const envRaw = process.env.JAVSCRIBE_UPDATE_CHANNELS || "";
+  const builtins = envRaw.trim()
+    ? envRaw.split(",").map((s) => s.trim()).filter(Boolean)
+    : UP_DEFAULT_CHANNELS;
+  const mirror = upLoadSettings().update_check.mirror.trim().replace(/\/+$/, "");
+  const out: string[] = [];
+  for (const c of [...builtins, ...(mirror ? [mirror] : [])]) {
+    const n = c.replace(/\/+$/, "");
+    if (!/^https?:\/\//.test(n)) continue;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/** 探测单个候选渠道：GET 其代理的 tag 目录清单（= updater 真正要取的文件），记 TTFB；
+ *  2xx/3xx 视为可用。走 Electron net（认会话代理）= 按用户真实网络（含更新代理）测速。
+ *  超时/4xx/5xx/异常 → -1（不可用）。 */
+function upProbeChannel(base: string, tag: string): Promise<number> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const t0 = Date.now();
+    const url = `${base}/${UP_GH_RELEASE_BASE}/download/client-v${tag}/${upManifestName()}`;
+    const timer = setTimeout(() => done(-1), UP_PROBE_TIMEOUT_MS);
+    function done(ms: number): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ms);
+    }
+    const req = net.request({ url });
+    req.on("response", (res) => {
+      const ok = res.statusCode >= 200 && res.statusCode < 400;
+      const ms = Date.now() - t0;
+      try { req.abort(); } catch { /* 已中止 */ }
+      done(ok ? ms : -1);
+    });
+    req.on("error", () => done(-1));
+    req.end();
+  });
+}
+
+/** GitHub Releases Atom（渠道前缀形）：首个稳定 client-v* 条目 = 最新。
+ *  仅直连 API 不可用时兜底（国内无代理/限流场景）：渠道代理 api.github.com 是共享出口、
+ *  会命中 GitHub 限流，不作 tag 主源。5s 超时；任何失败 → ""（不 reject）。 */
+function upLatestClientTagAtom(base: string): Promise<string> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const url = `${base}/${UP_GH_RELEASE_BASE}/atom`;
+    let buf = "";
+    const timer = setTimeout(() => fail(""), UP_ATOM_TIMEOUT_MS);
+    function fail(v: string): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    }
+    const req = net.request({ url });
+    req.on("response", (res) => {
+      if (res.statusCode !== 200) {
+        fail("");
+        return;
+      }
+      res.on("data", (d: Buffer) => {
+        buf += d.toString("utf-8");
+        if (buf.length > 1_000_000) fail("");
+      });
+      res.on("end", () => {
+        if (settled) return;
+        // Atom 条目按时间倒序；feed 标题（"Releases for ..."）不匹配 client-v 正则，安全
+        for (const m of buf.matchAll(/<title>([^<]*)<\/title>/g)) {
+          const v = /^client-v(\d+(?:\.\d+)*)$/.exec(m[1].trim());
+          if (v) {
+            fail(v[1]);
+            return;
+          }
+        }
+        fail("");
+      });
+      res.on("error", () => fail(""));
+    });
+    req.on("error", () => fail(""));
+    req.end();
+  });
+}
+
+/** 择优：缓存命中（TTL 内且渠道仍在候选集）→ 复用；否则全候选并行探测取最快可用。
+ *  返回 "" = 全部不可用（调用方回退官方直连 + 会话代理）。结果落盘供跨重启复用。 */
+async function upPickChannel(tag: string): Promise<string> {
+  const cands = upCandidateChannels();
+  if (!cands.length) return "";
+  if (
+    UP_PROBE_TTL_MS > 0 &&
+    upChannelBest &&
+    cands.includes(upChannelBest) &&
+    Date.now() - upChannelBestAt < UP_PROBE_TTL_MS
+  ) {
+    return upChannelBest;
+  }
+  const results = await Promise.all(
+    cands.map(async (c) => ({ c, ms: await upProbeChannel(c, tag) })),
+  );
+  const best = results
+    .filter((r) => r.ms >= 0)
+    .sort((a, b) => a.ms - b.ms)[0]?.c ?? "";
+  upChannelBest = best || null;
+  upChannelBestAt = Date.now();
+  upWriteChannelCache();
+  return best;
+}
+
 function upCmpVer(a: number[], b: number[]): number {
   const n = Math.max(a.length, b.length);
   for (let i = 0; i < n; i++) {
@@ -2227,7 +2408,9 @@ function upCmpVer(a: number[], b: number[]): number {
 function upLatestClientTag(): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const req = net.request({ url: "https://api.github.com/repos/JavdBviewed/JavScribe/releases?per_page=30" });
+    // e2e 钩子：JAVSCRIBE_UPDATE_TAG_API_BASE 指向本地 mock（生产恒默认 api.github.com）
+    const tagBase = (process.env.JAVSCRIBE_UPDATE_TAG_API_BASE || "https://api.github.com").replace(/\/+$/, "");
+    const req = net.request({ url: `${tagBase}/repos/JavdBviewed/JavScribe/releases?per_page=30` });
     req.setHeader("Accept", "application/vnd.github+json");
     let buf = "";
     const timer = setTimeout(() => fail(new Error("github-api-timeout(8s)")), 8000);
@@ -2277,22 +2460,33 @@ function upLatestClientTag(): Promise<string> {
   });
 }
 
-/** checkForUpdates 前确保 feed 正确：
+/** checkForUpdates 前确保 feed 正确（内部全捕获、不抛、自身有界）：
  *  - 测试钩子（JAVSCRIBE_UPDATE_FEED）→ 不动（init 已按钩子设置，e2e 零外网）
- *  - 镜像源 → 切 generic（幂等，保证对话框改完立即生效，无需重启）
- *  - 默认 → 动态解析最新 client-v* tag 切 generic；失败静默回退 app-update.yml github provider */
+ *  - tag：直连 API（认会话代理）→ 失败时候选渠道 atom 并行兜底
+ *  - 渠道择优：内置 3 + 自定义加速地址，谁快用谁；全部不可用 → 官方直连 tag 目录
+ *    （流量走会话代理 = 设置的更新代理）
+ *  - tag 解析不到 → 保持 app-update.yml github provider 默认行为 */
 async function upEnsureFeed(): Promise<void> {
   try {
     const hook = process.env.JAVSCRIBE_UPDATE_FEED || "";
     if (hook) return;
-    const mirror = upLoadSettings().update_check.mirror.trim().replace(/\/+$/, "");
-    if (mirror) {
-      autoUpdater.setFeedURL({ provider: "generic", url: mirror + "/https://github.com/JavdBviewed/JavScribe/releases/download/" });
-      return;
+    let ver = "";
+    try {
+      ver = await upLatestClientTag();
+    } catch {
+      ver = ""; // 直连 API 失败（不可达/限流/超时）→ 渠道 atom 兜底
     }
-    const ver = await upLatestClientTag();
+    if (!ver) {
+      const viaAtom = await Promise.all(upCandidateChannels().map((ch) => upLatestClientTagAtom(ch)));
+      ver = viaAtom.find((v) => v) || "";
+    }
     if (!ver) return; // 解析不到 → 保持 app-update.yml 默认行为
-    autoUpdater.setFeedURL({ provider: "generic", url: `https://github.com/JavdBviewed/JavScribe/releases/download/client-v${ver}/` });
+    const tagDir = `${UP_GH_RELEASE_BASE}/download/client-v${ver}`;
+    const best = await upPickChannel(ver);
+    autoUpdater.setFeedURL({
+      provider: "generic",
+      url: (best ? `${best}/` : "") + tagDir + "/",
+    });
   } catch (e) {
     console.error("[update] feed 解析失败，回退默认行为:", (e as Error).message);
   }
@@ -2358,6 +2552,7 @@ function initUpdater(): void {
     return;
   }
   upIgnored = upLoadSettings().ignored_versions;
+  upReadChannelCache(); // 最优渠道缓存（跨重启复用，TTL 内不重探）
   upApplyProxy(); // 启动即应用持久化代理（早于 3s 延迟检查）
   const base = upFeedBase();
   if (base) {
@@ -2376,10 +2571,13 @@ function initUpdater(): void {
   });
   autoUpdater.on("update-not-available", () => upSet({ status: "idle" }));
   autoUpdater.on("download-progress", (p) => upSet({ status: "downloading", pct: p.percent }));
-  autoUpdater.on("update-downloaded", (info) =>
-    upSet({ status: "downloaded", version: String(info?.version || upState.version || "") }),
-  );
-  autoUpdater.on("error", (err: Error) => upSet({ status: "error", error: err?.message || String(err) }));
+  autoUpdater.on("update-downloaded", (info) => {
+    upSet({ status: "downloaded", version: String(info?.version || upState.version || "") });
+  });
+  autoUpdater.on("error", (err: Error) => {
+    upInvalidateChannelCache(); // 选中的渠道/直连可能已失效：下次检查重新探测自愈
+    upSet({ status: "error", error: err?.message || String(err) });
+  });
   if (upLoadSettings().update_check.enabled) {
     setTimeout(() => { void doUpdateCheck(); }, UP_AUTO_CHECK_DELAY_MS); // 启动延迟检查：不抢首屏
   } else {
@@ -2535,8 +2733,13 @@ function registerUpdateIpc(): void {
       mirror: typeof s?.mirror === "string" ? s.mirror.trim() : "",
       proxy: typeof s?.proxy === "string" ? s.proxy.trim() : "",
     };
+    // 候选集/网络路径变更：失效最优渠道缓存，下次检查重新探测
+    upChannelBest = null;
+    upChannelBestAt = 0;
+    delete cur.channel_best;
+    delete cur.channel_best_at;
     upSaveSettings(cur);
-    upApplyProxy(); // 代理立即生效（下一次检查/下载即走新代理；镜像源下次检查经 upEnsureFeed 生效）
+    upApplyProxy(); // 代理立即生效（下一次检查/下载即走新代理；加速地址下次检查经 upEnsureFeed 参与择优）
     return cur.update_check;
   });
 }

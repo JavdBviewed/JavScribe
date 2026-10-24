@@ -12,6 +12,8 @@ import http from "node:http";
 import crypto from "node:crypto";
 
 const PORT = Number(process.argv[2] || 8304);
+// 慢渠道实例：所有 GET 响应前统一延迟（TTFB），供「谁快用谁」择优用例
+const DELAY = Number(process.env.MOCK_UPDATE_FEED_DELAY_MS || 0);
 const VERSION = "9.9.9";
 const SIZE = 1_572_864;
 const CHUNK = 64 * 1024;
@@ -56,30 +58,74 @@ const files = {
 
 const requests = [];
 
+// 客户端 tag 解析 mock（JAVSCRIBE_UPDATE_TAG_API_BASE 指向本服务）：GitHub Releases JSON
+const TAG_API = [{ tag_name: `client-v${VERSION}`, prerelease: false }];
+// 渠道前缀 atom 兜底（直连 API 不可达时经渠道代理 releases/atom 解析 tag）
+const ATOM = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Releases for JavdBviewed/JavScribe</title>
+  <entry>
+    <id>tag:github.com,2008:Repository:1/Release:1</id>
+    <title>client-v${VERSION}</title>
+    <link href="https://github.com/JavdBviewed/JavScribe/releases/tag/client-v${VERSION}"/>
+    <updated>2026-10-24T00:00:00Z</updated>
+  </entry>
+</feed>`;
+
+// 慢渠道：writeHead 前延迟 DELAY ms（探测量 TTFB = 谁快用谁的观测点）
+function respond(fn) {
+  if (DELAY > 0) setTimeout(fn, DELAY);
+  else fn();
+}
+
 const server = http.createServer((req, res) => {
-  // electron-updater 拉 manifest 时带 ?noCache=xxx，必须按 pathname 匹配（裸 req.url 会让 $ 锚定 404）
+  // electron-updater 拉 manifest 带 ?noCache=xxx（按 pathname 匹配）；渠道前缀形路径
+  // （/https://github.com/.../download/client-vX/...）同样按 pathname 后缀匹配
   const path = new URL(req.url || "/", "http://127.0.0.1").pathname;
   requests.push(req.url || "/");
   if (requests.length > 200) requests.shift();
-  if (req.method === "GET" && /^\/latest(-linux|-mac)?\.yml$/.test(path)) {
-    res.writeHead(200, { "Content-Type": "text/yaml; charset=utf-8" });
-    return res.end(MANIFEST);
-  }
-  const buf = files[path.slice(1)];
-  if (req.method === "GET" && buf) {
-    res.writeHead(200, {
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(SIZE),
+  if (req.method === "GET" && /(^|\/)(latest|latest-linux|latest-mac)\.yml$/.test(path)) {
+    respond(() => {
+      res.writeHead(200, { "Content-Type": "text/yaml; charset=utf-8" });
+      res.end(MANIFEST);
     });
-    let off = 0;
-    const timer = setInterval(() => {
-      res.write(buf.subarray(off, off + CHUNK));
-      off += CHUNK;
-      if (off >= SIZE) {
-        clearInterval(timer);
-        res.end();
-      }
-    }, 25);
+    return;
+  }
+  // 安装包：裸路径或渠道前缀路径（endsWith 归一到真名）
+  const fname = Object.keys(files).find((n) => path.endsWith(n));
+  const buf = fname ? files[fname] : undefined;
+  if (req.method === "GET" && buf) {
+    respond(() => {
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(SIZE),
+      });
+      let off = 0;
+      const timer = setInterval(() => {
+        res.write(buf.subarray(off, off + CHUNK));
+        off += CHUNK;
+        if (off >= SIZE) {
+          clearInterval(timer);
+          res.end();
+        }
+      }, 25);
+    });
+    return;
+  }
+  // 直连 tag API（GitHub Releases JSON；前缀形同真路径 /repos/JavdBviewed/JavScribe/releases）
+  if (req.method === "GET" && /(^|\/)repos\/JavdBviewed\/JavScribe\/releases$/.test(path)) {
+    respond(() => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(TAG_API));
+    });
+    return;
+  }
+  // 渠道前缀 atom（真路径 /https://github.com/JavdBviewed/JavScribe/releases/atom）
+  if (req.method === "GET" && /(^|\/)releases\/atom$/.test(path)) {
+    respond(() => {
+      res.writeHead(200, { "Content-Type": "application/atom+xml" });
+      res.end(ATOM);
+    });
     return;
   }
   if (req.method === "POST" && path === "/_mock/state") {
