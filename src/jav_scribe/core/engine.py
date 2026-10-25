@@ -584,10 +584,13 @@ class Engine:
     def cleanup_finished(self) -> int:
         """清理已完成任务：删本引擎任务表内全部终态任务（done/skipped/error/canceled），
         落盘 jobs.json 同步收缩。供客户端「清理已完成」fan-out 调用（POST /jobs/cleanup）。
-        非终态任务不动；stats.json 累计统计独立（_counted 去重），清理不回退不重计；
-        被清任务后续 retry → 404「任务不存在或已过期」（语义一致）。返回删除条数。
+        非终态任务不动；清理同时把累计统计归零（stats.json 与 _counted 同步清空落盘）——
+        看板 chip 计数以此为单一真源，清理后必须回零，否则列表已空、筛选条仍显示
+        终身累计数（幽灵计数）；归零后新终态任务从 0 重计。
+        被清任务后续 retry → 404「任务不存在或已过期」（语义不变）。返回删除条数。
         """
         removed = 0
+        left = 0
         with self._sched_lock:
             kept = []
             for job in self.jobs:
@@ -597,8 +600,15 @@ class Engine:
                     kept.append(job)
             if removed:
                 self.jobs = kept
+                left = len(self.jobs)
                 self._save_jobs()
-                self.log(f"[engine] 已清理终态任务 {removed} 个（任务表剩 {len(self.jobs)} 个）")
+        if removed:
+            # 统计单一真源同步归零（_save_stats 要求持有 _jobs_lock）
+            with self._jobs_lock:
+                self._stats = {"done": 0, "skipped": 0, "failed": 0}
+                self._counted = set()
+                self._save_stats()
+            self.log(f"[engine] 已清理终态任务 {removed} 个（任务表剩 {left} 个，累计统计归零）")
         return removed
 
     def _restore_job_history(self) -> None:

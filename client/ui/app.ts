@@ -4304,6 +4304,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const selectable = items.filter((v) => !v.too_small).length;
     (document.getElementById("folder-select-all") as HTMLInputElement).checked =
       selectable > 0 && state.folderChecked.size === selectable;
+    // 0.2.58 回归：行勾选 / 本页全选 / 全局全选 三条路径都经此函数收口，
+    // 同步刷新「开始生成」按钮计数（此前只刷 chip，按钮 label 停在初始全量）
+    updateGo();
   }
 
   (document.getElementById("folder-select-all") as HTMLInputElement).onchange = (ev) => {

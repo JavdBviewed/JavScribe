@@ -125,6 +125,16 @@ test("文件夹批量（行优先）：提交即建主任务+子行 → 派发�
   await page.locator("#folder-table tbody tr", { hasText: "video-a.mp4" }).locator("input[type=checkbox]").check();
   await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
   await expect(page.locator("#folder-chip-text")).toHaveText("已选 2 / 3");
+  // 0.2.58 回归：「开始生成」按钮计数随行勾选实时跟随（此前勾选只刷 chip，
+  // 按钮 label 停在初始数量，用户需先切一次服务才刷新）
+  await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
+  await page.locator("#folder-table tbody tr", { hasText: "video-c.mp4" }).locator("input[type=checkbox]").check();
+  await expect(page.locator("#dispatch-go")).toContainText("（3 项）");
+  await page.locator("#folder-table tbody tr", { hasText: "video-c.mp4" }).locator("input[type=checkbox]").uncheck();
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").uncheck();
+  await expect(page.locator("#dispatch-go")).not.toHaveText(/（\d+ 项）/);
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
+  await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.selectOption("#engine-select", "mock");
   await expect(page.locator("#dispatch-go")).toContainText("（2 项）");
   await page.click("#dispatch-go");

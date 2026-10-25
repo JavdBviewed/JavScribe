@@ -46,6 +46,13 @@ test("历史清理：3 终态清掉 + 1 非终态不动 + 服务表收缩 + 残�
   expect((await (await req.get(`${MOCK_URL}/jobs`)).json()) as unknown[]).toHaveLength(1);
   await expect(jobRows(page)).toHaveCount(1, { timeout: 15_000 });
   await expect(page.locator(".job-row .pill.p-running")).toHaveCount(1);
+  // 0.2.58 回归：清理后筛选条终态桶回零——serve 清理同步归零累计统计
+  // （stats.json 单一真源；mock 无驱逐/无持久化，/health.stats 实时口径 ≡ 归零后 serve 口径），
+  // 列表已空时 chip 不再显示终身累计数（幽灵计数）。serve 侧持久化行为由 serve 单测钉死
+  // （tests/test_jobs_history.py::test_cleanup_finished）。
+  await expect(page.locator('#job-filter button[data-f="done"]')).toContainText("完成 0");
+  await expect(page.locator('#job-filter button[data-f="failed"]')).toContainText("失败 0");
+  await expect(page.locator('#job-filter button[data-f="all"]')).toContainText("全部 1");
   // 抑制集：3 条终态 key（engine|job_id）
   expect(await ledgerSuppress(page)).toBe(3);
 

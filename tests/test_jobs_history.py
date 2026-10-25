@@ -219,7 +219,8 @@ def test_jobs_detail_param() -> None:
 
 
 def test_cleanup_finished() -> None:
-    """POST /jobs/cleanup：仅删终态任务，非终态保留，jobs.json 同步收缩。"""
+    """POST /jobs/cleanup：仅删终态任务，非终态保留，jobs.json 同步收缩；
+    累计统计（stats.json）同步归零——看板 chip 单一真源，清理后须回零（幽灵计数回归）。"""
     with tempfile.TemporaryDirectory() as td_s:
         td = Path(td_s)
         fake = td / "fake_infer.py"
@@ -239,6 +240,8 @@ def test_cleanup_finished() -> None:
         httpd.start()
         base = f"http://127.0.0.1:{httpd.server.server_address[1]}"
         try:
+            # 清理前：终态已计入累计统计
+            assert eng.stats() == {"done": 1, "skipped": 0, "failed": 0}, eng.stats()
             code, body = _post(base + "/jobs/cleanup")
             assert code == 200 and body == {"ok": True, "removed": 1}, (code, body)
             code, body = _http(base + "/jobs")
@@ -246,9 +249,25 @@ def test_cleanup_finished() -> None:
             # jobs.json 同步收缩：终态不再落盘，重启后不恢复
             saved = json.loads((td / "jobs.json").read_text(encoding="utf-8"))
             assert all(x["id"] != jdone.id for x in saved)
-            # 空清理幂等
+            # 累计统计同步归零（内存 + stats.json 落盘）：列表空后 chip 计数不再显示终身累计
+            assert eng.stats() == {"done": 0, "skipped": 0, "failed": 0}, eng.stats()
+            spath = td / "stats.json"
+            sraw = json.loads(spath.read_text(encoding="utf-8"))
+            assert sraw["done"] == 0 and sraw["skipped"] == 0 and sraw["failed"] == 0, sraw
+            assert sraw["counted"] == [], sraw
+            # 空清理幂等（表内无终态：不触发归零副作用）
             code, body = _post(base + "/jobs/cleanup")
             assert code == 200 and body == {"ok": True, "removed": 0}, (code, body)
+            # 归零后新终态任务从 0 重计（不清理时仍正常累计）
+            vc = td / "c.mkv"
+            vc.write_bytes(b"3")
+            jc = eng.submit([vc], run_in_thread=False)
+            assert jc.files[0].status == TaskStatus.DONE
+            assert eng.stats() == {"done": 1, "skipped": 0, "failed": 0}, eng.stats()
+            # 二次清理再次归零（契约稳定，不依赖首次清理后的进程状态）
+            code, body = _post(base + "/jobs/cleanup")
+            assert code == 200 and body == {"ok": True, "removed": 1}, (code, body)
+            assert eng.stats() == {"done": 0, "skipped": 0, "failed": 0}, eng.stats()
         finally:
             httpd.stop()
             eng.stop()
