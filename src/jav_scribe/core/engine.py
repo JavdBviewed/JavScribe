@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import threading
 import time
 from pathlib import Path
@@ -35,6 +36,7 @@ from .finalize import existing_lang_sub, finalize_one
 from .subprobe import probe_embedded_subs, should_skip_embedded
 from .log_parser import LogParser
 from .polish import PolishConfig, polish_srt
+from .model_pool import ModelPool
 from .proc_runner import ProcRunner
 from .vram import gpu_free_vram_gb
 from .rtf import RtfHistory
@@ -157,6 +159,9 @@ class Engine:
         # 在途子进程登记（stop() 时全部终止；并发下多个 _run_command 互不覆盖）
         self._active_runners: set[ProcRunner] = set()
         self._runners_lock = threading.Lock()
+        # warm pool：ChickenRice --server 常驻模型进程池（懒启动；仅 Linux 且
+        # infer.model_keepalive_s>0 时启用，见 warm_pool_enabled）
+        self._pool = ModelPool(self)
         self._inflight_files: set[Path] = set()
         # retry_job 放行的文件：resubmit 时豁免内嵌字幕判定（一次性）
         self._force_embedded: set[Path] = set()
@@ -259,12 +264,37 @@ class Engine:
             v = 5
         return max(1, min(50, v))
 
+    @property
+    def model_keepalive_s(self) -> int:
+        """常驻模型空闲释放秒数（warm pool）：默认 600，0 = 禁用（回退经典一次性
+        进程，行为同 0.2.15）。/config 热调，对后续批生效；运行中批不受影响。"""
+        try:
+            v = int(self.cfg.get("infer", {}).get("model_keepalive_s", 600))
+        except (TypeError, ValueError):
+            v = 600
+        return max(0, v)
+
+    @property
+    def warm_pool_enabled(self) -> bool:
+        """warm pool 启用 = Linux（stdin 管道路径）+ keepalive>0。
+
+        Windows/ConPTY 不支持 stdin 写 → 恒 False，走经典一次性进程；
+        JAVSCRIBE_NO_WARM=1 供测试环境显式钉死经典路径（fake 引擎无 --server 协议）。
+        """
+        return (
+            sys.platform.startswith("linux")
+            and self.model_keepalive_s > 0
+            and os.environ.get("JAVSCRIBE_NO_WARM") != "1"
+        )
+
     def coalesce_stats(self) -> dict:
         """coalesce 合并统计快照（单锁保护；/metrics json 与 prometheus 渲染消费）。"""
         with self._coalesce_lock:
             return {
                 "coalesce_applied": self._coalesce_applied,
-                "model_loads": self._model_loads,
+                # model_loads 口径 = 真实模型加载次数：经典路径每批一次（_model_loads）
+                # + warm 路径每 spawn 一次（_pool.loads）
+                "model_loads": self._model_loads + self._pool.loads,
                 "last_batch_files": self._last_batch_files,
                 "last_batch_jobs": self._last_batch_jobs,
             }
@@ -718,6 +748,7 @@ class Engine:
             runners = list(self._active_runners)
         for r in runners:
             r.stop()
+        self._pool.shutdown()
 
     # ------------------------------------------------------------------
     # Job execution
@@ -1151,7 +1182,6 @@ class Engine:
         else:
             self.log(f"[engine] 字幕（{len(todo)} 个文件，一次加载模型）")
         with self._coalesce_lock:
-            self._model_loads += 1
             self._last_batch_files = len(todo)
             self._last_batch_jobs = len(jobs)
             if multi:
@@ -1234,12 +1264,19 @@ class Engine:
                 shared["model_loaded"] = True
                 self.log("  [infer] 模型加载中…")
 
-        self._model_up()
         # 单任务：任一取消即杀进程（现状）；合并批：全部 Job 都取消才终止，
         # 单个被取消 Job 不得杀整个进程（R2）
-        ok, code = self._run_command(cmd, cwd=cwd, on_line=on_line,
-                                     stop_check=lambda: all(j.cancel_requested for j in jobs))
-        self._model_down()  # 推理进程已退出，模型随进程释放
+        stop_check = lambda: all(j.cancel_requested for j in jobs)
+        result = self._run_warm(todo, on_line, stop_check) if self.warm_pool_enabled else None
+        if result is None:
+            # 经典一次性进程（含 warm 池不可用时的回退）：模型随进程生灭
+            self._model_up()
+            ok, code = self._run_command(cmd, cwd=cwd, on_line=on_line, stop_check=stop_check)
+            self._model_down()  # 推理进程已退出，模型随进程释放
+            with self._coalesce_lock:
+                self._model_loads += 1
+        else:
+            ok, code, _via_warm = result
         if shared["oom_lines"]:
             self.log(f"[engine] 检测到 CUDA OOM 签名（{len(shared['oom_lines'])} 行），按 OOM 语义处理失败文件")
         if not ok:
@@ -1346,7 +1383,8 @@ class Engine:
             return todo[idx]
         return cur["t"]
 
-    def _build_infer_command(self, files: list[Path]) -> tuple[list[str], Optional[str]]:
+    def _build_infer_command(self, files: list[Path],
+                             server: bool = False) -> tuple[list[str], Optional[str]]:
         inf = self.cfg.get("infer", {})
         sub = self.cfg.get("subtitle", {})
         base = inf.get("command", "")
@@ -1391,6 +1429,11 @@ class Engine:
             first = parts[0]
             if (len(parts) == 1 or first.endswith(".exe")) and Path(first).is_file():
                 cwd = str(Path(first).resolve().parent)
+        if server:
+            # 常驻模式：文件不经 argv，经 stdin JSON 批协议投递；keepalive 随配置
+            args.append("--server")
+            args.append(f"--keepalive_s={self.model_keepalive_s}")
+            return parts + args, (cwd or None)
         return parts + args + [str(f) for f in files], (cwd or None)
 
     def _finalize_task(self, task: Task, lang: str, job: Job) -> None:
@@ -1477,6 +1520,56 @@ class Engine:
     # ------------------------------------------------------------------
     # Generic command runner
     # ------------------------------------------------------------------
+    def _run_warm(self, todo: list[Task], on_line: LogFn,
+                  stop_check: Callable[[], bool]) -> Optional[tuple[bool, int | None, bool]]:
+        """warm 路径：批行投给 ChickenRice --server 常驻进程，等 batch_done。
+
+        返回 None = 常驻进程不可用（容量满/显存闸/启动失败/发送失败）→ 调用方
+        回退经典一次性进程；(ok, code, via_warm=True) 时模型加载计在池 spawn 侧。
+        取消/停止：杀常驻进程（即时生效，语义同经典路径），本批未开始文件按
+        取消收尾；崩溃：进程逐出池，下一批重建。
+        """
+        import json as _json
+
+        pool = self._pool
+        batch_evt = threading.Event()
+
+        def warm_on_line(line: str) -> None:
+            if line.startswith("[SERVER] batch_done"):
+                batch_evt.set()
+            elif line.startswith("[SERVER] batch_error"):
+                self.log(f"  [warm] 协议错误: {line}")
+            on_line(line)
+
+        runner = pool.acquire(warm_on_line)
+        if runner is None:
+            return None
+        try:
+            if not runner.send(_json.dumps({"files": [str(t.source) for t in todo]})):
+                pool.discard(runner, "发送失败（管道断裂）")
+                return None  # 进程刚死、批未投出：回退一次性进程跑本批
+            while runner.proc_alive:
+                if batch_evt.is_set():
+                    break
+                runner.wait(1.0)
+                if self._stop_evt.is_set():
+                    pool.discard(runner, "服务停止")
+                    return (False, None, True)
+                if stop_check():
+                    self.log("[engine] 收到取消，终止常驻进程")
+                    pool.discard(runner, "取消")
+                    return (False, None, True)
+            if batch_evt.is_set() and runner.proc_alive:
+                pool.release(runner)  # 回池：空闲 keepalive 自动释放显存
+                return (True, 0, True)
+            code = runner.exit_code
+            pool.discard(runner, f"崩溃（code {code}）" if code not in (0, None) else "异常退出")
+            return (False, code, True)
+        except Exception as e:  # 防御：warm 路径异常不得击穿 worker
+            self.log(f"[warm] 常驻路径异常: {e}")
+            pool.discard(runner, f"异常 {e}")
+            return (False, None, True)
+
     def _run_command(
         self,
         cmd: list[str],

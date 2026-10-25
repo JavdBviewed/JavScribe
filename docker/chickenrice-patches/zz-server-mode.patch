@@ -1,0 +1,417 @@
+diff --git a/src/faster_whisper_transwithai_chickenrice/infer.py b/src/faster_whisper_transwithai_chickenrice/infer.py
+index 0e9d9f0..c4662f2 100644
+--- a/src/faster_whisper_transwithai_chickenrice/infer.py
++++ b/src/faster_whisper_transwithai_chickenrice/infer.py
+@@ -182,6 +182,13 @@ def parse_arguments():
+         help="Maximum batch size to try when auto-detecting (default: 8)",
+     )
+ 
++    # [JavScribe] Server mode: resident model, batches arrive as JSON lines
++    # on stdin (one line per batch: {"files": [...]}); self-exit after
++    # --keepalive_s of idle (0 = never). See run_server().
++    parser.add_argument("--server", action="store_true", default=False,
++                        help="[JavScribe] resident model mode (stdin JSON batches)")
++    parser.add_argument("--keepalive_s", type=int, default=600,
++                        help="[JavScribe] server idle seconds before self-exit (0=never)")
+     parser.add_argument("base_dirs", nargs=argparse.REMAINDER, help=_("args.directories"))
+     return parser.parse_args()
+ 
+@@ -456,6 +463,11 @@ class Inference:
+         # the batched attempt (which is unreliable on continuous audio) is
+         # skipped for that file.
+         self._skip_batch_this_file = False
++        # [JavScribe] Resident model state (server mode). CLI behavior is
++        # unchanged: generates() loads once; the process exit releases it.
++        self.model = None
++        self.batched_model = None
++        self.batch_size_resolved = None  # None = not resolved (probe lazily)
+ 
+         self.overwrite = args.overwrite
+         self.output_dir = args.output_dir
+@@ -765,153 +777,183 @@ class Inference:
+             )
+         )
+ 
+-    def generates(self, base_dirs):
+-        if len(base_dirs) == 0:
+-            logger.warning(_("warnings.provide_directories"))
+-            return
++    def ensure_model(self):
++        """[JavScribe] Load the Whisper model once (idempotent).
+ 
+-        tasks = self._scan(base_dirs)
+-        if len(tasks) == 0:
+-            logger.info(_("info.no_files_found"))
++        CLI: called by generates() (first and only call; the process exit
++        releases the model). Server: called at startup and reused across all
++        stdin batches - resident mode, no per-task model load
++        (JavScribe serve warm pool).
++        """
++        if self.model is not None:
+             return
+-
+-        logger.info(_("tasks.processing", count=len(tasks), task=self.generation_config["task"]))
+         logger.info(_("info.loading_whisper"))
++        WhisperModelCls, BatchedInferencePipelineCls = _require_faster_whisper()
+ 
+-        try:
+-            WhisperModelCls, BatchedInferencePipelineCls = _require_faster_whisper()
+-
+-            model = WhisperModelCls(
+-                self.model_name_or_path,
+-                device=self.device,
+-                compute_type=self.compute_type,
+-            )
+-            logger.info(_("info.model_precision").format(precision=self.compute_type, device=self.device))
++        self.model = WhisperModelCls(
++            self.model_name_or_path,
++            device=self.device,
++            compute_type=self.compute_type,
++        )
++        logger.info(_("info.model_precision").format(precision=self.compute_type, device=self.device))
+ 
+-            # Setup batched inference if enabled
+-            batched_model = None
+-            batch_size_to_use = self.batch_size
++        self.batched_model = None
++        if self.enable_batching:
++            try:
++                self.batched_model = BatchedInferencePipelineCls(model=self.model)
++            except Exception as e:
++                logger.warning(f"Failed to setup batched inference: {str(e)}. Falling back to non-batched mode.")
++                self.batched_model = None
+ 
+-            if self.enable_batching:
+-                try:
+-                    batched_model = BatchedInferencePipelineCls(model=model)
+-
+-                    # Auto-detect batch size if not specified
+-                    if batch_size_to_use == 0 and len(tasks) > 0:
+-                        # Use the first audio file as sample for testing
+-                        batch_size_to_use = self._find_executable_batch_size(
+-                            model,
+-                            tasks[0].audio_path,
+-                            min_batch_size=1,
+-                            max_batch_size=self.max_batch_size,
+-                        )
++    def _resolve_batch_size(self, sample_audio_path):
++        """[JavScribe] Resolve the effective batch size (probe at most once).
+ 
+-                        if batch_size_to_use == 0:
+-                            logger.warning("Could not find suitable batch size. Falling back to non-batched mode.")
+-                            batched_model = None
++        0 = non-batched. The auto probe runs lazily on the first batch (its
++        first file is the sample); the result - including OOM auto-adjustment
++        during transcription - is cached in self.batch_size_resolved so
++        later batches (server mode) never re-probe.
++        """
++        if self.batch_size_resolved is not None:
++            return self.batch_size_resolved
++        if self.batch_size > 0:
++            self.batch_size_resolved = self.batch_size
++            if self.batched_model:
++                logger.info(f"Using batched inference with batch size: {self.batch_size}")
++            return self.batch_size_resolved
++        if not self.enable_batching or self.batched_model is None:
++            self.batch_size_resolved = 0
++            return 0
++        batch_size_to_use = self._find_executable_batch_size(
++            self.model,
++            sample_audio_path,
++            min_batch_size=1,
++            max_batch_size=self.max_batch_size,
++        )
++        if batch_size_to_use == 0:
++            logger.warning("Could not find suitable batch size. Falling back to non-batched mode.")
++            self.batched_model = None
++        self.batch_size_resolved = batch_size_to_use
++        if self.batched_model and batch_size_to_use > 0:
++            logger.info(f"Using batched inference with batch size: {batch_size_to_use}")
++        return batch_size_to_use
++
++    def transcribe_tasks(self, tasks):
++        """[JavScribe] Per-file transcription loop (model must be loaded)."""
++        model = self.model
++        batched_model = self.batched_model
++        batch_size_to_use = self._resolve_batch_size(tasks[0].audio_path)
++        for i, task in enumerate(tasks):
++            logger.info(
++                _(
++                    "info.processing",
++                    task=self.generation_config["task"],
++                    current=i + 1,
++                    total=len(tasks),
++                    path=task.audio_path,
++                )
++            )
+ 
+-                    if batched_model and batch_size_to_use > 0:
+-                        logger.info(f"Using batched inference with batch size: {batch_size_to_use}")
++            audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
++                task.audio_path,
++                batched=bool(batched_model and batch_size_to_use > 0),
++            )
+ 
++            # Use batched or regular inference
++            if batched_model and batch_size_to_use > 0 and not self._skip_batch_this_file:
++                # Use auto-retry with batch size reduction on OOM
++                # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
++                try:
++                    _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
++                        batched_model,
++                        audio_input,
++                        transcription_config,
++                        starting_batch_size=batch_size_to_use,
++                    )
++                    # Update batch_size_to_use if it was auto-adjusted
++                    if actual_batch_size < batch_size_to_use:
++                        logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
++                        batch_size_to_use = actual_batch_size
++                        self.batch_size_resolved = actual_batch_size  # [JavScribe] persist for later files/batches
+                 except Exception as e:
+-                    logger.warning(f"Failed to setup batched inference: {str(e)}. Falling back to non-batched mode.")
+-                    batched_model = None
+-
+-            for i, task in enumerate(tasks):
+-                logger.info(
+-                    _(
+-                        "info.processing",
+-                        task=self.generation_config["task"],
+-                        current=i + 1,
+-                        total=len(tasks),
+-                        path=task.audio_path,
++                    logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
++                    # Fallback to non-batched
++                    audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
++                        task.audio_path,
++                        batched=False,
++                    )
++                    _segments, info = model.transcribe(
++                        audio_input,
++                        **transcription_config,
++                    )
++            else:
++                if self._skip_batch_this_file:
++                    # Re-prepare with the non-batched clip layout: the
++                    # batched layout (list of dicts) is not accepted by
++                    # WhisperModel.transcribe, and an empty flat list
++                    # means "full audio" in that pipeline.
++                    audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
++                        task.audio_path,
++                        batched=False,
++                    )
++                if manual_duration_after_vad == 0:
++                    _segments = []
++                    info = SimpleNamespace(
++                        duration=len(audio_input) / WHISPER_SAMPLING_RATE,
++                        duration_after_vad=0,
++                    )
++                else:
++                    _segments, info = model.transcribe(
++                        audio_input,
++                        **transcription_config,
+                     )
+-                )
+ 
+-                audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
+-                    task.audio_path,
+-                    batched=bool(batched_model and batch_size_to_use > 0),
++            duration_after_vad = (
++                manual_duration_after_vad if manual_duration_after_vad is not None else info.duration_after_vad
++            )
++            self._log_duration(info.duration, duration_after_vad)
++
++            segments = []
++            for _segment in _segments:
++                segment = Segment(
++                    start=int(_segment.start * 1_000),
++                    end=int(_segment.end * 1_000),
++                    text=_segment.text.strip(),
++                )
++                segments.append(segment)
++                logger.debug(
++                    f"[{SubWriter.lrc_timestamp(segment.start)} --> "
++                    f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
+                 )
+ 
+-                # Use batched or regular inference
+-                if batched_model and batch_size_to_use > 0 and not self._skip_batch_this_file:
+-                    # Use auto-retry with batch size reduction on OOM
+-                    # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
+-                    try:
+-                        _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
+-                            batched_model,
+-                            audio_input,
+-                            transcription_config,
+-                            starting_batch_size=batch_size_to_use,
+-                        )
+-                        # Update batch_size_to_use if it was auto-adjusted
+-                        if actual_batch_size < batch_size_to_use:
+-                            logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
+-                            batch_size_to_use = actual_batch_size
+-                    except Exception as e:
+-                        logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
+-                        # Fallback to non-batched
+-                        audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
+-                            task.audio_path,
+-                            batched=False,
+-                        )
+-                        _segments, info = model.transcribe(
+-                            audio_input,
+-                            **transcription_config,
+-                        )
+-                else:
+-                    if self._skip_batch_this_file:
+-                        # Re-prepare with the non-batched clip layout: the
+-                        # batched layout (list of dicts) is not accepted by
+-                        # WhisperModel.transcribe, and an empty flat list
+-                        # means "full audio" in that pipeline.
+-                        audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
+-                            task.audio_path,
+-                            batched=False,
+-                        )
+-                    if manual_duration_after_vad == 0:
+-                        _segments = []
+-                        info = SimpleNamespace(
+-                            duration=len(audio_input) / WHISPER_SAMPLING_RATE,
+-                            duration_after_vad=0,
+-                        )
+-                    else:
+-                        _segments, info = model.transcribe(
+-                            audio_input,
+-                            **transcription_config,
+-                        )
++            segments = merge_segments(segments, self.segment_merge_options)
++            os.makedirs(os.path.dirname(task.sub_prefix), exist_ok=True)
++            for sub_suffix in task.sub_formats:
++                sub_path = f"{task.sub_prefix}.{sub_suffix}"
++                logger.info(_("info.writing", path=sub_path))
++                self.sub_writers[sub_suffix](segments, sub_path)
+ 
+-                duration_after_vad = (
+-                    manual_duration_after_vad if manual_duration_after_vad is not None else info.duration_after_vad
+-                )
+-                self._log_duration(info.duration, duration_after_vad)
+-
+-                segments = []
+-                for _segment in _segments:
+-                    segment = Segment(
+-                        start=int(_segment.start * 1_000),
+-                        end=int(_segment.end * 1_000),
+-                        text=_segment.text.strip(),
+-                    )
+-                    segments.append(segment)
+-                    logger.debug(
+-                        f"[{SubWriter.lrc_timestamp(segment.start)} --> "
+-                        f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
+-                    )
++    def generates(self, base_dirs):
++        if len(base_dirs) == 0:
++            logger.warning(_("warnings.provide_directories"))
++            return
++
++        tasks = self._scan(base_dirs)
++        if len(tasks) == 0:
++            logger.info(_("info.no_files_found"))
++            return
+ 
+-                segments = merge_segments(segments, self.segment_merge_options)
+-                os.makedirs(os.path.dirname(task.sub_prefix), exist_ok=True)
+-                for sub_suffix in task.sub_formats:
+-                    sub_path = f"{task.sub_prefix}.{sub_suffix}"
+-                    logger.info(_("info.writing", path=sub_path))
+-                    self.sub_writers[sub_suffix](segments, sub_path)
++        logger.info(_("tasks.processing", count=len(tasks), task=self.generation_config["task"]))
+ 
++        try:
++            self.ensure_model()
++            self.transcribe_tasks(tasks)
+         finally:
+             # Clean up VAD injection
+             if self.vad_injected:
+                 uninject_vad()
+                 logger.info(_("info.vad_deactivated"))
+ 
++
+     def _find_executable_batch_size(self, model, sample_audio_path, min_batch_size=1, max_batch_size=64):
+         """
+         Find the maximum executable batch size for batched inference.
+@@ -1349,6 +1391,66 @@ def launch_debug_console():
+     code.InteractiveConsole(locals=namespace).interact(banner="")
+ 
+ 
++def run_server(args):
++    """[JavScribe] Server mode: resident model + stdin JSON batch protocol.
++
++    Protocol (newline-delimited; stdout progress lines are identical to CLI
++    so JavScribe serve's LogParser stays compatible):
++      stdin  line: {"files": ["/abs/path.audio", ...]}
++      stdout: "[SERVER] ready pid=<pid>"       after model load
++      stdout: "[SERVER] batch_done files=<n>"  after each batch
++      stdout: "[SERVER] batch_error <msg>"     on bad request line
++    Idle: no stdin line within keepalive_s (0 = never) -> exit 0 (release).
++    stdin EOF -> exit 0. A per-file failure crashes the process like CLI
++    mode does; the caller (JavScribe serve) respawns on next need.
++    """
++    import json as _json
++    import queue as _queue
++    import threading as _threading
++
++    inference = Inference(args)
++    inference.ensure_model()
++    print("[SERVER] ready pid={}".format(os.getpid()), flush=True)
++
++    q = _queue.Queue()
++
++    def _reader():
++        try:
++            for line in sys.stdin:
++                q.put(line)
++        except Exception:  # noqa: BLE001 - reader must never kill the server
++            pass
++        q.put(None)  # EOF sentinel
++
++    _threading.Thread(target=_reader, daemon=True).start()
++    keepalive = max(0, args.keepalive_s)
++
++    while True:
++        try:
++            line = q.get(timeout=keepalive if keepalive > 0 else None)
++        except _queue.Empty:
++            logger.info("[JavScribe] server idle keepalive timeout (%ss) - releasing model", keepalive)
++            print("[SERVER] idle_exit", flush=True)
++            sys.exit(0)
++        if line is None:
++            logger.info("[JavScribe] server stdin EOF - exiting")
++            sys.exit(0)
++        line = line.strip()
++        if not line:
++            continue
++        try:
++            req = _json.loads(line)
++        except _json.JSONDecodeError as e:
++            print("[SERVER] batch_error bad_json: {}".format(e), flush=True)
++            continue
++        files = [str(f) for f in (req.get("files") or [])]
++        tasks = inference._scan(files) if files else []
++        n_done = len(tasks)
++        if tasks:
++            inference.transcribe_tasks(tasks)
++        print("[SERVER] batch_done files={}".format(n_done), flush=True)
++
++
+ def main():
+     """Main entry point for the script"""
+     if getattr(sys, "frozen", False):
+@@ -1433,6 +1535,11 @@ def main():
+     logger.info(_("info.platform").format(platform=platform.platform()))
+     logger.info(_("info.arguments").format(args=vars(args)))
+ 
++    # [JavScribe] Server mode: base_dirs not required (batches arrive via stdin)
++    if args.server:
++        run_server(args)
++        sys.exit(0)
++
+     if len(args.base_dirs) == 0:
+         logger.warning(_("warnings.drag_files"))
+         sys.exit(1)

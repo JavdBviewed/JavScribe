@@ -116,6 +116,7 @@ CONFIG_ITEMS: list[tuple[str, str, str, Optional[list[str]], bool]] = [
     ("infer.model", "字幕模型", "string", None, False),
     ("infer.concurrency", "转译并发数", "int", None, False),
     ("infer.coalesce_max_jobs", "合并批任务数（模型复用）", "int", None, False),
+    ("infer.model_keepalive_s", "模型常驻空闲释放（秒）", "int", None, False),
     ("infer.vram_per_instance_gb", "单实例显存预检阈值（GB）", "int", None, False),
     ("infer.log_level", "日志级别", "enum", ["DEBUG", "INFO", "WARNING", "ERROR"], False),
     ("infer.batch", "批量推理", "bool", None, False),
@@ -166,6 +167,7 @@ CONFIG_HINTS: dict[str, str] = {
     "infer.model": "识别模型目录/名。通常保持不变；改成别的名字前需确认服务端已有该模型。",
     "infer.concurrency": "服务端同时转译的任务数（= 并行加载的模型实例数）。默认 1（串行）；每实例约占 4~6GB 显存（GPU 模式）或相应 CPU 核数。显存充足（如 24GB 显卡）时调 2~3 可提升整批吞吐，单个任务耗时基本不变；显存不足会导致 OOM 失败，请按服务端显卡调整。保存后立即对后续任务生效，运行中任务不受影响。",
     "infer.coalesce_max_jobs": "队列里还有待处理任务时，把最多 N-1 个后续同源任务并入当前转写进程：一次模型加载覆盖整批，省掉每任务的模型加载耗时（任务多时明显提速）。1 = 现状（每任务一个进程）；越大省加载越多，但单进程覆盖文件更多、单文件等待可能变长。保存后立即对后续任务生效，运行中任务不受影响。",
+    "infer.model_keepalive_s": "模型常驻：转写进程启动后保持模型加载，后续任务零加载直接开跑；连续 N 秒没有新批才退出释放显存。默认 600（10 分钟）；0 = 关闭常驻（每个任务重新加载模型）。仅 Linux 服务端生效，保存后立即对后续任务生效，运行中任务不受影响。",
     "infer.log_level": "识别引擎日志详细度。排障用 DEBUG，平时 WARNING 更安静。",
     "infer.batch": "开启后引擎把队列内多个音轨合并成批推理，GPU 利用率与排队吞吐更高。",
     "infer.max_batch_size": "一批最多并行多少条音轨：越大排空越快、显存/内存压力越高；默认 8。",
@@ -240,8 +242,11 @@ def validate_config_updates(values: dict[str, Any]) -> list[tuple[str, str, Any]
             if not isinstance(value, bool):
                 raise ConfigError(f"{path} 需要布尔值")
         elif ftype == "int":
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ConfigError(f"{path} 需要正整数")
+            nonneg = path == "infer.model_keepalive_s"  # 0 = 关闭常驻（回退一次性进程）
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or (value < 1 and not nonneg):
+                raise ConfigError(f"{path} 需要{'非负整数' if nonneg else '正整数'}")
+            if path == "infer.model_keepalive_s" and value > 86400:
+                raise ConfigError(f"{path} 最大 86400")
             if path == "infer.max_batch_size" and value > 128:
                 raise ConfigError(f"{path} 最大 128")
             if path == "infer.concurrency" and value > 4:

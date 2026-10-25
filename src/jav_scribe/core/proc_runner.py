@@ -36,6 +36,7 @@ class ProcRunner:
         on_exit: Callable[[int], None] | None = None,
         use_pty: bool = True,
         env: dict[str, str] | None = None,
+        stdin: bool = False,
     ) -> None:
         self.command = command
         self.files = [str(f) for f in (files or [])]
@@ -45,6 +46,9 @@ class ProcRunner:
         self.on_exit = on_exit
         self.use_pty = use_pty and sys.platform == "win32" and winpty is not None
         self._env = env
+        # stdin 管道（ChickenRice --server 常驻模式的批行通道；仅 Popen 路径支持，
+        # ConPTY 路径不开放——warm pool 只在 Linux 启用，Windows 走经典一次性进程）
+        self._stdin_pipe = stdin and not (use_pty and sys.platform == "win32" and winpty is not None)
         self._proc: subprocess.Popen | None = None
         self._pty = None
         self._thread: threading.Thread | None = None
@@ -92,6 +96,7 @@ class ProcRunner:
                     env=self._env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE if self._stdin_pipe else None,
                 )
         except (OSError, ValueError) as e:
             if self.on_line:
@@ -122,6 +127,46 @@ class ProcRunner:
     def wait(self, timeout: float | None = None) -> None:
         if self._thread is not None:
             self._thread.join(timeout)
+
+    @property
+    def proc_alive(self) -> bool:
+        """子进程是否仍存活（与 running 不同：不依赖读线程状态）。"""
+        if self._pty is not None:
+            try:
+                return self._pty.isalive()
+            except Exception:
+                return False
+        if self._proc is not None:
+            return self._proc.poll() is None
+        return False
+
+    @property
+    def exit_code(self) -> int | None:
+        """子进程退出码（未退出为 None）。"""
+        if self._proc is not None:
+            return self._proc.poll()
+        if self._pty is not None:
+            try:
+                return self._pty.exitstatus
+            except Exception:
+                return None
+        return None
+
+    def send(self, line: str) -> bool:
+        """向子进程 stdin 写一行（ChickenRice --server 批协议）。
+
+        管道未开 / 进程已死 / 断管 → False（调用方按「常驻进程不可用」处理）。
+        """
+        if self._pty is not None or self._proc is None or self._proc.stdin is None:
+            return False
+        if self._proc.poll() is not None:
+            return False
+        try:
+            self._proc.stdin.write((line + "\n").encode("utf-8"))
+            self._proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
 
     # ------------------------------------------------------------------
     def _read_loop(self) -> None:
