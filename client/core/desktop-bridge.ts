@@ -135,6 +135,17 @@ export interface LocalServeState {
   error: string | null;
 }
 
+// ---------- 远程调试（opt-in：仅 --remote-debug 启动参数生效；否则恒 null） ----------
+
+export interface RemoteDebugState {
+  /** renderer CDP 端口（http://<ip>:rendererPort/devtools） */
+  rendererPort: number;
+  /** main 进程 inspector 端口（CDP 协议） */
+  inspectorPort: number;
+  /** 本机非内环 IPv4（LAN 可达地址提示） */
+  lanIps: string[];
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -165,6 +176,8 @@ export interface JavDesktop {
   };
   /** 最新服务端 Release（服务端无自有界面，新版本提示在客户端 UI）；拉不到返回 null */
   serveUpdate(): Promise<ServeRelease | null>;
+  /** 远程调试状态（仅 --remote-debug 启动时非 null；否则恒 null） */
+  remoteDebugState(): Promise<RemoteDebugState | null>;
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
 

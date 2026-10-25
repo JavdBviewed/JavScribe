@@ -121,9 +121,13 @@ export function assertDistBuilt(): void {
   }
 }
 
-export async function launchApp(userData: string, extraEnv: Record<string, string> = {}) {
+export async function launchApp(
+  userData: string,
+  extraEnv: Record<string, string> = {},
+  extraArgs: string[] = [],
+) {
   return electron.launch({
-    args: [DIST, "--no-sandbox"],
+    args: [DIST, "--no-sandbox", ...extraArgs],
     env: {
       ...process.env,
       JAVSCRIBE_CLIENT_USERDATA: userData,

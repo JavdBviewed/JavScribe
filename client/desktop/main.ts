@@ -37,6 +37,45 @@ import {
 } from "../core/sub-embed";
 
 // ---------------------------------------------------------------------------
+// 远程调试（opt-in）：--remote-debug [--remote-debug-port=9222]
+//   renderer CDP（remote-debugging-port/-address，0.0.0.0）+ main inspector（port+1）
+//   必须在 app ready 前 appendSwitch——模块顶层是 main 进程最早执行点。
+//   默认关闭：不带参数时零行为变化（不监听任何端口）。
+// ---------------------------------------------------------------------------
+
+interface RemoteDebugOpts { enabled: boolean; port: number; }
+
+function parseRemoteDebugArgv(argv: string[]): RemoteDebugOpts {
+  const opts: RemoteDebugOpts = { enabled: false, port: 9222 };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--remote-debug") {
+      opts.enabled = true;
+    } else if (a.startsWith("--remote-debug-port=")) {
+      opts.enabled = true;
+      const p = Number.parseInt(a.slice("--remote-debug-port=".length), 10);
+      if (Number.isInteger(p) && p >= 1 && p <= 65535) opts.port = p;
+    } else if (a === "--remote-debug-port") {
+      opts.enabled = true;
+      const p = Number.parseInt(argv[++i] || "", 10);
+      if (Number.isInteger(p) && p >= 1 && p <= 65535) opts.port = p;
+    }
+  }
+  return opts;
+}
+
+const remoteDebug: RemoteDebugOpts = parseRemoteDebugArgv(process.argv);
+// main inspector 实际端口：默认 port+1；若 inspector 已激活（如 --inspect 启动、
+// e2e 的 --inspect=0）则复用既有端口（inspector.open 对已激活实例会抛异常）
+let remoteInspectorPort: number | null = null;
+if (remoteDebug.enabled) {
+  app.commandLine.appendSwitch("remote-debugging-port", String(remoteDebug.port));
+  app.commandLine.appendSwitch("remote-debugging-address", `0.0.0.0:${remoteDebug.port}`);
+  // inspector 端口在 whenReady 内 open（见下方）；此处只记日志便于打包外排查
+  console.log(`[remote-debug] 远程调试已启用：renderer CDP :${remoteDebug.port}，main inspector :${remoteDebug.port + 1}（内网可用，用完请关）`);
+}
+
+// ---------------------------------------------------------------------------
 // 引擎登记（语义与 web/src/jav_scribe_web/config.py 一致）
 // ---------------------------------------------------------------------------
 
@@ -1985,6 +2024,19 @@ function registerIpc(): void {
   });
 
   // 只读探测文件存在（换服务重跑恢复源视频路径；stat 失败一律 false）
+  // 远程调试状态查询（renderer 启动时自查；未开启恒 null，避免推送时序丢消息）
+  ipcMain.handle("remote-debug-state", (): { rendererPort: number; inspectorPort: number; lanIps: string[] } | null => {
+    if (!remoteDebug.enabled) return null;
+    const lanIps: string[] = [];
+    const ifaces = os.networkInterfaces();
+    for (const list of Object.values(ifaces)) {
+      for (const i of list || []) {
+        if (i.family === "IPv4" && !i.internal) lanIps.push(i.address);
+      }
+    }
+    return { rendererPort: remoteDebug.port, inspectorPort: remoteInspectorPort ?? remoteDebug.port + 1, lanIps };
+  });
+
   ipcMain.handle("file-exists", (_ev, p: unknown) => {
     if (typeof p !== "string" || !p) return false;
     try { return fs.statSync(p).isFile(); } catch { return false; }
@@ -3613,6 +3665,28 @@ app.whenReady().then(() => {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
   }
   createWindow();
+  if (remoteDebug.enabled) {
+    // main 进程 inspector：CDP 协议（ws://<ip>:port+1），可 eval 主进程
+    // （pipelineGateWait / ffmpeg 子进程 / lsState 等）；失败不阻断启动
+    const insp = require("inspector");
+    const existing = insp.url();
+    if (existing) {
+      // 已激活（--inspect / e2e 的 --inspect=0 随机端口）：复用既有端口
+      try {
+        remoteInspectorPort = Number(new URL(existing).port);
+      } catch {
+        remoteInspectorPort = remoteDebug.port + 1;
+      }
+      console.log(`[remote-debug] main inspector 已激活，复用现有端口 :${remoteInspectorPort}`);
+    } else {
+      remoteInspectorPort = remoteDebug.port + 1;
+      try {
+        insp.open(remoteInspectorPort, "0.0.0.0", true);
+      } catch (e) {
+        console.warn(`[remote-debug] main inspector 开启失败（端口被占？）: ${String(e)}`);
+      }
+    }
+  }
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

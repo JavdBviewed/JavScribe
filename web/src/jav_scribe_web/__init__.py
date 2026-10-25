@@ -1,3 +1,3 @@
 """JavScribe-Web: subtitle workbench for JavScribe services."""
 
-__version__ = "0.2.59"
+__version__ = "0.2.60"

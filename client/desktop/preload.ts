@@ -34,6 +34,10 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
 
   fileExists: (p: string) => ipcRenderer.invoke("file-exists", p) as Promise<boolean>,
 
+  // 远程调试（opt-in --remote-debug）：查询当前状态；未开启恒 null
+  remoteDebugState: () =>
+    ipcRenderer.invoke("remote-debug-state") as Promise<import("../core/desktop-bridge").RemoteDebugState | null>,
+
   download: (url: string, filename: string) =>
     ipcRenderer.invoke("download-srt", { url, filename }) as Promise<FileOpResult>,
 

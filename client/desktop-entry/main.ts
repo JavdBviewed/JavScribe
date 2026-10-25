@@ -7,6 +7,7 @@ import { initApp } from "../ui/app";
 import { desktopTransport } from "../transport-desktop";
 import { desktopPlatform } from "../platform-desktop";
 import { SRT_SUFFIX } from "../core/constants";
+import { toast } from "../ui/toast";
 import type { JavDesktop } from "../core/desktop-bridge";
 
 initApp(desktopTransport, desktopPlatform);
@@ -27,3 +28,17 @@ document.addEventListener("click", (ev) => {
   const srtName = videoName ? videoName.replace(/\.[^.]+$/, "") + SRT_SUFFIX : "subtitle.srt";
   void desktop.download(a.href, srtName);
 }, true);
+
+// 远程调试（opt-in --remote-debug）：启动时自查状态 → 一次性 toast 提示端口与 LAN 地址。
+// 主动查询而非 main 推送：规避「main 发送时 renderer 尚未加载完」的时序丢失。
+if (desktop && "remoteDebugState" in desktop) {
+  void desktop.remoteDebugState().then((st) => {
+    if (!st) return;
+    const ips = st.lanIps.length ? st.lanIps.join("、") : "（未检测到局域网地址）";
+    toast(
+      `远程调试已开启：CDP http://<本机IP>:${st.rendererPort}/devtools · main inspector :${st.inspectorPort}` +
+      `（内网 ${ips}；远程调试用完请关）`,
+      "",
+    );
+  });
+}
