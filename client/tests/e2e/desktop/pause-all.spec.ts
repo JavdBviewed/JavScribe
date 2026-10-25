@@ -212,3 +212,71 @@ test("F-12：仅本机 pending 子行在途（serve 行全终态）「暂停所�
     .toBe(true);
   await expect(btn).toBeVisible({ timeout: 15_000 });
 });
+
+/**
+ * 0.2.59：「暂停所有」冻结派发泵（新批次行恒留排队中 + 套「已暂停（全局暂停）」副本），
+ * 「继续任务」后泵自愈重驱、自动派发提交（无需人工动作）。
+ * 旧行为：暂停只冻 main 进程管线闸，暂停期提交的新批次行立即变「运行中 0% 本地提取音轨…」
+ * （renderer 池 onStart 先触发、main 闸后挂起，ffmpeg 根本没起），恒 0% 无磁盘占用——
+ * 用户「卡 0%」困惑源。
+ * 造法：先暂停（seed running 行保按钮可见）→ 派发页提交 2 项文件夹批
+ * → 断言行恒 pending + 「已暂停（全局暂停）」副本（泵闸在行开跑前冻结，稳定无竞态）
+ * → 继续 → ≤60s 内 pending && !job_id 行清零（泵自愈重驱）。
+ */
+test("0.2.59：全局暂停冻结新派发 + 已暂停副本 + 继续自愈", async ({ page, request, userData }) => {
+  await mockPause(request); // 冻结 mock tick：种子行稳定 running（保暂停按钮可见）
+  await mockSeed(request, { n: 1, status: "running", progress: 40 });
+  await goView(page, "jobs");
+
+  const btn = page.locator(BTN);
+  await expect(btn).toBeVisible();
+  page.on("dialog", (d) => d.accept()); // 暂停方向有确认框
+  await btn.click();
+  await expect(page.locator("#toasts .toast.ok").last()).toContainText("已暂停");
+  await expect.poll(() => pipelinePaused(userData), { timeout: 10_000 }).toBe(true);
+  await expect(btn).toHaveText("▶ 继续任务", { timeout: 15_000 });
+  // renderer 同步 paused_all（summary 5s 刷新口径；闸读此值）
+  await expect
+    .poll(() => page.evaluate(() => (window as any).state?._summary?.paused_all), { timeout: 15_000 })
+    .toBe(true);
+
+  // 暂停期提交 2 项文件夹批（旧行为：行秒变「运行中 0%」；新行为：恒留排队中）
+  await goView(page, "dispatch");
+  await page.setInputFiles("#folder", FIXTURES);
+  await expect(page.locator("#folder-table tbody tr")).toHaveCount(3, { timeout: 20_000 });
+  await page.locator("#folder-table tbody tr", { hasText: "video-a.mp4" }).locator("input[type=checkbox]").check();
+  await page.locator("#folder-table tbody tr", { hasText: "video-b.mkv" }).locator("input[type=checkbox]").check();
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect(page.locator(".job-batch-row")).toHaveCount(1, { timeout: 20_000 });
+
+  // 冻结不变式：2 行恒 pending（未进 running），「已暂停（全局暂停）」副本生效
+  await expect
+    .poll(() => page.evaluate(() => {
+      const pend = Array.from(((window as any).state?._pending?.values?.() ?? []) as any[]);
+      const local = pend.filter((p) => p.row.dispatch_pending && !p.row.job_id);
+      return local.length === 2 && local.every((p) => p.row.status === "pending");
+    }), { timeout: 15_000, intervals: [300] })
+    .toBe(true);
+  await expect(page.locator(".job-row", { hasText: "已暂停（全局暂停）" })).toHaveCount(2, { timeout: 10_000 });
+  // 稳定窗：3s 内行不得转 running（旧行为此处变「运行中 0%」= 回归红）
+  await page.waitForTimeout(3000);
+  await expect
+    .poll(() => page.evaluate(() => {
+      const pend = Array.from(((window as any).state?._pending?.values?.() ?? []) as any[]);
+      return pend.every((p) => p.row.status !== "running");
+    }), { timeout: 5_000 })
+    .toBe(true);
+
+  // 继续：无人工动作，泵自愈重驱 → 2 行派发提交（拿到 job_id 或让位）
+  await goView(page, "jobs");
+  await btn.click();
+  await expect(page.locator("#toasts .toast.ok").last()).toContainText("已继续");
+  await expect.poll(() => pipelinePaused(userData), { timeout: 10_000 }).toBe(false);
+  await expect
+    .poll(() => page.evaluate(() => {
+      const pend = Array.from(((window as any).state?._pending?.values?.() ?? []) as any[]);
+      return pend.filter((p) => p.row.dispatch_pending && !p.row.job_id).length;
+    }), { timeout: 60_000, intervals: [500] })
+    .toBe(0);
+});

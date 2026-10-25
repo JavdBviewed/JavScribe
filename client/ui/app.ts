@@ -1962,14 +1962,24 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 全局暂停（pause-all）：待派发 pending 行套「已暂停」显示副本——行 pill/批次 pill/已暂停桶
     // 同步反映冻结态（用户「暂停没效果」修复）。不 mutate 原行：批次级 pause/resume 记账靠
     // r.status="paused"+_prevStatus；summary 翻转后副本自然消失，恢复自愈。
-    // 仅 queued 态（status=pending）：提取中/上传中的行 ffmpeg/传输在真跑，管线闸只冻新派发，
-    // 标「已暂停」是假话。summary 为 null（接口失败）→ 不套副本，回退现状。
+    // 可套副本的两类（0.2.59 增 gateFrozen）：
+    //  ① queued 态（status=pending）：管线闸只冻新派发，行本就没开跑；
+    //  ② gateFrozen：已派发但卡在本机管线闸的行（running+progress=0+extracting/uploading，
+    //     桌面端 main 进程 ffmpeg 未起、传输未动，行显示与真实状态脱节=用户「卡 0%」困惑源）。
+    //     真跑的行 30s-1min 内 progress 会 >0，副本随下帧自愈；web 形态暂停期浏览器上传仍
+    //     在真实传输/服务端任务排队等待，progress 显示属实，加 platform 门控防误标。
+    // summary 为 null（接口失败）→ 不套副本，回退现状。
     const gp = !!state._summary?.paused_all;
-    return Array.from(state._pending.values()).map((p) =>
-      gp && p.row.dispatch_pending && !p.row.job_id && p.row.status === "pending"
-        ? { ...p.row, paused: true, position: "已暂停（全局暂停）", phase_detail: "已暂停（全局暂停）", message: "全局暂停中：点「继续任务」恢复" }
-        : p.row,
-    );
+    return Array.from(state._pending.values()).map((p) => {
+      const r = p.row;
+      const gateFrozen = r.status === "running" && r.progress === 0
+        && (r.phase === "extracting" || r.phase === "uploading");
+      if (gp && r.dispatch_pending && !r.job_id
+        && (r.status === "pending" || (gateFrozen && platform.kind === "desktop"))) {
+        return { ...r, paused: true, position: "已暂停（全局暂停）", phase_detail: "已暂停（全局暂停）", message: "全局暂停中：点「继续任务」恢复" };
+      }
+      return r;
+    });
   }
 
   // 服务队列挂起（serve /health.paused=true，serve 0.2.3+；桌面/工作台快照均带此字段）：
@@ -4550,6 +4560,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       }
       engine = real;
     }
+    if (state._summary?.paused_all) {
+      // 0.2.59 全局暂停闸：冻结新派发（排队标记保留，恢复后 pumpDispatch 重判单文件槽）
+      singleQueuedFile = file;
+      showStatus("全局暂停中：点「继续任务」后自动开始派发", "");
+      return;
+    }
     if (!canDispatch(engine)) {
       // 在途封顶（queue_cap）：不阻塞 UI，等 cap 槽位释放 → pumpDispatch 重触发（≤5s 轮询安全网）
       singleQueuedFile = file;
@@ -4634,6 +4650,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       while (started < total) {
         // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
         if (rowFirst && pend[started].row.status === "canceled") { settle(started); started++; continue; }
+        // 0.2.59 全局暂停闸：暂停冻结新派发（行留排队中，套「已暂停（全局暂停）」显示副本）；
+        // 恢复后 refresh→pumpDispatch 自愈重驱（≤5s）。在途链不中断（跑完当前阶段，与按钮语义一致）。
+        if (state._summary?.paused_all) break;
         // 0.2.53 需求③：主任务本机提取预算已满 → 本轮不派发（不消费索引，下次泵重驱重判）；
         // 提取链 .finally 计数归零即 pumpDispatch 重驱；server 模式 / 非 local 项不受闸影响
         if (effectiveMode(queue[started]) === "local" && extractInFlightOf(batch.id) >= extractBudgetOf(batch)) break;
@@ -5007,6 +5026,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const r = it.pend.row;
             // 行优先：已取消的子行直接跳过（不提交服务、不占 cap 槽）
             if (r.status === "canceled") { settle(started); started++; continue; }
+            // 0.2.59 全局暂停闸：同 runDispatchQueue（冻结新派发，恢复后泵自愈重驱）
+            if (state._summary?.paused_all) break;
             // 0.2.53 需求③：同 runDispatchQueue（回退项也走本机提取链，统一受批预算闸）
             if (effectiveMode(it.file) === "local" && extractInFlightOf(batch.id) >= extractBudgetOf(batch)) break;
             // —— 回退项：本机提取上传（与 runDispatchQueue 的 auto/显式分支同口径）——
