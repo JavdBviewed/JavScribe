@@ -16,6 +16,7 @@ import { folderGroupLabel, groupByDisk, multiGroupLabel } from "../core/disk-spl
 import { buildDoneJobIndex, matchScanItem, type ReconcilableRow } from "../core/scan-reconcile";
 import { CLEANUP_CATS, INTERRUPTED, TERMINAL_LIKE, LEDGER_STORE_KEY, cleanupCatOf, childFromPendingRow, migrateInterrupted, normalizeChild, pendingFingerprint, pruneLedger, type LedgerChild } from "../core/ledger";
 import { jobLabelMain, jobPrimaryName, matchJobSearch } from "../core/job-search";
+import { activeVideoPathSet, normVideoPath, splitActiveDuplicates } from "../core/dedup-active";
 import { TransportError } from "../core/transport";
 import { $, esc } from "./dom";
 import { toast } from "./toast";
@@ -4779,11 +4780,84 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (settled === total) finish(); // 空队列
   }
 
+  // ---------- 0.2.61：批量提交「进行中」查重 ----------
+  // 数据源：serve 任务行（state._jobs；file_path/local_path）∪ pending 派发链行（state._pending）∪
+  // 派发账本条目（ledger.children，0.2.57+ 带 file_path）。仅「进行中」口径——
+  // done/skipped/error/canceled/interrupted 不查重（允许有意重跑）；无路径候选不查重不阻断。
+  /** Windows 路径大小写不敏感（UA 判定：desktop Win exe / Win 浏览器；Linux/mac 保持敏感） */
+  function pathCaseInsensitive(): boolean {
+    try { return /windows/i.test(navigator.userAgent); } catch { return false; }
+  }
+  /** 规范化「进行中」源视频路径集（两个批量入批入口共用） */
+  function activeVideoPaths(): Set<string> {
+    const serveRows = (state._jobs || []).map((r) => ({
+      file_path: r.file_path || r.local_path || null,
+      status: r.status,
+    }));
+    const clientRows = [
+      ...[...state._pending.values()].map((p) => ({
+        file_path: p.row.file_path || p.row.local_path || null,
+        status: p.row.status,
+      })),
+      ...Object.values(ledger.children).map((c) => ({
+        file_path: c.file_path || null,
+        status: c.status,
+      })),
+    ];
+    return activeVideoPathSet({ serveRows, clientRows, caseInsensitive: pathCaseInsensitive() });
+  }
+  /** 跳过名摘要（与 web serve 回包 skipped 文案同口径）：前 3 名 + 「等 N 项」 */
+  function dupNamesSummary(names: string[]): string {
+    return names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 项` : "");
+  }
+  /**
+   * 文件夹入口查重：跳过项解除勾选（留表可见，进行中任务结束/失败后可再勾再发）+
+   * toast + 重渲染；返回 kept 候选（全跳过 → 空，调用方不消费、不建批）。
+   */
+  function dedupFolderChecked(checked: FolderVideo[]): FolderVideo[] {
+    if (!checked.length) return checked;
+    const active = activeVideoPaths();
+    const ci = pathCaseInsensitive();
+    const kept: FolderVideo[] = [];
+    const skippedNames: string[] = [];
+    for (const v of checked) {
+      const p = v.file._localPath || "";
+      if (p && active.has(normVideoPath(p, ci))) skippedNames.push(v.file.name);
+      else kept.push(v);
+    }
+    if (!skippedNames.length) return checked;
+    const keptKeys = new Set(kept.map(folderKey));
+    for (const v of checked) if (!keptKeys.has(folderKey(v))) state.folderChecked.delete(folderKey(v));
+    toast(`已跳过 ${skippedNames.length} 个进行中的重复任务：${dupNamesSummary(skippedNames)}`, "");
+    renderFolderTable();
+    updateFolderSummary();
+    updateGo();
+    return kept;
+  }
+  /**
+   * 扫描入口查重：state.scanChecked 原地更新（跳过项解除勾选，扫描表保留并重渲染）+
+   * toast；返回 kept 候选路径（全跳过 → 空，调用方不提交、不清扫描表）。
+   */
+  function dedupScanChecked(): string[] {
+    const files = [...state.scanChecked];
+    if (!files.length) return files;
+    const active = activeVideoPaths();
+    const ci = pathCaseInsensitive();
+    const { kept, skipped } = splitActiveDuplicates(files, active, ci);
+    if (!skipped.length) return files;
+    state.scanChecked = new Set(kept);
+    toast(`已跳过 ${skipped.length} 个进行中的重复任务：${dupNamesSummary(skipped.map((p) => p.split(/[\\/]/).pop() || p))}`, "");
+    if (state.lastScan) renderScanResults(state.lastScan);
+    updateScanSummary();
+    return kept;
+  }
+
   function startBatch(engine: string) {
     // 待选表：只提交勾选的项（旧「全有字幕自动跳过」改由表内勾选表达）
-    const checked = (state.folderFiles || [])
+    let checked = (state.folderFiles || [])
       .filter((v) => state.folderChecked.has(folderKey(v)));
     singleQueuedFile = null; // 文件夹批量接管单发排队（批量结束后按当前文件由泵重判）
+    checked = dedupFolderChecked(checked); // 0.2.61：「进行中」查重（跳过项留表解除勾选）
     if (!checked.length) return;
     // 0.2.53 需求①：消费勾选前先取现状 label 口径——消费后 state.folderFiles 可能为空，
     // 单组兜底再调 batchLabelForFolder() 会落「文件夹」
@@ -6677,7 +6751,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   scanSubmit.onclick = async () => {
     const engine = engineSelect.value;
-    const files = [...state.scanChecked];
+    const files = dedupScanChecked(); // 0.2.61：「进行中」查重（跳过项留表解除勾选 + toast）
     if (!engine || !files.length) return; // 0.2.53 需求①：批次在跑可提交扫描
     // 0.2.53 需求③：本主任务本机提音轨并发（分组循环前捕获一次，desktop/web 两构造点共用）
     const scanExtractWorkers = parseExtractWorkers(($("scan-extract-workers") as HTMLInputElement).value);
