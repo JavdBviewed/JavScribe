@@ -99,13 +99,21 @@ export interface UpdateSettings {
 
 export interface WatchState {
   enabled: boolean;
+  /** legacy 兼容：paths 首个目录（旧版 UI / 旧 e2e 断言单 path 字段） */
   path: string;
+  /** 监听目录（0.2.63 起多目录；空 = 未设置） */
+  paths: string[];
   pollMs: number;
-  /** 轮询循环是否实际在跑（enabled 且路径有效） */
+  /** 轮询循环是否实际在跑（enabled 且至少一个目录有效） */
   on: boolean;
   processed: number;
+  /** 派发失败条数（记 size/mtime 指纹；文件变化后自动重审，天然防无限重试） */
+  failed: number;
   lastScan: number | null;
+  /** 兼容单值 = errors 首条（per-dir 明细见 errors；扫描异常时与 errors 互斥出现） */
   lastError: string | null;
+  /** 逐目录错误（目录不存在/不可访问 → 错误文案；该键无错误即不存在） */
+  errors: Record<string, string>;
 }
 
 export interface WatchCandidate {
@@ -207,13 +215,16 @@ export interface JavDesktop {
   /** 文件夹监控（仅 desktop 形态；preload 恒提供，web 形态无此字段） */
   watch: {
     state(): Promise<WatchState>;
-    set(partial: { enabled?: boolean; path?: string; pollMs?: number }): Promise<WatchSetResult>;
+    /** path 为 legacy 单目录入参（=paths=[path]）；paths 全量替换，优先 */
+    set(partial: { enabled?: boolean; path?: string; paths?: string[]; pollMs?: number }): Promise<WatchSetResult>;
     /** 原生目录选择对话框；取消返回 null */
     pickDir(): Promise<string | null>;
     /** renderer 就绪后调用：flush 启动期间缓冲的候选（幂等） */
     arm(): Promise<WatchState>;
-    /** 标记某影片已处理（派发成功/失败后调用，跨重启去重） */
+    /** 标记某影片已处理（派发成功后调用，跨重启去重） */
     markProcessed(path: string): Promise<void>;
+    /** 标记某影片派发失败（记 size/mtime 指纹；文件变化后 main 自动重审） */
+    markFailed(path: string): Promise<void>;
     /** 订阅状态推送；返回取消订阅函数 */
     onState(cb: (s: WatchState) => void): () => void;
     /** 订阅候选事件（新出现且稳定的视频文件）；返回取消订阅函数 */

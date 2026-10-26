@@ -1196,7 +1196,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 文件夹监听「设置 → 客户端」钩子：桌面形态由 watch 块接线（与派单页监听面板同一数据源）；web 形态恒 null
   let ccWatchCtl: {
     state(): WatchState | null;
-    set(on: boolean, path: string): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
+    set(paths: string[], on: boolean): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
     pickDir(): Promise<string | null>;
   } | null = null;
 
@@ -6867,10 +6867,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   if (platform.kind === "desktop") {
     interface WatchBridge {
       state(): Promise<WatchState>;
-      set(q: { enabled?: boolean; path?: string; pollMs?: number }): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
+      /** path 为 legacy 单目录入参（=paths=[path]）；paths 全量替换，优先 */
+      set(q: { enabled?: boolean; path?: string; paths?: string[]; pollMs?: number }): Promise<{ ok: boolean; error?: string; state?: WatchState }>;
       pickDir(): Promise<string | null>;
       arm(): Promise<WatchState>;
       markProcessed(pp: string): Promise<void>;
+      markFailed(pp: string): Promise<void>;
       onState(cb: (st: WatchState) => void): () => void;
       onCandidate(cb: (c: WatchCandidate) => void): () => void;
     }
@@ -6881,15 +6883,37 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       const b = wBridge();
       if (b) {
         watchPanel.hidden = false;
-        const watchPath = $("watch-path") as HTMLInputElement;
-        const watchPick = $("watch-pick");
+        const watchRows = $("watch-rows");
+        const watchAddInput = $("watch-add-input") as HTMLInputElement;
+        const watchAddPick = $("watch-add-pick");
+        const watchAdd = $("watch-add");
         const watchToggle = $("watch-toggle") as HTMLButtonElement;
         const watchStatus = $("watch-status");
         const watchLamp = $("watch-lamp");
         let wState: WatchState | null = null;
         let lastStatusHtml = "";
+        let lastRowsHtml = "";
         const watchQueue: WatchCandidate[] = [];
         let watchDispatchingPath: string | null = null;
+
+        /** 目录增删/启停统一入口：全量提交 paths + 显式 enabled（main 侧校验后落盘） */
+        const watchSubmit = async (paths: string[], wantOn: boolean): Promise<boolean> => {
+          const r = await b.set({ paths, enabled: wantOn });
+          if (!r.ok) {
+            toast(r.error || "监听设置失败", "err");
+            return false;
+          }
+          if (r.state) { wState = r.state; watchRender(); watchPumpImpl(); }
+          return true;
+        };
+
+        const watchAddFlow = async (): Promise<void> => {
+          const p = watchAddInput.value.trim();
+          if (!p) return;
+          const cur = wState?.paths ?? [];
+          if (cur.includes(p)) { toast("该目录已在监听中", "err"); return; }
+          if (await watchSubmit([...cur, p], wState?.enabled ?? false)) watchAddInput.value = "";
+        };
 
         function watchRender() {
           const st = wState;
@@ -6897,8 +6921,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           watchLamp.classList.toggle("err", !!st?.lastError);
           if (!st) return;
           watchToggle.textContent = st.enabled ? "停止监听" : "开始监听";
-          watchToggle.disabled = !st.path;
-          if (watchPath.value !== st.path) watchPath.value = st.path;
+          watchToggle.disabled = !st.paths.length;
+          // 目录行列表：每行独立移除（事件委托，innerHTML 重渲染后仍有效）
+          const rowsHtml = st.paths.length
+            ? st.paths.map((p) =>
+                `<div class="watch-row"><span class="watch-row-path mono" title="${esc(p)}">${esc(p)}</span>` +
+                `<button type="button" class="watch-row-del" data-wp="${esc(p)}" title="停止监听该目录">×</button></div>`
+              ).join("")
+            : '<span class="muted small">未添加监听目录</span>';
+          if (rowsHtml !== lastRowsHtml) {
+            lastRowsHtml = rowsHtml;
+            watchRows.innerHTML = rowsHtml;
+          }
           const parts: string[] = [];
           if (st.on) {
             parts.push(`监听中 · 每 ${Math.round(st.pollMs / 1000)}s`);
@@ -6907,15 +6941,18 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               parts.push(`上次扫描 <span id="watch-lastscan">${new Date(st.lastScan).toLocaleTimeString("zh-CN", { hour12: false })}</span>`);
             }
           } else {
-            parts.push(st.path ? "未监听" : "未监听 · 请先选择文件夹");
+            parts.push(st.paths.length ? "未监听" : "未监听 · 请先添加目录");
           }
-          if (st.lastError) parts.push(`监听出错：${esc(st.lastError)}`);
+          const errs = Object.entries(st.errors || {});
+          for (const [rp, msg] of errs) parts.push(`监听出错 ${esc(rp.split(/[\\/]/).pop() || rp)}：${esc(msg)}`);
+          if (!errs.length && st.lastError) parts.push(`监听出错：${esc(st.lastError)}`);
+          if (st.failed) parts.push(`失败 ${st.failed}（文件变化后自动重试）`);
           if (watchQueue.length) {
             parts.push(`等待 ${watchQueue.length}`);
             if (!engineSelect.value) parts.push("未选择服务");
           }
           if (watchDispatchingPath) {
-            parts.push(`<b>生成中：${esc(watchDispatchingPath.split("/").pop() || watchDispatchingPath)}</b>`);
+            parts.push(`<b>生成中：${esc(watchDispatchingPath.split(/[\\/]/).pop() || watchDispatchingPath)}</b>`);
           }
           const html = parts.join(" · ");
           if (html !== lastStatusHtml) {
@@ -6963,7 +7000,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               void b.markProcessed(it.path).catch(() => {});
               toast(`监听 · ${it.name} 已提交 → 任务 ${up.job_id}`, "ok");
             } else {
-              void b.markProcessed(it.path).catch(() => {}); // 失败也标记，防无限重试
+              void b.markFailed(it.path).catch(() => {}); // 记失败指纹：文件内容变化后自动重审（天然防无限重试）
               toast(`监听 · ${it.name}：${(d as { error?: string }).error || "提交失败"}`, "err");
             }
             refresh();
@@ -6979,45 +7016,32 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         watchPump = watchPumpImpl;
         ccWatchCtl = {
           state: () => wState,
-          set: async (on, pth) => {
-            const r = await b.set(on ? { enabled: true, path: pth } : { enabled: false });
-            if (r.state) { wState = r.state; watchRender(); watchPumpImpl(); } // 面板与 tab 同源刷新
+          set: async (paths, on) => {
+            const r = await b.set({ paths, enabled: on });
+            if (r.state) { wState = r.state; watchRender(); watchPumpImpl(); } // 面板与设置 tab 同源刷新
             return r;
           },
-          pickDir: async () => {
-            const p = await b.pickDir();
-            if (p) { watchPath.value = p; watchToggle.disabled = false; watchRender(); }
-            return p;
-          },
+          pickDir: () => b.pickDir(),
         };
 
-        watchPath.oninput = () => {
-          watchToggle.disabled = !watchPath.value.trim();
-        };
-        watchPick.onclick = async () => {
+        // 目录行移除（事件委托）：移除最后一个目录时监听自动停止（enabled 置 false）
+        watchRows.addEventListener("click", async (e) => {
+          const t = (e.target as HTMLElement).closest<HTMLButtonElement>("button.watch-row-del");
+          if (!t || state.busy) return;
+          const p = t.dataset.wp;
+          if (p == null) return;
+          const paths = (wState?.paths ?? []).filter((x) => x !== p);
+          await watchSubmit(paths, (wState?.enabled ?? false) && paths.length > 0);
+        });
+        watchAdd.onclick = () => { void watchAddFlow(); };
+        watchAddInput.addEventListener("keydown", (e) => { if (e.key === "Enter") void watchAddFlow(); });
+        watchAddPick.onclick = async () => {
           const p = await b.pickDir();
-          if (p) {
-            watchPath.value = p;
-            watchToggle.disabled = false;
-            watchRender();
-          }
+          if (p) { watchAddInput.value = p; void watchAddFlow(); }
         };
         watchToggle.onclick = async () => {
           if (state.busy) return;
-          const wantOn = !wState?.enabled;
-          const r = await b.set(wantOn
-            ? { enabled: true, path: watchPath.value.trim() }
-            : { enabled: false });
-          if (!r.ok) {
-            toast(r.error || "监听设置失败", "err");
-            watchRender();
-            return;
-          }
-          if (r.state) {
-            wState = r.state;
-            watchRender();
-            watchPumpImpl();
-          }
+          await watchSubmit(wState?.paths ?? [], !(wState?.enabled ?? false));
         };
         b.onState((st) => {
           wState = st;
@@ -7164,6 +7188,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   // ---------- 设置 tab（客户端/服务端 子 tab：本机并发 + 桌面专属卡；服务端 = 通用/单端配置） ----------
   // 每次激活重渲染（与服务设置弹窗一致：每次打开取最新值）；ccViewSeq 丢弃过期异步结果
+  function ccWatchBase(p: string): string {
+    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+    return i >= 0 ? p.slice(i + 1) : p;
+  }
+
   function ccWatchStatusText(st: WatchState | null): string {
     if (!st) return "监听未启用";
     const parts: string[] = [];
@@ -7171,24 +7200,32 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       parts.push(`监听中 · 每 ${Math.round(st.pollMs / 1000)}s`);
       if (st.processed) parts.push(`已处理 ${st.processed}`);
     } else {
-      parts.push(st.path ? "未监听" : "未监听 · 请先选择文件夹");
+      parts.push(st.paths.length ? "未监听" : "未监听 · 请先添加目录");
     }
-    if (st.lastError) parts.push(`监听出错：${st.lastError}`);
+    const errs = Object.entries(st.errors || {});
+    for (const [rp, msg] of errs) parts.push(`监听出错 ${ccWatchBase(rp)}：${msg}`);
+    if (!errs.length && st.lastError) parts.push(`监听出错：${st.lastError}`);
+    if (st.failed) parts.push(`失败 ${st.failed}（文件变化后自动重试）`);
     return parts.join(" · ");
   }
 
   function ccWatchRenderBits(st: WatchState | null): void {
-    const pathEl = $("cc-watch-path");
-    if (pathEl) {
-      pathEl.textContent = st?.path || "未选择文件夹";
-      pathEl.classList.toggle("muted", !st?.path);
+    const rowsEl = $("cc-watch-rows");
+    if (rowsEl) {
+      const paths = st?.paths ?? [];
+      rowsEl.innerHTML = paths.length
+        ? paths.map((p) =>
+            `<div class="watch-row"><span class="watch-row-path mono" title="${esc(p)}">${esc(p)}</span>` +
+            `<button type="button" class="watch-row-del" data-cwp="${esc(p)}" title="停止监听该目录">×</button></div>`
+          ).join("")
+        : '<span class="muted small">未添加监听目录</span>';
     }
     const statusEl = $("cc-watch-status");
     if (statusEl) statusEl.textContent = ccWatchStatusText(st);
     const toggle = $("cc-watch-toggle") as HTMLButtonElement | null;
     if (toggle) {
       toggle.textContent = st?.enabled ? "停止监听" : "开始监听";
-      toggle.disabled = !st?.path;
+      toggle.disabled = !(st?.paths.length);
     }
   }
 
@@ -7343,14 +7380,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </div>
     </section>
     <section class="cfg-sec cc-card" data-sec="ccfg-desktop-watch">
-      <h4 class="cfg-sec-title">文件夹监听<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">目录新视频自动排队生成字幕（与「生成字幕」页监听面板同源）</span></h4>
+      <h4 class="cfg-sec-title">文件夹监听<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">目录新视频自动排队生成字幕（支持多目录，与「生成字幕」页监听面板同源）</span></h4>
       <div class="cfg-sec-body">
         <div class="cfg-row"><span class="cfg-lab">监听目录</span>
-        <div class="cc-watch-row"><span id="cc-watch-path" class="mono muted">${esc(ws?.path || "") || "未选择文件夹"}</span><button type="button" class="btn" id="cc-watch-pick">选择文件夹</button></div></div>
+        <div class="watch-rows" id="cc-watch-rows"></div></div>
+        <div class="cfg-row"><span class="cfg-lab">添加目录</span>
+        <div class="cc-watch-row">
+          <input id="cc-watch-add-input" class="mono" type="text" placeholder="选择或粘贴本机上的文件夹路径" spellcheck="false" autocomplete="off">
+          <button type="button" class="btn" id="cc-watch-add-pick">选择文件夹</button>
+          <button type="button" class="btn" id="cc-watch-add">添加</button>
+        </div></div>
       </div>
       <div class="ccfg-foot">
         <span class="cfg-foot-note" id="cc-watch-status">${esc(ccWatchStatusText(ws))}</span>
-        <span class="cfg-foot-actions"><button type="button" class="btn" id="cc-watch-toggle"${ws && ws.path ? "" : " disabled"}>${ws && ws.enabled ? "停止监听" : "开始监听"}</button></span>
+        <span class="cfg-foot-actions"><button type="button" class="btn" id="cc-watch-toggle"${ws && ws.paths.length ? "" : " disabled"}>${ws && ws.enabled ? "停止监听" : "开始监听"}</button></span>
       </div>
     </section>
     <section class="cfg-sec cc-card" data-sec="ccfg-logs">
@@ -7568,25 +7611,58 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         }
       };
     }
-    // 桌面专属：文件夹监听（与派单页监听面板同数据源）
-    const wPick = $("cc-watch-pick") as HTMLButtonElement | null;
-    if (wPick) {
-      wPick.onclick = async () => {
-        const ctl = ccWatchCtl;
-        if (!ctl) return;
-        const p = await ctl.pickDir();
-        if (p) ccWatchRenderBits(ctl.state());
-      };
-      const wToggle = $("cc-watch-toggle") as HTMLButtonElement;
-      wToggle.onclick = async () => {
-        const ctl = ccWatchCtl;
-        if (!ctl) return;
-        const st = ctl.state();
-        const wantOn = !st?.enabled;
-        const r = await ctl.set(wantOn, (st?.path || "").trim());
-        if (!r.ok) { toast(r.error || "监听设置失败", "err"); return; }
-        if (r.state) ccWatchRenderBits(ctl.state());
-      };
+    // 桌面专属：文件夹监听（与派单页监听面板同数据源：目录行增删 + 总开关）
+    const wAdd = $("cc-watch-add") as HTMLButtonElement | null;
+    if (wAdd) {
+      const ctl = ccWatchCtl;
+      if (ctl) {
+        const ccWatchAddFlow = async (): Promise<void> => {
+          const inp = $("cc-watch-add-input") as HTMLInputElement | null;
+          const p = inp?.value.trim() || "";
+          if (!p) return;
+          const st = ctl.state();
+          const cur = st?.paths ?? [];
+          if (cur.includes(p)) { toast("该目录已在监听中", "err"); return; }
+          const r = await ctl.set([...cur, p], st?.enabled ?? false);
+          if (!r.ok) { toast(r.error || "监听设置失败", "err"); return; }
+          if (inp) inp.value = "";
+          ccWatchRenderBits(ctl.state());
+        };
+        wAdd.onclick = () => { void ccWatchAddFlow(); };
+        const ccInp = $("cc-watch-add-input") as HTMLInputElement | null;
+        if (ccInp) ccInp.addEventListener("keydown", (e) => { if (e.key === "Enter") void ccWatchAddFlow(); });
+        const ccPick = $("cc-watch-add-pick");
+        if (ccPick) {
+          ccPick.onclick = async () => {
+            const p = await ctl.pickDir();
+            if (p) {
+              const inp = $("cc-watch-add-input") as HTMLInputElement | null;
+              if (inp) { inp.value = p; void ccWatchAddFlow(); }
+            }
+          };
+        }
+        const wToggle = $("cc-watch-toggle") as HTMLButtonElement;
+        wToggle.onclick = async () => {
+          const st = ctl.state();
+          const r = await ctl.set(st?.paths ?? [], !st?.enabled);
+          if (!r.ok) { toast(r.error || "监听设置失败", "err"); return; }
+          ccWatchRenderBits(ctl.state());
+        };
+        const ccRows = $("cc-watch-rows");
+        if (ccRows) {
+          ccRows.addEventListener("click", async (e) => {
+            const t = (e.target as HTMLElement).closest<HTMLButtonElement>("button.watch-row-del");
+            const p = t?.dataset.cwp;
+            if (!p) return;
+            const st = ctl.state();
+            const paths = (st?.paths ?? []).filter((x) => x !== p);
+            const r = await ctl.set(paths, (st?.enabled ?? false) && paths.length > 0);
+            if (!r.ok) { toast(r.error || "监听设置失败", "err"); return; }
+            ccWatchRenderBits(ctl.state());
+          });
+        }
+        ccWatchRenderBits(ctl.state()); // 初始化目录行 + 状态（模板占位为空）
+      }
     }
     // 桌面专属：日志中心（0.2.62；环在 main 进程，页面只做过滤 + 展示）
     const logsOut = $("cc-logs-out") as HTMLPreElement | null;

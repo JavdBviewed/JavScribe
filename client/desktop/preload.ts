@@ -117,11 +117,12 @@ const update: JavDesktop["update"] = {
 // 文件夹监控（main 进程轮询检测；renderer 排队派发）
 const watch: JavDesktop["watch"] = {
   state: () => ipcRenderer.invoke("watch-state") as Promise<WatchState>,
-  set: (partial: { enabled?: boolean; path?: string; pollMs?: number }) =>
+  set: (partial: { enabled?: boolean; path?: string; paths?: string[]; pollMs?: number }) =>
     ipcRenderer.invoke("watch-set", partial) as Promise<WatchSetResult>,
   pickDir: () => ipcRenderer.invoke("watch-pick-dir") as Promise<string | null>,
   arm: () => ipcRenderer.invoke("watch-arm") as Promise<WatchState>,
   markProcessed: (p: string) => ipcRenderer.invoke("watch-mark-processed", p) as Promise<void>,
+  markFailed: (p: string) => ipcRenderer.invoke("watch-mark-failed", p) as Promise<void>,
   onState: (cb: (s: WatchState) => void): (() => void) => {
     const listener = (_e: unknown, st: WatchState) => cb(st);
     ipcRenderer.on("watch-state", listener);

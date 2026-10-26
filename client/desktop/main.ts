@@ -2277,19 +2277,34 @@ function registerIpc(): void {
     if (r.canceled || !r.filePaths.length) return null;
     return r.filePaths[0];
   });
-  ipcMain.handle("watch-set", (_ev, p: { enabled?: unknown; path?: unknown; pollMs?: unknown }) => {
-    const cur = { ...watchSettings };
-    if (p && typeof p.path === "string") {
+  ipcMain.handle("watch-set", (_ev, p: { enabled?: unknown; path?: unknown; paths?: unknown; pollMs?: unknown }) => {
+    const cur = {
+      enabled: watchSettings.enabled,
+      paths: [...watchSettings.paths],
+      pollMs: watchSettings.pollMs,
+      processed: [...watchSettings.processed],
+      failed: [...watchSettings.failed],
+    };
+    // 入参兼容：paths 全量替换（优先）；legacy 单 path 入参 → [path]（空串 = 清空）
+    if (p && Array.isArray(p.paths)) {
+      const list = p.paths
+        .filter((x): x is string => typeof x === "string")
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const v = watchValidatePaths(list);
+      if (!v.ok) return { ok: false, error: v.error };
+      cur.paths = v.paths;
+    } else if (p && typeof p.path === "string") {
       const d = p.path.trim();
-      if (d && !fs.existsSync(d)) return { ok: false, error: "目录不存在或不可访问" };
-      if (d && !fs.statSync(d).isDirectory()) return { ok: false, error: "路径不是文件夹" };
-      cur.path = d;
+      const v = d ? watchValidatePaths([d]) : { ok: true as const, paths: [] as string[] };
+      if (!v.ok) return { ok: false, error: v.error };
+      cur.paths = v.paths;
     }
     if (p && typeof p.pollMs === "number" && isFinite(p.pollMs)) {
       cur.pollMs = Math.max(WATCH_MIN_POLL_MS, Math.min(WATCH_MAX_POLL_MS, Math.round(p.pollMs)));
     }
     if (p && typeof p.enabled === "boolean") {
-      if (p.enabled && !cur.path) return { ok: false, error: "请先选择要监听的文件夹" };
+      if (p.enabled && !cur.paths.length) return { ok: false, error: "请先添加要监听的目录" };
       cur.enabled = p.enabled;
     }
     watchApplySettings(cur);
@@ -2305,6 +2320,28 @@ function registerIpc(): void {
       }
       watchSave();
       watchPushState();
+    }
+    return { ok: true };
+  });
+  // 派发失败登记（renderer 失败分支调用）：stat 记 size/mtime 指纹，同 path 覆盖去重，
+  // 超 cap 丢最旧；stat 失败（文件已删）静默忽略——文件没了重审也无从谈起。
+  ipcMain.handle("watch-mark-failed", (_ev, p: unknown) => {
+    if (typeof p === "string" && p) {
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile()) {
+          const i = watchSettings.failed.findIndex((f) => f.path === p);
+          if (i >= 0) watchSettings.failed.splice(i, 1);
+          watchSettings.failed.push({ path: p, size: st.size, mtimeMs: st.mtimeMs, at: Date.now() });
+          if (watchSettings.failed.length > WATCH_FAILED_CAP) {
+            watchSettings.failed.splice(0, watchSettings.failed.length - WATCH_FAILED_CAP);
+          }
+          watchSave();
+          watchPushState();
+        }
+      } catch {
+        /* 文件已删除：静默忽略 */
+      }
     }
     return { ok: true };
   });
@@ -3059,14 +3096,20 @@ function clientCfgSave(c: ClientCfgFile): void {
 // 文件夹监控（仅 desktop 形态）：main 进程轮询检测，候选推 renderer 排队派发
 //   - 轮询而非 fs.watch：watch 事件在跨网络盘 / Windows 过滤驱动下不可靠；
 //     秒级 stat 遍历对数千文件量级的库足够轻（与引擎侧稳定性取向一致）
-//   - 候选条件：视频扩展名 + size>0 + 同目录无同 stem 字幕（LOCAL_SUB_PATTERNS，
-//     与「选择文件夹」跳过规则一致）+ (size, mtime) 连续两次轮询不变（防半下载文件）
-//     + 不在 processed（跨重启去重，派发成功/失败后由 renderer 标记）
+//   - 候选条件：视频扩展名 + size>0 + 不小于 min_size_mb（客户端扫描规则同源）+
+//     同目录无同 stem 字幕（LOCAL_SUB_PATTERNS，与「选择文件夹」跳过规则一致）
+//     + (size, mtime) 连续两次轮询不变（防半下载文件）
+//     + 不在 processed（跨重启去重，派发成功后由 renderer 标记）
+//   - 失败重审：派发失败记 failed（size/mtime 指纹）；指纹不变 → 不重试，
+//     文件变化 → 移出 failed 重走两次轮询稳定流程（天然防无限重试）
+//   - 多目录：paths[] 逐目录独立扫描，per-dir errors 隔离（单目录消失不拖死其他）；
+//     集合校验拒绝重复 / 祖先-后代嵌套（realpath 归一）
 //   - 持久化：watch.json（userData；与 update 的 settings.json 分离，避免双模块互写互删）
 //   - renderer 就绪前产生的候选进缓冲，watch-arm 时一次性 flush
 // ---------------------------------------------------------------------------
 
-interface WatchSettings { enabled: boolean; path: string; pollMs: number; processed: string[]; }
+interface WatchFailedEntry { path: string; size: number; mtimeMs: number; at: number; }
+interface WatchSettings { enabled: boolean; paths: string[]; pollMs: number; processed: string[]; failed: WatchFailedEntry[]; }
 interface WatchCandidate { path: string; name: string; size: number; }
 
 const WATCH_FILE = "watch.json";
@@ -3075,29 +3118,86 @@ const WATCH_DEFAULT_POLL_MS = 15_000;
 const WATCH_MIN_POLL_MS = Number(process.env.JAVSCRIBE_WATCH_MIN_POLL_MS || 5_000);
 const WATCH_MAX_POLL_MS = 300_000;
 const WATCH_PROCESSED_CAP = 5_000;
+const WATCH_FAILED_CAP = 5_000;
 const WATCH_CANDIDATE_BUF_CAP = 5_000;
 
-let watchSettings: WatchSettings = { enabled: false, path: "", pollMs: WATCH_DEFAULT_POLL_MS, processed: [] };
+let watchSettings: WatchSettings = { enabled: false, paths: [], pollMs: WATCH_DEFAULT_POLL_MS, processed: [], failed: [] };
 let watchStorePath = "";
 let watchTimer: NodeJS.Timeout | null = null;
 let watchArmed = false;
 let watchLastScan: number | null = null;
-let watchLastError: string | null = null;
+/** 扫描异常（整轮 tick 抛错）：lastError 兼容值 per-dir errors 优先，其次此值 */
+let watchScanError: string | null = null;
+/** 逐目录错误（目录不存在/不可访问 → 错误文案；无错误即无该键；tick 开头剪枝已移除目录） */
+const watchErrors: Record<string, string> = {};
 // path -> 上一轮 (size, mtime)：本轮不变 = 稳定，下轮发候选（两次轮询确认）
 const watchSeen = new Map<string, { size: number; mtimeMs: number }>();
 const watchCandidateBuf: WatchCandidate[] = [];
 
+/** 监听目录集合校验：存在目录 + realpath 归一 + 重复拒绝 + 祖先/后代嵌套拒绝（文案指明冲突对） */
+function watchValidatePaths(list: string[]): { ok: true; paths: string[] } | { ok: false; error: string } {
+  const norm: string[] = [];
+  for (const d of list) {
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(d);
+    } catch {
+      return { ok: false, error: `目录不存在或不可访问: ${d}` };
+    }
+    if (!st.isDirectory()) return { ok: false, error: `路径不是文件夹: ${d}` };
+    let n = d;
+    try {
+      n = fs.realpathSync(d);
+    } catch {
+      /* 归一失败（罕见权限场景）：保持原值 */
+    }
+    norm.push(n);
+  }
+  const key = (x: string) => (process.platform === "win32" ? x.toLowerCase() : x);
+  for (let i = 0; i < norm.length; i++) {
+    for (let j = i + 1; j < norm.length; j++) {
+      if (key(norm[i]) === key(norm[j])) return { ok: false, error: `监听目录重复: ${norm[i]}` };
+      if (watchPathNested(norm[i], norm[j]) || watchPathNested(norm[j], norm[i])) {
+        return { ok: false, error: `监听目录不能嵌套（一个包含另一个）: ${norm[i]} ↔ ${norm[j]}` };
+      }
+    }
+  }
+  return { ok: true, paths: norm };
+}
+
+/** a 是否为 b 的祖先目录（路径分隔符边界判定；两侧已 realpath 归一） */
+function watchPathNested(a: string, b: string): boolean {
+  const ka = process.platform === "win32" ? a.toLowerCase() : a;
+  const kb = process.platform === "win32" ? b.toLowerCase() : b;
+  if (ka === kb) return false;
+  const sep = ka.endsWith(path.sep) ? "" : path.sep;
+  return kb.startsWith(ka + sep);
+}
+
 function watchLoad(): void {
   try {
-    const raw = JSON.parse(fs.readFileSync(watchStorePath, "utf-8")) as Partial<WatchSettings>;
+    const raw = JSON.parse(fs.readFileSync(watchStorePath, "utf-8")) as Partial<WatchSettings> & { path?: unknown };
+    // 迁移：旧 watch.json 单 path 键 → [path]（新结构 paths 优先；一次性，下次 save 覆盖）
+    const rawPaths = Array.isArray(raw.paths)
+      ? raw.paths.filter((x): x is string => typeof x === "string" && x !== "")
+      : null;
     watchSettings = {
       enabled: raw.enabled === true,
-      path: typeof raw.path === "string" ? raw.path : "",
+      paths: rawPaths ?? (typeof raw.path === "string" && raw.path ? [raw.path] : []),
       pollMs: typeof raw.pollMs === "number" && isFinite(raw.pollMs)
         ? Math.max(WATCH_MIN_POLL_MS, Math.min(WATCH_MAX_POLL_MS, raw.pollMs))
         : WATCH_DEFAULT_POLL_MS,
       processed: Array.isArray(raw.processed)
         ? raw.processed.filter((x): x is string => typeof x === "string")
+        : [],
+      failed: Array.isArray(raw.failed)
+        ? raw.failed.filter(
+            (x): x is WatchFailedEntry =>
+              !!x && typeof x === "object"
+              && typeof (x as WatchFailedEntry).path === "string"
+              && typeof (x as WatchFailedEntry).size === "number"
+              && typeof (x as WatchFailedEntry).mtimeMs === "number",
+          )
         : [],
     };
   } catch {
@@ -3117,12 +3217,17 @@ function watchSave(): void {
 function watchPublicState() {
   return {
     enabled: watchSettings.enabled,
-    path: watchSettings.path,
+    paths: [...watchSettings.paths],
+    // legacy 兼容：paths 首个目录（旧版 UI / 旧 e2e 断言单 path 字段）
+    path: watchSettings.paths[0] ?? "",
     pollMs: watchSettings.pollMs,
     on: !!watchTimer,
     processed: watchSettings.processed.length,
+    failed: watchSettings.failed.length,
     lastScan: watchLastScan,
-    lastError: watchLastError,
+    // 兼容单值 = per-dir errors 首条，其次扫描异常
+    lastError: Object.values(watchErrors)[0] ?? watchScanError,
+    errors: { ...watchErrors },
   };
 }
 
@@ -3230,45 +3335,77 @@ async function watchTick(): Promise<void> {
 }
 
 async function watchTickInner(): Promise<void> {
-  const root = watchSettings.path;
-  if (!root || !fs.existsSync(root)) {
-    watchLastError = "监听目录不存在或不可访问";
-    watchPushState();
-    return;
-  }
+  const processed = new Set(watchSettings.processed);
+  const failedIdx = new Map(watchSettings.failed.map((f, i) => [f.path, i]));
+  const staleFailed = new Set<number>(); // 指纹已变化的 failed 下标（轮后统一移出）
+  const nowSeen = new Map<string, { size: number; mtimeMs: number }>();
+  const seenInTick = new Set<string>(); // 跨 root 去重（双保险：set 校验已挡嵌套）
+  let scanned = false;
   try {
-    const dirNames = new Map<string, Set<string>>();
-    const videos = walkVideos(root, undefined, dirNames); // 监听只需视频列表，字幕判定用不到
-    const processed = new Set(watchSettings.processed);
-    const nowSeen = new Map<string, { size: number; mtimeMs: number }>();
-    for (const v of videos) {
-      let st: fs.Stats;
+    // 剪枝已移除目录的 per-dir 错误（enabled 停用路径在 watchApplySettings 整体清）
+    for (const k of Object.keys(watchErrors)) {
+      if (!watchSettings.paths.includes(k)) delete watchErrors[k];
+    }
+    for (const root of watchSettings.paths) {
+      let rst: fs.Stats;
       try {
-        st = fs.statSync(v.path);
+        rst = fs.statSync(root);
       } catch {
-        continue; // 轮询中途消失（用户删除/移动）：跳过
+        watchErrors[root] = "目录不存在或不可访问";
+        continue;
       }
-      nowSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
-      if (processed.has(v.path)) continue;
+      if (!rst.isDirectory()) {
+        watchErrors[root] = "路径不是文件夹";
+        continue;
+      }
+      delete watchErrors[root];
+      const dirNames = new Map<string, Set<string>>();
+      const videos = walkVideos(root, undefined, dirNames); // 监听只需视频列表，字幕判定用不到
+      scanned = true;
+      for (const v of videos) {
+        if (seenInTick.has(v.path)) continue;
+        seenInTick.add(v.path);
+        let st: fs.Stats;
+        try {
+          st = fs.statSync(v.path);
+        } catch {
+          continue; // 轮询中途消失（用户删除/移动）：跳过
+        }
+        nowSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
+        if (processed.has(v.path)) continue;
+        // 失败重审：指纹不变 → 不重试；文件变化 → 移出 failed，下面重走两次轮询稳定流程
+        const fi = failedIdx.get(v.path);
+        if (fi !== undefined) {
+          const f = watchSettings.failed[fi];
+          if (f.size === st.size && f.mtimeMs === st.mtimeMs) continue;
+          staleFailed.add(fi);
+          failedIdx.delete(v.path);
+        }
         if (v.too_small) {
           console.log(`[watch] 跳过（小于 min_size_mb 阈值）: ${v.name}`);
           continue;
         }
-      if (watchHasSub(path.dirname(v.path), v.name, dirNames)) continue;
-      const prev = watchSeen.get(v.path);
-      if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs) {
-        watchSeen.delete(v.path); // 连续两次不变 → 稳定，发候选
-        if (await watchSkipEmbedded(v.path, st)) continue; // 内嵌目标字幕轨：不派发
-        watchEmit({ path: v.path, name: v.name, size: st.size });
-      } else {
-        watchSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
+        if (watchHasSub(path.dirname(v.path), v.name, dirNames)) continue;
+        const prev = watchSeen.get(v.path);
+        if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs) {
+          watchSeen.delete(v.path); // 连续两次不变 → 稳定，发候选
+          if (await watchSkipEmbedded(v.path, st)) continue; // 内嵌目标字幕轨：不派发
+          watchEmit({ path: v.path, name: v.name, size: st.size });
+        } else {
+          watchSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
+        }
       }
     }
     for (const k of [...watchSeen.keys()]) if (!nowSeen.has(k)) watchSeen.delete(k);
-    watchLastError = null;
-    watchLastScan = Date.now();
+    watchScanError = null;
+    if (scanned) watchLastScan = Date.now();
   } catch (e) {
-    watchLastError = (e as Error).message || String(e);
+    watchScanError = (e as Error).message || String(e);
+  }
+  if (staleFailed.size) {
+    // 倒序 splice 保下标有效；移出后 watchSave 持久化（跨重启保持重审语义）
+    for (const i of [...staleFailed].sort((a, b) => b - a)) watchSettings.failed.splice(i, 1);
+    watchSave();
   }
   watchPushState();
 }
@@ -3288,19 +3425,21 @@ function watchStopTimer(): void {
 }
 
 function watchApplySettings(next: WatchSettings): void {
-  const pathChanged = next.path !== watchSettings.path;
+  // 集合变化（顺序敏感签名）→ 重建稳定性基线；移除目录的 seen 项亦由 tick 内 nowSeen 回收兜底
+  const setChanged = next.paths.join("\u0000") !== watchSettings.paths.join("\u0000");
   watchSettings = next;
   watchSave();
-  if (next.enabled && next.path) {
-    if (pathChanged) {
+  if (next.enabled && next.paths.length) {
+    if (setChanged) {
       watchSeen.clear();
       watchCandidateBuf.length = 0;
     }
     watchStartTimer();
   } else {
     watchStopTimer();
-    watchLastError = null;
+    for (const k of Object.keys(watchErrors)) delete watchErrors[k];
   }
+  watchScanError = null;
   watchPushState();
 }
 
@@ -3873,7 +4012,7 @@ app.whenReady().then(async () => {
   wbMirrorPath = path.join(app.getPath("userData"), WB_MIRROR_FILE);
   ledgerMirrorPath = path.join(app.getPath("userData"), LEDGER_MIRROR_FILE);
   void ensureLocalServe(); // 本地服务端自动集成（fire-and-forget，不阻塞窗口）
-  if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
+  if (watchSettings.enabled && watchSettings.paths.some((p) => fs.existsSync(p))) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
   }
   pruneOldLogs(); // 日志中心：清 3 天前 daily 文件

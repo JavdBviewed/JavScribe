@@ -27,7 +27,10 @@ test("设置 tab（桌面形态）：客户端 pane 默认 on + 子 tab/服务�
   await expect(page.locator("#cc-up-enabled")).toBeVisible();
   await expect(page.locator("#cc-up-mirror")).toBeVisible();
   await expect(page.locator("#cc-up-proxy")).toBeVisible();
-  await expect(page.locator("#cc-watch-pick")).toBeVisible();
+  // 0.2.63 多目录：监听卡为 添加入行（输入/选择/添加）+ 目录行列表 + 启停
+  await expect(page.locator("#cc-watch-add-pick")).toBeVisible();
+  await expect(page.locator("#cc-watch-add")).toBeVisible();
+  await expect(page.locator("#cc-watch-rows")).toBeVisible();
   await expect(page.locator("#cc-watch-toggle")).toBeVisible();
 });
 

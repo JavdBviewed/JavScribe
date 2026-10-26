@@ -1447,6 +1447,41 @@ footer {
 .watch-lamp.err { background: var(--err); animation: none; }
 .watch-status { margin-top: 10px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .watch-status.err { color: var(--err); }
+.watch-rows { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.watch-rows:empty { display: none; }
+.watch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--hover-surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.watch-row-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.watch-row-del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.watch-row-del:hover { background: var(--err-soft); color: var(--err); }
 
 /* ---------- 本地服务端（仅 desktop 形态：web 形态恒 hidden 不接线） ---------- */
 #local-serve-status { margin-top: 10px; font-size: 12.5px; }
