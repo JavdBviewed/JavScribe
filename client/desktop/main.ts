@@ -35,18 +35,24 @@ import {
   probeArgs,
   shouldSkipEmbedded,
 } from "../core/sub-embed";
+import { DebugGate, internalPortFor, makeDebugToken } from "./debug-gate";
 
 // ---------------------------------------------------------------------------
-// 远程调试（opt-in）：--remote-debug [--remote-debug-port=9222]
-//   renderer CDP（remote-debugging-port/-address，0.0.0.0）+ main inspector（port+1）
+// 远程调试（opt-in）：--remote-debug [--remote-debug-port=9222] [--remote-debug-token=<s|none>]
+//   0.2.62 token 门禁（默认开）：
+//     - 真实 CDP / main inspector 绑 127.0.0.1 内部端口（确定性偏移 +4000/+4001）
+//     - 外部 0.0.0.0:P / P+1 是纯 http 门禁代理（DebugGate）：
+//       HTTP 只认 x-debug-token / Bearer；WS 只认 subprotocol debug-token-<token>
+//     - --remote-debug 不带 token：自动生成 12 位 hex 随机 token
+//     - --remote-debug-token=none：显式恢复旧 0.0.0.0 裸口行为（opt-in 降级）
 //   必须在 app ready 前 appendSwitch——模块顶层是 main 进程最早执行点。
 //   默认关闭：不带参数时零行为变化（不监听任何端口）。
 // ---------------------------------------------------------------------------
 
-interface RemoteDebugOpts { enabled: boolean; port: number; }
+interface RemoteDebugOpts { enabled: boolean; port: number; /** "none"=无门禁裸口；其余=token 值 */ token: string; }
 
 function parseRemoteDebugArgv(argv: string[]): RemoteDebugOpts {
-  const opts: RemoteDebugOpts = { enabled: false, port: 9222 };
+  const opts: RemoteDebugOpts = { enabled: false, port: 9222, token: "" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--remote-debug") {
@@ -59,20 +65,39 @@ function parseRemoteDebugArgv(argv: string[]): RemoteDebugOpts {
       opts.enabled = true;
       const p = Number.parseInt(argv[++i] || "", 10);
       if (Number.isInteger(p) && p >= 1 && p <= 65535) opts.port = p;
+    } else if (a.startsWith("--remote-debug-token=")) {
+      // 只认 = 形式；值 "none"=显式裸口，其余=固定 token（单独出现也视为开启远程调试）
+      opts.enabled = true;
+      opts.token = a.slice("--remote-debug-token=".length);
     }
   }
+  // 未显式给 token → 自动生成（门禁默认开；仅 =none 恢复裸口）
+  if (opts.enabled && !opts.token) opts.token = makeDebugToken();
   return opts;
 }
 
 const remoteDebug: RemoteDebugOpts = parseRemoteDebugArgv(process.argv);
-// main inspector 实际端口：默认 port+1；若 inspector 已激活（如 --inspect 启动、
-// e2e 的 --inspect=0）则复用既有端口（inspector.open 对已激活实例会抛异常）
+// main inspector 端口（用户视角）：门禁时=外部门禁端口 port+1；裸口时=真实端口。
+// 真实端口（门禁代理目标 / 已激活 inspector 复用端口）另记 inspectorRealPort。
+// inspector 已激活（--inspect 启动 / e2e 的 --inspect=0）时复用既有端口
+//（inspector.open 对已激活实例会抛异常）；均在 whenReady 内解析。
 let remoteInspectorPort: number | null = null;
+let inspectorRealPort: number | null = null;
+// 门禁 server 实例（whenReady 起 listen；before-quit 关闭——http server 句柄会拖住事件循环）
+let cdpGate: DebugGate | null = null;
+let inspGate: DebugGate | null = null;
+// 真实 CDP 内部端口（127.0.0.1）；appendSwitch 必须在 ready 前 → 顶层同步算好
+const cdpInternalPort = remoteDebug.enabled ? internalPortFor(remoteDebug.port, 4000) : 0;
 if (remoteDebug.enabled) {
-  app.commandLine.appendSwitch("remote-debugging-port", String(remoteDebug.port));
-  app.commandLine.appendSwitch("remote-debugging-address", `0.0.0.0:${remoteDebug.port}`);
-  // inspector 端口在 whenReady 内 open（见下方）；此处只记日志便于打包外排查
-  console.log(`[remote-debug] 远程调试已启用：renderer CDP :${remoteDebug.port}，main inspector :${remoteDebug.port + 1}（内网可用，用完请关）`);
+  if (remoteDebug.token !== "none") {
+    app.commandLine.appendSwitch("remote-debugging-port", String(cdpInternalPort));
+    app.commandLine.appendSwitch("remote-debugging-address", `127.0.0.1:${cdpInternalPort}`);
+    console.log(`[remote-debug] 远程调试已启用（token 门禁）：外部门禁 :${remoteDebug.port} → CDP 127.0.0.1:${cdpInternalPort}，门禁 :${remoteDebug.port + 1} → main inspector（token: ${remoteDebug.token}；给 AI 调试时端口与 token 一起给，用完请关）`);
+  } else {
+    app.commandLine.appendSwitch("remote-debugging-port", String(remoteDebug.port));
+    app.commandLine.appendSwitch("remote-debugging-address", `0.0.0.0:${remoteDebug.port}`);
+    console.log(`[remote-debug] 远程调试已启用（无门禁，--remote-debug-token=none）：renderer CDP 0.0.0.0:${remoteDebug.port}，main inspector :${remoteDebug.port + 1}（内网可用，用完请关）`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2025,7 +2050,8 @@ function registerIpc(): void {
 
   // 只读探测文件存在（换服务重跑恢复源视频路径；stat 失败一律 false）
   // 远程调试状态查询（renderer 启动时自查；未开启恒 null，避免推送时序丢消息）
-  ipcMain.handle("remote-debug-state", (): { rendererPort: number; inspectorPort: number; lanIps: string[] } | null => {
+  // 0.2.62：token="none" 表示裸口（--remote-debug-token=none），其余为门禁 token
+  ipcMain.handle("remote-debug-state", (): { rendererPort: number; inspectorPort: number; lanIps: string[]; token: string } | null => {
     if (!remoteDebug.enabled) return null;
     const lanIps: string[] = [];
     const ifaces = os.networkInterfaces();
@@ -2034,7 +2060,7 @@ function registerIpc(): void {
         if (i.family === "IPv4" && !i.internal) lanIps.push(i.address);
       }
     }
-    return { rendererPort: remoteDebug.port, inspectorPort: remoteInspectorPort ?? remoteDebug.port + 1, lanIps };
+    return { rendererPort: remoteDebug.port, inspectorPort: remoteInspectorPort ?? remoteDebug.port + 1, lanIps, token: remoteDebug.token };
   });
 
   ipcMain.handle("file-exists", (_ev, p: unknown) => {
@@ -3641,7 +3667,7 @@ function createWindow(): void {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (process.env.JAVSCRIBE_CLIENT_USERDATA) {
     app.setPath("userData", process.env.JAVSCRIBE_CLIENT_USERDATA);
   }
@@ -3664,24 +3690,72 @@ app.whenReady().then(() => {
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
   }
+  // 0.2.62 token 门禁：CDP 门禁在 createWindow 前起好（renderer 加载后自查 state，门禁须已监听）
+  if (remoteDebug.enabled && remoteDebug.token !== "none") {
+    try {
+      cdpGate = new DebugGate({ port: remoteDebug.port, internalPort: cdpInternalPort, token: remoteDebug.token, log: (m) => console.log(m) });
+      await cdpGate.listen();
+    } catch (e) {
+      cdpGate = null;
+      console.warn(`[remote-debug] CDP 门禁启动失败（端口 ${remoteDebug.port} 被占？）: ${String(e)}；本次退化为仅本机可调试（127.0.0.1）`);
+    }
+  }
   createWindow();
   if (remoteDebug.enabled) {
-    // main 进程 inspector：CDP 协议（ws://<ip>:port+1），可 eval 主进程
-    // （pipelineGateWait / ffmpeg 子进程 / lsState 等）；失败不阻断启动
+    // main 进程 inspector：CDP 协议，可 eval 主进程（pipelineGateWait / ffmpeg 子进程 / lsState 等）；失败不阻断启动
     const insp = require("inspector");
     const existing = insp.url();
+    const gateOn = remoteDebug.token !== "none";
     if (existing) {
-      // 已激活（--inspect / e2e 的 --inspect=0 随机端口）：复用既有端口
+      // 已激活（--inspect / e2e 的 --inspect=0 随机端口）：解析实际 host:port 决定门禁接法
+      let real: number | null = null;
+      let realHost = "";
       try {
-        remoteInspectorPort = Number(new URL(existing).port);
-      } catch {
-        remoteInspectorPort = remoteDebug.port + 1;
+        const u = new URL(existing);
+        real = Number(u.port);
+        realHost = u.hostname;
+      } catch { /* existing 解析失败：按无端口处理 */ }
+      const loopback = !realHost || realHost === "127.0.0.1" || realHost === "localhost" || realHost === "::1";
+      inspectorRealPort = real;
+      if (gateOn && real !== null && loopback) {
+        // 回环上已激活：外部门禁端口代理到既有端口（undici/浏览器只连门禁口）
+        try {
+          inspGate = new DebugGate({ port: remoteDebug.port + 1, internalPort: real, token: remoteDebug.token, log: (m) => console.log(m) });
+          await inspGate.listen();
+          remoteInspectorPort = remoteDebug.port + 1;
+          console.log(`[remote-debug] main inspector 已激活 :${real}（回环），外部门禁 :${remoteDebug.port + 1} → 127.0.0.1:${real}`);
+        } catch (e) {
+          console.warn(`[remote-debug] inspector 门禁启动失败: ${String(e)}；inspector 仅回环 :${real} 可达`);
+          remoteInspectorPort = real;
+        }
+      } else if (gateOn && real !== null) {
+        console.warn(`[remote-debug] main inspector 已绑定 ${realHost}:${real}（非回环），门禁无法补救，inspector 保持原样`);
+        remoteInspectorPort = real;
+      } else {
+        remoteInspectorPort = real ?? remoteDebug.port + 1;
+        console.log(`[remote-debug] main inspector 已激活，复用现有端口 :${remoteInspectorPort}`);
       }
-      console.log(`[remote-debug] main inspector 已激活，复用现有端口 :${remoteInspectorPort}`);
-    } else {
-      remoteInspectorPort = remoteDebug.port + 1;
+    } else if (gateOn) {
+      // 未激活 + 门禁：inspector 只绑 127.0.0.1 内部端口，外部走门禁
+      // wait 必须 false：true 会阻塞主线程至调试器连上（生产路径直接冻结启动；
+      // e2e 恒注入 --inspect=0 走「已激活」分支，历史上从未踩到）
+      inspectorRealPort = internalPortFor(remoteDebug.port, 4001);
       try {
-        insp.open(remoteInspectorPort, "0.0.0.0", true);
+        insp.open(inspectorRealPort, "127.0.0.1", false);
+        inspGate = new DebugGate({ port: remoteDebug.port + 1, internalPort: inspectorRealPort, token: remoteDebug.token, log: (m) => console.log(m) });
+        await inspGate.listen();
+        remoteInspectorPort = remoteDebug.port + 1;
+        console.log(`[remote-debug] main inspector → 127.0.0.1:${inspectorRealPort}，外部门禁 :${remoteDebug.port + 1}`);
+      } catch (e) {
+        console.warn(`[remote-debug] main inspector 开启失败（端口被占？）: ${String(e)}`);
+        remoteInspectorPort = inspectorRealPort;
+      }
+    } else {
+      // token=none：旧行为 0.0.0.0 裸口
+      remoteInspectorPort = remoteDebug.port + 1;
+      inspectorRealPort = remoteInspectorPort;
+      try {
+        insp.open(remoteInspectorPort, "0.0.0.0", false); // wait=true 阻塞主线程，见上
       } catch (e) {
         console.warn(`[remote-debug] main inspector 开启失败（端口被占？）: ${String(e)}`);
       }
@@ -3700,6 +3774,11 @@ app.on("window-all-closed", () => {
 // 必须在 before-quit 同步杀：子进程继承的额外 stdio pipe 只有随其消亡才 EOF，
 // 否则 e2e（Playwright）的 app.close() 永不 resolve。
 app.on("before-quit", () => {
+  // 0.2.62：关门禁 server（http server 句柄拖住事件循环；e2e 的 app.close() 等进程退出）
+  void cdpGate?.close().catch(() => { /* 忽略 */ });
+  void inspGate?.close().catch(() => { /* 忽略 */ });
+  cdpGate = null;
+  inspGate = null;
   if (!lsSpawnedByUs) return;
   const c = lsChild;
   lsChild = null;

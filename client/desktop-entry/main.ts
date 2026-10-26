@@ -35,9 +35,12 @@ if (desktop && "remoteDebugState" in desktop) {
   void desktop.remoteDebugState().then((st) => {
     if (!st) return;
     const ips = st.lanIps.length ? st.lanIps.join("、") : "（未检测到局域网地址）";
+    const tok = st.token === "none"
+      ? "（无门禁裸口）"
+      : `token ${st.token}（给 AI 调试时端口与 token 一起给）`;
     toast(
       `远程调试已开启：CDP http://<本机IP>:${st.rendererPort}/devtools · main inspector :${st.inspectorPort}` +
-      `（内网 ${ips}；远程调试用完请关）`,
+      `（内网 ${ips}；${tok}；远程调试用完请关）`,
       "",
     );
   });

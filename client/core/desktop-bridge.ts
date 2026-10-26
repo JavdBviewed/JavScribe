@@ -144,6 +144,8 @@ export interface RemoteDebugState {
   inspectorPort: number;
   /** 本机非内环 IPv4（LAN 可达地址提示） */
   lanIps: string[];
+  /** 门禁 token；"none"=无门禁裸口（--remote-debug-token=none），其余=必须随请求携带 */
+  token: string;
 }
 
 export interface JavDesktop {
