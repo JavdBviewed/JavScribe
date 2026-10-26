@@ -3250,6 +3250,10 @@ async function watchTickInner(): Promise<void> {
       }
       nowSeen.set(v.path, { size: st.size, mtimeMs: st.mtimeMs });
       if (processed.has(v.path)) continue;
+        if (v.too_small) {
+          console.log(`[watch] 跳过（小于 min_size_mb 阈值）: ${v.name}`);
+          continue;
+        }
       if (watchHasSub(path.dirname(v.path), v.name, dirNames)) continue;
       const prev = watchSeen.get(v.path);
       if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs) {
