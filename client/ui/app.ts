@@ -7193,6 +7193,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   let ccViewSeq = 0;
+  // 0.2.62 日志中心自动刷新 timer（renderCcView 每次激活重渲染 → 重入前清旧；离开 ccfg 视图清）
+  let ccLogsTimer: number | null = null;
   async function renderCcView(): Promise<void> {
     const body = $("cc-body");
     if (!body) return;
@@ -7349,6 +7351,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       <div class="ccfg-foot">
         <span class="cfg-foot-note" id="cc-watch-status">${esc(ccWatchStatusText(ws))}</span>
         <span class="cfg-foot-actions"><button type="button" class="btn" id="cc-watch-toggle"${ws && ws.path ? "" : " disabled"}>${ws && ws.enabled ? "停止监听" : "开始监听"}</button></span>
+      </div>
+    </section>
+    <section class="cfg-sec cc-card" data-sec="ccfg-logs">
+      <h4 class="cfg-sec-title">日志中心<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">主进程 / 页面 / 内嵌 serve 日志（内存环 2 万条 + 每日文件留 3 天）</span></h4>
+      <div class="cfg-sec-body">
+        <div class="cfg-row"><span class="cfg-lab">来源</span>
+        <select id="cc-logs-source" class="mono"><option value="all">全部</option><option value="main">主进程</option><option value="ui">页面</option><option value="serve">内嵌 serve</option></select></div>
+        <div class="cfg-row"><span class="cfg-lab">最低级别</span>
+        <select id="cc-logs-level" class="mono"><option value="">全部</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select></div>
+        <div class="cfg-row"><span class="cfg-lab">关键词</span>
+        <input id="cc-logs-q" class="mono" type="text" placeholder="大小写不敏感子串；留空不过滤" spellcheck="false" autocomplete="off">
+        <label class="chk-row"><input type="checkbox" id="cc-logs-auto"><span>自动刷新（2s）</span></label></div>
+      </div>
+      <pre id="cc-logs-out" class="cc-logs-pre"></pre>
+      <div class="ccfg-foot">
+        <span class="cfg-foot-note" id="cc-logs-note"></span>
+        <span class="cfg-foot-actions">
+          <button type="button" class="btn" id="cc-logs-refresh">刷新</button>
+          <button type="button" class="btn" id="cc-logs-copy">复制</button>
+          <button type="button" class="btn" id="cc-logs-export">导出</button>
+          <button type="button" class="btn" id="cc-logs-clear">清空</button>
+        </span>
       </div>
     </section>`;
     }
@@ -7564,6 +7588,74 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (r.state) ccWatchRenderBits(ctl.state());
       };
     }
+    // 桌面专属：日志中心（0.2.62；环在 main 进程，页面只做过滤 + 展示）
+    const logsOut = $("cc-logs-out") as HTMLPreElement | null;
+    if (logsOut) {
+      const logsBridge = (window as unknown as {
+        javDesktop?: { logs?: {
+          tail(p?: { source?: string; level?: string; q?: string; limit?: number }): Promise<{ lines: string[]; total: number; truncated: boolean; serveLogPath: string | null }>;
+          export(): Promise<string | null>;
+          clear(): Promise<{ ok: boolean }>;
+        } };
+      }).javDesktop?.logs;
+      if (logsBridge) {
+        const srcEl = $("cc-logs-source") as HTMLSelectElement;
+        const lvEl = $("cc-logs-level") as HTMLSelectElement;
+        const qEl = $("cc-logs-q") as HTMLInputElement;
+        const autoEl = $("cc-logs-auto") as HTMLInputElement;
+        const noteEl = $("cc-logs-note") as HTMLElement;
+        const loadLogs = async (): Promise<void> => {
+          if (!logsOut.isConnected) return; // 视图已切走：停止
+          try {
+            const r = await logsBridge.tail({
+              source: srcEl.value,
+              level: lvEl.value || undefined,
+              q: qEl.value || undefined,
+              limit: 2000,
+            });
+            if (!logsOut.isConnected) return;
+            logsOut.textContent = r.lines.join("\n") || "（无日志）";
+            const bits = [`环 ${r.total} 条`];
+            if (r.truncated) bits.push("仅尾部");
+            if (r.serveLogPath) bits.push(`serve 文件 ${r.serveLogPath}`);
+            noteEl.textContent = bits.join(" · ");
+          } catch {
+            if (logsOut.isConnected) { logsOut.textContent = "（日志读取失败）"; noteEl.textContent = ""; }
+          }
+        };
+        // 重渲染前先清旧 timer（ccLogsTimer 为外层变量，跨渲染存活）
+        if (ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
+        const syncAuto = (): void => {
+          if (ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
+          if (autoEl.checked) ccLogsTimer = window.setInterval(() => void loadLogs(), 2000);
+        };
+        autoEl.addEventListener("change", syncAuto);
+        const refreshBtn = $("cc-logs-refresh") as HTMLButtonElement;
+        refreshBtn.addEventListener("click", () => void loadLogs());
+        const copyBtn = $("cc-logs-copy") as HTMLButtonElement;
+        copyBtn.addEventListener("click", () => {
+          void navigator.clipboard?.writeText(logsOut.textContent || "").then(
+            () => toast("日志已复制到剪贴板", "ok"),
+            () => toast("复制失败", "err"),
+          );
+        });
+        const exportBtn = $("cc-logs-export") as HTMLButtonElement;
+        exportBtn.addEventListener("click", async () => {
+          const p = await logsBridge.export();
+          if (p) toast(`已导出：${p}`, "ok");
+        });
+        const clearBtn = $("cc-logs-clear") as HTMLButtonElement;
+        clearBtn.addEventListener("click", async () => {
+          await logsBridge.clear();
+          toast("已清空内存环（文件历史保留）", "ok");
+          void loadLogs();
+        });
+        void loadLogs();
+        syncAuto();
+      } else {
+        logsOut.closest(".cc-card")?.remove(); // 无 logs 字段（桌面形态恒有，兜底防呆）
+      }
+    }
   }
 
   // ---------- 共享工作台导航 + 平台必要的桌面窗口控制 ----------
@@ -7596,6 +7688,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 0.2.49 P6：离开设置视图 / 重设已激活的设置 tab 都会整体重渲染（改动静默丢失）→ 先确认
     if (currentView === "ccfg" && ccViewDirty()
       && !window.confirm("设置页有未保存的改动，切换后将丢弃。继续？")) return;
+    // 0.2.62：离开设置视图停日志自动刷新（回到 ccfg 时 renderCcView 重渲染会重挂）
+    if (view !== "ccfg" && ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
     for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
     for (const item of navItems) {
       const active = item.dataset.view === view;

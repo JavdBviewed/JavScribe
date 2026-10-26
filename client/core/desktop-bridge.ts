@@ -148,6 +148,17 @@ export interface RemoteDebugState {
   token: string;
 }
 
+/** 日志中心 tail 结果（0.2.62） */
+export interface LogTailResult {
+  lines: string[];
+  /** 内存环当前总行数（未过滤） */
+  total: number;
+  /** 环超 limit 或 serve 文件超 2MB 窗口 → 只展示尾部 */
+  truncated: boolean;
+  /** 内嵌 serve 日志文件路径（无则 null） */
+  serveLogPath: string | null;
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -180,6 +191,15 @@ export interface JavDesktop {
   serveUpdate(): Promise<ServeRelease | null>;
   /** 远程调试状态（仅 --remote-debug 启动时非 null；否则恒 null） */
   remoteDebugState(): Promise<RemoteDebugState | null>;
+  /** 日志中心（0.2.62；仅桌面形态提供，web 形态 window.javDesktop 无此字段） */
+  logs: {
+    /** 按源/最低级别/关键词取格式化行尾（limit 默认 2000） */
+    tail(p?: { source?: "all" | "main" | "ui" | "serve"; level?: "debug" | "info" | "warn" | "error"; q?: string; limit?: number }): Promise<LogTailResult>;
+    /** 导出环全量 + serve 文件尾；取消/失败返回 null */
+    export(): Promise<string | null>;
+    /** 清空内存环（文件历史保留） */
+    clear(): Promise<{ ok: boolean }>;
+  };
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;
 

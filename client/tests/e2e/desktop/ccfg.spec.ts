@@ -22,7 +22,8 @@ test("设置 tab（桌面形态）：客户端 pane 默认 on + 子 tab/服务�
   await expect(page.locator("#ccfg-queue_cap")).toHaveAttribute("min", "1");
   await expect(page.locator("#ccfg-queue_cap")).toHaveAttribute("max", "16");
   // 桌面专属区标「仅桌面」：更新设置（settings.json 同源）+ 文件夹监听（watch.json 同源）
-  await expect(page.locator("#sec-ccfg .cc-only-badge", { hasText: "仅桌面" })).toHaveCount(2);
+  // + 日志中心（0.2.62；ring 内存态 + daily 文件，与两文件分源）
+  await expect(page.locator("#sec-ccfg .cc-only-badge", { hasText: "仅桌面" })).toHaveCount(3);
   await expect(page.locator("#cc-up-enabled")).toBeVisible();
   await expect(page.locator("#cc-up-mirror")).toBeVisible();
   await expect(page.locator("#cc-up-proxy")).toBeVisible();

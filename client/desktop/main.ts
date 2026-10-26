@@ -36,6 +36,73 @@ import {
   shouldSkipEmbedded,
 } from "../core/sub-embed";
 import { DebugGate, internalPortFor, makeDebugToken } from "./debug-gate";
+import {
+  LogRing,
+  filterLines,
+  formatLine,
+  formatLines,
+  type LogLine,
+  type LogLevel,
+  type LogSource,
+} from "../core/log-center";
+
+// ---------------------------------------------------------------------------
+// 日志中心（0.2.62）：main 进程 console → 环形缓冲 + daily 文件
+//   环（2 万条）供 logs-tail/export/clear IPC；daily 文件 userData/logs/jav-scribe-YYYY-MM-DD.log
+//   （fire-and-forget 追加，whenReady 清 3 天前）；页面 console-message 入环 [ui]，
+//   内嵌 serve 日志文件走 logs-tail 时直接读尾（见 IPC 段）。
+//   模块顶层装钩：userData 在 app ready 前不可用 → 文件路径懒取，取不到只进环。
+// ---------------------------------------------------------------------------
+const logRing = new LogRing();
+let logDir: string | null = null;
+
+function logFileForToday(): string | null {
+  try {
+    if (!logDir) logDir = path.join(app.getPath("userData"), "logs");
+    const d = new Date();
+    const p2 = (n: number): string => String(n).padStart(2, "0");
+    return path.join(logDir, `jav-scribe-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}.log`);
+  } catch {
+    return null; // app 未 ready：仅入环
+  }
+}
+
+function logArgString(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v instanceof Error) return v.stack || v.message;
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+function ringPush(level: LogLevel, src: LogSource, msg: string): void {
+  const line: LogLine = { t: new Date().toISOString(), level, src, msg };
+  logRing.push(level, src, msg);
+  const p = logFileForToday();
+  if (p) {
+    try { fs.appendFile(p, formatLine(line) + "\n", () => { /* fire-and-forget */ }); } catch { /* 磁盘错误不阻断主流程 */ }
+  }
+}
+
+// console 挂钩：保留原输出（终端 / e2e 抓取），另镜像进环 + daily 文件
+const consoleOrig = {
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+const consoleHooks = console as {
+  log: (...a: unknown[]) => void; info: (...a: unknown[]) => void;
+  warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void;
+};
+const hookConsole = (lv: LogLevel, key: "log" | "info" | "warn" | "error", orig: (...a: unknown[]) => void): void => {
+  consoleHooks[key] = (...args: unknown[]): void => {
+    ringPush(lv, "main", args.map(logArgString).join(" "));
+    orig(...args);
+  };
+};
+hookConsole("info", "log", consoleOrig.log);
+hookConsole("info", "info", consoleOrig.info);
+hookConsole("warn", "warn", consoleOrig.warn);
+hookConsole("error", "error", consoleOrig.error);
 
 // ---------------------------------------------------------------------------
 // 远程调试（opt-in）：--remote-debug [--remote-debug-port=9222] [--remote-debug-token=<s|none>]
@@ -2063,6 +2130,68 @@ function registerIpc(): void {
     return { rendererPort: remoteDebug.port, inspectorPort: remoteInspectorPort ?? remoteDebug.port + 1, lanIps, token: remoteDebug.token };
   });
 
+  // ---------- 日志中心（0.2.62）：设置页「客户端」tab ----------
+  // 环内行（main+ui）走 filterLines；serve 为文件尾读（无行内时间戳，级别按 info 参与过滤）
+  const serveLines = (): LogLine[] => {
+    const sp = serveLogPath();
+    if (!sp) return [];
+    const { lines } = readServeTail(sp);
+    return lines.map((m): LogLine => ({ t: "", level: "info", src: "serve", msg: m }));
+  };
+  ipcMain.handle("logs-tail", (_ev, p?: { source?: string; level?: string; q?: string; limit?: number }) => {
+    const source = p?.source === "main" || p?.source === "ui" || p?.source === "serve" ? p.source : "all";
+    const level = p?.level === "debug" || p?.level === "info" || p?.level === "warn" || p?.level === "error" ? p.level : undefined;
+    const q = typeof p?.q === "string" && p.q.trim() ? p.q.trim() : undefined;
+    const limit = Math.min(Math.max(Number(p?.limit) || 2000, 1), 20000);
+    const ring = logRing.tail(0);
+    const ringFiltered = filterLines(ring, { level, q }).slice(-limit);
+    const serveF = filterLines(serveLines(), { level, q }).slice(-limit);
+    let out: string[];
+    let truncated: boolean;
+    if (source === "serve") {
+      out = formatLines(serveF).split("\n");
+      truncated = readServeTail(serveLogPath() || "").truncated;
+    } else if (source === "main" || source === "ui") {
+      out = formatLines(filterLines(ring, { source, level, q }).slice(-limit)).split("\n");
+      truncated = ring.length > limit;
+    } else {
+      const sp = serveLogPath();
+      const parts = [formatLines(ringFiltered)];
+      if (sp) parts.push(`── 内嵌 serve 日志（文件尾） ──`);
+      if (sp || serveF.length) parts.push(formatLines(serveF));
+      out = parts.filter((x) => x !== "").join("\n").split("\n");
+      truncated = ring.length > limit || readServeTail(sp || "").truncated;
+    }
+    return { lines: out, total: ring.length, truncated, serveLogPath: serveLogPath() };
+  });
+
+  ipcMain.handle("logs-export", async (ev) => {
+    const w = BrowserWindow.fromWebContents(ev.sender);
+    const r = await dialog.showSaveDialog(w ?? BrowserWindow.getFocusedWindow()!, {
+      title: "导出日志",
+      defaultPath: `jav-scribe-logs-${new Date().toISOString().slice(0, 10)}.log`,
+      filters: [{ name: "日志", extensions: ["log", "txt"] }],
+    });
+    if (r.canceled || !r.filePath) return null;
+    const sp = serveLogPath();
+    const serve = readServeTail(sp || "");
+    const text =
+      formatLines(logRing.tail(0)) +
+      `\n\n── 内嵌 serve 日志（${sp ? "文件尾" : "无文件"}） ──\n` +
+      (serve.lines.join("\n") || "");
+    try {
+      fs.writeFileSync(r.filePath, text, "utf8");
+      return r.filePath;
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("logs-clear", () => {
+    logRing.clear(); // 仅清内存环；daily 文件历史保留
+    return { ok: true };
+  });
+
   ipcMain.handle("file-exists", (_ev, p: unknown) => {
     if (typeof p !== "string" || !p) return false;
     try { return fs.statSync(p).isFile(); } catch { return false; }
@@ -3630,6 +3759,54 @@ async function ensureLocalServe(): Promise<void> {
 // 测试钩子：已交给系统浏览器的 URL（JAVSCRIBE_OPEN_EXTERNAL_CAPTURE=1 时记录；e2e 经 t-call openedExternal 读）
 const openedExternalUrls: string[] = [];
 
+/** 日志中心：清理 3 天前的 daily 文件（whenReady 调；文件数小，同步无妨） */
+function pruneOldLogs(): void {
+  try {
+    const d = path.join(app.getPath("userData"), "logs");
+    if (!fs.existsSync(d)) return;
+    const cutoff = Date.now() - 3 * 86400_000;
+    for (const f of fs.readdirSync(d)) {
+      if (!/^jav-scribe-\d{4}-\d{2}-\d{2}\.log$/.test(f)) continue;
+      try {
+        const p = path.join(d, f);
+        if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+      } catch { /* 忽略单文件失败 */ }
+    }
+  } catch { /* 目录不可读：跳过 */ }
+}
+
+/** 内嵌 serve 日志文件路径：win=serve_launcher 重定向到 ~/.jav_scribe/serve.log；posix dev 形态=userData/local-serve.log */
+function serveLogPath(): string | null {
+  const cands = process.platform === "win32"
+    ? [path.join(os.homedir(), ".jav_scribe", "serve.log")]
+    : [path.join(app.getPath("userData"), "local-serve.log")];
+  for (const c of cands) {
+    try {
+      if (fs.statSync(c).isFile()) return c;
+    } catch { /* 试下一个候选 */ }
+  }
+  return null;
+}
+
+/** serve 日志文件尾读（窗口 ≤2MB，超限只读尾部；首行可能半行，丢弃） */
+function readServeTail(p: string, maxBytes = 2 * 1024 * 1024): { lines: string[]; truncated: boolean } {
+  if (!p) return { lines: [], truncated: false };
+  let st: fs.Stats;
+  try { st = fs.statSync(p); } catch { return { lines: [], truncated: false }; }
+  const start = st.size > maxBytes ? st.size - maxBytes : 0;
+  const truncated = start > 0;
+  try {
+    const buf = Buffer.alloc(st.size - start);
+    const fd = fs.openSync(p, "r");
+    try { fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
+    let lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
+    if (truncated && lines.length) lines = lines.slice(1);
+    return { lines, truncated };
+  } catch {
+    return { lines: [], truncated: false };
+  }
+}
+
 function createWindow(): void {
   win = new BrowserWindow({
     width: 1440,
@@ -3662,6 +3839,11 @@ function createWindow(): void {
   };
   win.on("maximize", pushMaxState);
   win.on("unmaximize", pushMaxState);
+  // 日志中心：页面 console 入环（level 0=debug/1=info/2=warn/3=error）
+  win.webContents.on("console-message", (_e, level: number, message: string) => {
+    const lv: LogLevel = level >= 3 ? "error" : level === 2 ? "warn" : level === 1 ? "info" : "debug";
+    ringPush(lv, "ui", message);
+  });
   win.on("closed", () => {
     win = null;
   });
@@ -3690,6 +3872,7 @@ app.whenReady().then(async () => {
   if (watchSettings.enabled && watchSettings.path && fs.existsSync(watchSettings.path)) {
     watchStartTimer(); // 恢复上次会话的监听（renderer 就绪前的候选进缓冲，watch-arm 时 flush）
   }
+  pruneOldLogs(); // 日志中心：清 3 天前 daily 文件
   // 0.2.62 token 门禁：CDP 门禁在 createWindow 前起好（renderer 加载后自查 state，门禁须已监听）
   if (remoteDebug.enabled && remoteDebug.token !== "none") {
     try {

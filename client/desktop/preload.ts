@@ -38,6 +38,14 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
   remoteDebugState: () =>
     ipcRenderer.invoke("remote-debug-state") as Promise<import("../core/desktop-bridge").RemoteDebugState | null>,
 
+  // 日志中心（0.2.62）：环尾读 / 导出 / 清空
+  logs: {
+    tail: (p?: { source?: "all" | "main" | "ui" | "serve"; level?: "debug" | "info" | "warn" | "error"; q?: string; limit?: number }) =>
+      ipcRenderer.invoke("logs-tail", p) as Promise<import("../core/desktop-bridge").LogTailResult>,
+    export: () => ipcRenderer.invoke("logs-export") as Promise<string | null>,
+    clear: () => ipcRenderer.invoke("logs-clear") as Promise<{ ok: boolean }>,
+  },
+
   download: (url: string, filename: string) =>
     ipcRenderer.invoke("download-srt", { url, filename }) as Promise<FileOpResult>,
 

@@ -1813,6 +1813,22 @@ body.desktop main > section.view-on { display: block; }
   color: var(--accent); background: var(--accent-soft);
   padding: 1px 8px; border-radius: 999px;
 }
+/* 0.2.62 日志中心：等宽日志区（卡片内，限高滚动） */
+.cc-logs-pre {
+  margin: 10px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fg);
+}
 .cc-watch-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cc-watch-row #cc-watch-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-card .cfg-row input:not([type="checkbox"]) { width: 100%; max-width: 560px; }
