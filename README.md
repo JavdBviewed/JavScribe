@@ -22,7 +22,7 @@
 ## 最新版下载
 
 <!-- release-latest:client -->
-🖥️ **JavScribe Client**（桌面客户端）v0.2.60：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.60/jav-scribe-client-0.2.60-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.60/jav-scribe-client-0.2.60-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.60/jav-scribe-client-0.2.60-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.60/jav-scribe-client_0.2.60_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.60)
+🖥️ **JavScribe Client**（桌面客户端）v0.2.61：[Windows 安装包](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.61/jav-scribe-client-0.2.61-win-x64-setup.exe) · [Windows 便携版](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.61/jav-scribe-client-0.2.61-win-x64-portable.exe) · [Linux AppImage](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.61/jav-scribe-client-0.2.61-linux-x64.AppImage) · [Linux deb](https://github.com/JavdBviewed/JavScribe/releases/download/client-v0.2.61/jav-scribe-client_0.2.61_amd64.deb) · [全部资产](https://github.com/JavdBviewed/JavScribe/releases/tag/client-v0.2.61)
 （客户端 · Docker 形态从本仓库 `web/` 构建，版本与安装形态同步，见 [web/README.md](web/README.md)）
 
 <!-- release-latest:serve -->
