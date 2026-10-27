@@ -143,19 +143,6 @@ export interface LocalServeState {
   error: string | null;
 }
 
-// ---------- 远程调试（opt-in：仅 --remote-debug 启动参数生效；否则恒 null） ----------
-
-export interface RemoteDebugState {
-  /** renderer CDP 端口（http://<ip>:rendererPort/devtools） */
-  rendererPort: number;
-  /** main 进程 inspector 端口（CDP 协议） */
-  inspectorPort: number;
-  /** 本机非内环 IPv4（LAN 可达地址提示） */
-  lanIps: string[];
-  /** 门禁 token；"none"=无门禁裸口（--remote-debug-token=none），其余=必须随请求携带 */
-  token: string;
-}
-
 /** 日志中心 tail 结果（0.2.62） */
 export interface LogTailResult {
   lines: string[];
@@ -197,8 +184,6 @@ export interface JavDesktop {
   };
   /** 最新服务端 Release（服务端无自有界面，新版本提示在客户端 UI）；拉不到返回 null */
   serveUpdate(): Promise<ServeRelease | null>;
-  /** 远程调试状态（仅 --remote-debug 启动时非 null；否则恒 null） */
-  remoteDebugState(): Promise<RemoteDebugState | null>;
   /** 日志中心（0.2.62；仅桌面形态提供，web 形态 window.javDesktop 无此字段） */
   logs: {
     /** 按源/最低级别/关键词取格式化行尾（limit 默认 2000） */

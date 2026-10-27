@@ -34,10 +34,6 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
 
   fileExists: (p: string) => ipcRenderer.invoke("file-exists", p) as Promise<boolean>,
 
-  // 远程调试（opt-in --remote-debug）：查询当前状态；未开启恒 null
-  remoteDebugState: () =>
-    ipcRenderer.invoke("remote-debug-state") as Promise<import("../core/desktop-bridge").RemoteDebugState | null>,
-
   // 日志中心（0.2.62）：环尾读 / 导出 / 清空
   logs: {
     tail: (p?: { source?: "all" | "main" | "ui" | "serve"; level?: "debug" | "info" | "warn" | "error"; q?: string; limit?: number }) =>

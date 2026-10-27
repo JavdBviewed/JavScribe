@@ -1,6 +1,7 @@
 // 桌面端 UI 结构类：关键 DOM 断言（id/class/aria、桌面措辞、列序、chip 文案）
 import { test, expect, goView, CLIENT_VERSION, mockSeed, waitForReady } from "./helpers";
 import { MOCK } from "./helpers";
+import net from "node:net";
 
 test.beforeEach(async ({ page }) => {
   // 页面已随 fixture 冷启动完成（引擎 mock 在线、Key 预置）
@@ -33,6 +34,21 @@ test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dis
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
   await expect(page.locator("#sec-ccfg .kicker")).toHaveText("Settings");
+});
+
+test("默认启动（无 --remote-debug）调试端口未监听：9222/9223 ECONNREFUSED", async ({ page }) => {
+  // 远程调试整链移除后的回归：page fixture 冷启动不带 --remote-debug（beforeEach 已等就绪），
+  // renderer CDP（9222）与 main inspector（9223）均不得监听回环端口。
+  // node:net 直探：ECONNREFUSED 即证明未监听；e2e 机器若恰有他进程占 9222/9223 会误报（本机无此情况）。
+  void page; // fixture 只取「应用已正常冷启动」这一前提，页面本身不参与断言
+  const probe = (port: number): Promise<string> =>
+    new Promise((resolve) => {
+      const s = net.connect({ host: "127.0.0.1", port });
+      s.once("connect", () => { s.destroy(); resolve("CONNECTED"); });
+      s.once("error", (e: NodeJS.ErrnoException) => resolve(e.code || String(e)));
+    });
+  expect(await probe(9222)).toBe("ECONNREFUSED");
+  expect(await probe(9223)).toBe("ECONNREFUSED");
 });
 
 test("视图切换：nav 点击切视图 + localStorage 持久化", async ({ page }) => {
