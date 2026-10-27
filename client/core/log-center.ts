@@ -101,3 +101,48 @@ export function formatLine(l: LogLine): string {
 export function formatLines(lines: LogLine[]): string {
   return lines.map(formatLine).join("\n");
 }
+
+// ---------- 导出元信息头（0.2.64 诊断级）：纯函数，不 import electron，字段由 main 组装 ----------
+// ffmpeg/ffprobe 找不到时由调用方传 "未找到"；time 为本地 YYYY-MM-DD HH:mm:ss
+
+export interface ExportMetaInfo {
+  /** 本地时间 YYYY-MM-DD HH:mm:ss */
+  time: string;
+  version: string;
+  platform: string;
+  arch: string;
+  electron: string;
+  node: string;
+  chrome: string;
+  appPath: string;
+  userData: string;
+  /** 找不到传 "未找到" */
+  ffmpeg: string;
+  /** 找不到传 "未找到" */
+  ffprobe: string;
+  /** daily 文件名（非全路径），按名升序；找不到 = [] */
+  logFiles: string[];
+}
+
+/**
+ * 固定格式元信息头：每行 `# key: value`，键序严格固定（下游/AI 解析依赖）。
+ * log files 为 0 个时该行 = `# log files: 0`（无括号）；
+ * N 个时 = `# log files: N（a.log, b.log, ...）`，逗号+空格分隔，按传入顺序。
+ */
+export function buildExportMeta(m: ExportMetaInfo): string {
+  const files = m.logFiles.length
+    ? `${m.logFiles.length}（${m.logFiles.join(", ")}）`
+    : "0";
+  return [
+    "# JavScribe Client 日志导出",
+    `# time: ${m.time}`,
+    `# version: ${m.version}`,
+    `# platform: ${m.platform}/${m.arch}`,
+    `# runtime: electron ${m.electron} · node ${m.node} · chrome ${m.chrome}`,
+    `# app: ${m.appPath}`,
+    `# userData: ${m.userData}`,
+    `# ffmpeg: ${m.ffmpeg}`,
+    `# ffprobe: ${m.ffprobe}`,
+    `# log files: ${files}`,
+  ].join("\n");
+}

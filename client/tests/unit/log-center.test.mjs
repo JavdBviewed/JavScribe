@@ -74,6 +74,52 @@ try {
   assert.equal(formatLines([{ t: iso, level: "info", src: "main", msg: "a" }, { t: iso, level: "info", src: "main", msg: "b" }]).split("\n").length, 2);
   console.log("ok 3 - formatTs / formatLine / formatLines");
 
+  // ---------- 导出元信息头（0.2.64 诊断级）：buildExportMeta ----------
+  const { buildExportMeta } = mod.default ?? mod;
+  const metaBase = {
+    time: "2026-10-27 03:12:33",
+    version: "0.2.64",
+    platform: "win32",
+    arch: "x64",
+    electron: "44.2.0",
+    node: "22.14.0",
+    chrome: "140.0.7339.175",
+    appPath: "C:\\Program Files\\JavScribe",
+    userData: "C:\\Users\\demo\\AppData\\Roaming\\jav-scribe-client",
+    ffmpeg: "C:\\ffmpeg\\bin\\ffmpeg.exe",
+    ffprobe: "C:\\ffmpeg\\bin\\ffprobe.exe",
+    logFiles: ["jav-scribe-2026-10-25.log", "jav-scribe-2026-10-26.log", "jav-scribe-2026-10-27.log"],
+  };
+  // 完整字段固定输出快照：整串相等，锁定键序
+  assert.equal(
+    buildExportMeta(metaBase),
+    [
+      "# JavScribe Client 日志导出",
+      "# time: 2026-10-27 03:12:33",
+      "# version: 0.2.64",
+      "# platform: win32/x64",
+      "# runtime: electron 44.2.0 · node 22.14.0 · chrome 140.0.7339.175",
+      "# app: C:\\Program Files\\JavScribe",
+      "# userData: C:\\Users\\demo\\AppData\\Roaming\\jav-scribe-client",
+      "# ffmpeg: C:\\ffmpeg\\bin\\ffmpeg.exe",
+      "# ffprobe: C:\\ffmpeg\\bin\\ffprobe.exe",
+      "# log files: 3（jav-scribe-2026-10-25.log, jav-scribe-2026-10-26.log, jav-scribe-2026-10-27.log）",
+    ].join("\n"),
+    "完整字段固定输出（键序锁定）",
+  );
+  // logFiles 空 → 该行 `# log files: 0`（无括号）
+  assert.equal(
+    buildExportMeta({ ...metaBase, logFiles: [] }).split("\n").pop(),
+    "# log files: 0",
+    "logFiles 空 → 0（无括号）",
+  );
+  // ffmpeg/ffprobe 找不到 → 调用方传 "未找到"，行内容原样
+  const nf = buildExportMeta({ ...metaBase, ffmpeg: "未找到", ffprobe: "未找到" }).split("\n");
+  assert.equal(nf.length, 10, "固定 10 行");
+  assert.equal(nf[7], "# ffmpeg: 未找到");
+  assert.equal(nf[8], "# ffprobe: 未找到");
+  console.log("ok 4 - buildExportMeta 键序/空 files/未找到");
+
   await rm(tmp, { recursive: true, force: true });
   console.log("log-center.test 全部通过");
 } catch (e) {

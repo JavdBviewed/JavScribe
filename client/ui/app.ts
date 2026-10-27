@@ -7397,7 +7397,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       </div>
     </section>
     <section class="cfg-sec cc-card" data-sec="ccfg-logs">
-      <h4 class="cfg-sec-title">日志中心<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">主进程 / 页面 / 内嵌 serve 日志（内存环 2 万条 + 每日文件留 3 天）</span></h4>
+      <h4 class="cfg-sec-title">日志中心<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">主进程 / 页面 / 内嵌 serve 日志（内存环 2 万条 + 每日文件留 7 天）</span></h4>
       <div class="cfg-sec-body">
         <div class="cfg-row"><span class="cfg-lab">来源</span>
         <select id="cc-logs-source" class="mono"><option value="all">全部</option><option value="main">主进程</option><option value="ui">页面</option><option value="serve">内嵌 serve</option></select></div>
