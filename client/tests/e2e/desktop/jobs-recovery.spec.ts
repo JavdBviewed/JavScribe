@@ -6,6 +6,8 @@
 //   S4 「历史清理」对话框：完成+中断两类实时计数、勾选清理、toast + 服务端 fan-out
 //   S5 全中断主任务组：组级 [重跑全部][清除]，ledger-clear 清组（batches.json 同步删）
 //   S6 工具条「N 中断 · 重跑」：批量重跑中断行 + toast 汇总
+//   S7 0.2.65 全局暂停闸：暂停中点重跑只提示不置灰（不挂 main pipelineGateWait 死等），
+//      全中断行下「继续任务」按钮恒可见（解除死局），继续后重跑正常
 // 构造口径（与 ledger.spec 一致）：提交 → mockJobs 落账 → 优雅 app.close()（触发 pagehide
 // 迁移，非终态账本子行落「中断」+ reason「客户端退出，任务链路断开」；启动迁移幂等不
 // 覆盖）→ mockReset（模拟客户端停机期间 serve 重启丢任务）→ 同 userData 重启。不可
@@ -22,6 +24,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const LEDGER_KEY = "javweb_dispatch_ledger_v1";
+
+/** renderer 侧 t-call 助手（返回原始结果对象；S7 暂停/继续走 IPC 直调；同 pause-all.spec 口径） */
+const icall = (page: any, method: string, ...args: string[]) =>
+  page.evaluate(async ([m, a]: [string, string[]]) => {
+    const r = await (window as any).javDesktop.call(m, a);
+    return { ok: r.ok, data: r.data, error: r.error, network: r.network };
+  }, [method, args]);
 
 /** 假 ffmpeg（同 ledger.spec 口径：每帧 0.6s × 5 帧 ≈ 3s 提取）——S5 走 400 回退上传链需要 */
 function makeFakeFfmpeg(): { dir: string; bin: string } {
@@ -245,6 +254,46 @@ test("S6：工具条「N 中断 · 重跑」——批量重跑中断行 + toast 
     await btn.click();
     await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 60_000 });
     // 重新提交落 mock；中断态清零；旧账本条目删除（mock /reset 清 seq → id 复用 000001，同 S3 口径）
+    await expect.poll(async () => (await mockJobs(request)).length, { timeout: 60_000 }).toBe(1);
+    await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(0);
+    expect(await ledgerPkeys(page)).not.toContain(pkey);
+  } finally {
+    await app.close().catch(() => {});
+  }
+});
+
+// 0.2.65：重跑 × 全局暂停死局回归。用户事故链：暂停所有 → 客户端退出（暂停态持久化）→
+// 重启后仅剩中断行（hasActive=false，旧版「继续任务」按钮隐藏）→ 点重跑 → main 管线闸
+// 无限等待 → 按钮永久置灰。断言三点：暂停中点重跑只提示不置灰（无新任务/账本不丢）；
+// 全中断行下「继续任务」恒可见；继续后重跑恢复正常（同 S6 口径）。
+test("S7：0.2.65 全局暂停闸——暂停中重跑只提示不卡死，继续按钮恒可见，继续后重跑正常", async ({ userData, request }) => {
+  const { app, page, pkeys } = await setupInterrupted(request, userData, "S7", { all: false });
+  const pkey = pkeys[0];
+  try {
+    await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(1, { timeout: 20_000 });
+
+    // IPC 直调暂停（复刻用户事故：此时看板仅中断行，旧版暂停按钮隐藏，用户无感）
+    expect((await icall(page, "pauseAll", "true")).ok).toBe(true);
+
+    // 0.2.65：暂停中「继续任务」恒可见（即使全行中断、无在途）
+    const pauseBtn = page.locator("#job-pause-all");
+    await expect(pauseBtn).toBeVisible({ timeout: 30_000 });
+    await expect(pauseBtn).toHaveText("▶ 继续任务", { timeout: 30_000 });
+
+    // 暂停中点「N 中断 · 重跑」：提示后立即返回——按钮不置灰、不产生新任务、账本不丢
+    const btn = page.locator("#job-rerun-interrupted");
+    await expect(btn).toBeVisible();
+    await btn.click();
+    await expect(page.locator("#toasts .toast.err", { hasText: "全局暂停中" })).toBeVisible({ timeout: 10_000 });
+    await expect(btn).toBeEnabled({ timeout: 5_000 });
+    await expect.poll(async () => (await mockJobs(request)).length, { timeout: 5_000 }).toBe(0);
+    expect(await ledgerPkeys(page)).toContain(pkey);
+
+    // UI 按钮继续 → 重跑恢复正常（同 S6 口径：新 job 落 mock、中断清零、旧账本条目删除）
+    await pauseBtn.click();
+    await expect(page.locator("#toasts .toast.ok").last()).toContainText("已继续");
+    await btn.click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 60_000 });
     await expect.poll(async () => (await mockJobs(request)).length, { timeout: 60_000 }).toBe(1);
     await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(0);
     expect(await ledgerPkeys(page)).not.toContain(pkey);

@@ -930,6 +930,21 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // ---------- 0.2.57 中断账本行重跑（ghost-retry 同款路径） ----------
   // 中断 = 客户端退出/重启、任务链路断开、服务端在途必丢 → 重跑 = 重新提取音轨 → 上传 → 提交；
   // 原引擎在线且路径是视频 → /scan/submit 回原引擎（服务端音轨缓存可能仍在）；否则本机链。
+  /** 0.2.65 全局暂停判定（重跑入口门控）：新鲜度优先 main client-config.json 的 pipeline_paused
+   *（本地 IPC 直读，main 管线闸的暂停态真源），失败/缺字段回落 5s 快照 state._summary.paused_all。
+   * 重跑链的上传/提取走 main pipelineGateWait——暂停期间无限等待（无超时无事件）：0.2.57 重跑
+   * 早于 0.2.59 全局暂停闸上线，正常派发三入口（单文件/文件夹/扫描）均 renderer 门控而重跑漏网，
+   * 暂停中点重跑 = 按钮置灰永久不恢复。 */
+  async function pipelinePausedNow(): Promise<boolean> {
+    try {
+      const fn = t.getClientConfig;
+      if (typeof fn === "function") {
+        const cfg = await fn.call(t);
+        if (cfg && typeof cfg.pipeline_paused === "boolean") return cfg.pipeline_paused;
+      }
+    } catch { /* IPC 异常：回落快照 */ }
+    return !!state._summary?.paused_all;
+  }
   async function rerunLedgerChild(c: LedgerChild): Promise<{ ok: boolean; error?: string }> {
     const vp = c.file_path || "";
     if (!vp) return { ok: false, error: "源文件路径未记录" };
@@ -938,6 +953,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       try { exists = await t.fsExists(vp); } catch { exists = false; }
       if (!exists) return { ok: false, error: "源文件已不存在（可能移动/删除）" };
     }
+    // 0.2.65 全局暂停闸：暂停中不允许重跑（按钮已 toast 提示；此处逐子新鲜复查，覆盖批量
+    // 重跑中途切暂停的竞态——后续子任务快速失败带明确文案，而非挂在 main 管线闸）
+    if (await pipelinePausedNow()) return { ok: false, error: "全局暂停中：点「继续任务」后再重跑" };
     const name = c.videoName;
     const origOnline = !!c.engine && state.engines.some((e) => e.name === c.engine && e.online);
     const engine = origOnline ? c.engine! : (resolveAutoEngine() || "");
@@ -1010,6 +1028,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const c = ledger.children[pkey];
     if (!c) { refresh(); return; }
     if (!c.file_path) { toast("源文件路径未记录：请重新扫描该文件并提交", "err"); return; }
+    if (await pipelinePausedNow()) { toast("全局暂停中：点「继续任务」后再重跑", "err"); return; }
     btn.disabled = true;
     try {
       const res = await rerunLedgerChild(c);
@@ -1038,6 +1057,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
 
   ($("job-rerun-interrupted") as HTMLButtonElement | null)?.addEventListener("click", async () => {
     if (state.busy) { toast("有正在进行的提交任务，请完成后再试", "err"); return; }
+    // 0.2.65：暂停中不置灰直接提示（重跑链会在 main 管线闸无限等待，置灰即永久卡死）
+    if (await pipelinePausedNow()) { toast("全局暂停中：点「继续任务」后再重跑", "err"); return; }
     const btn = $("job-rerun-interrupted") as HTMLButtonElement;
     btn.disabled = true;
     try {
@@ -3082,8 +3103,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const hasActive = rows.some(
       (r) => r.status === "running" || r.status === "pending" || r.status === "paused" || r.paused,
     );
-    if (!hasActive) { btn.hidden = true; return; }
     const pausedAll = !!state._summary?.paused_all;
+    // 0.2.65：全局暂停中按钮恒可见（hasActive 豁免）——暂停态持久化跨重启（pipeline_paused），
+    // 重启后看板只剩「中断」行（不计 hasActive）时旧逻辑会把「继续任务」隐藏，用户无解除
+    // 入口，而重跑/新提交在 main 管线闸无限等待 → 死局（10-28-javscribe-rerun-pause-hang）
+    if (!hasActive && !pausedAll) { btn.hidden = true; return; }
     btn.hidden = false;
     btn.classList.toggle("on", pausedAll);
     const label = pausedAll ? "▶ 继续任务" : "⏸ 暂停所有";
@@ -5330,8 +5354,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       let t0: number | null = null;
       void (async () => {
         // 链层暂停闸（主任务暂停）：等待放行后才进提取池——不占池槽、不起 ffmpeg；
-        // 等待期间被取消则立即收口（行落「跳过」）
-        if (batchId) {
+        // 等待期间被取消则立即收口（行落「跳过」）。
+        // 0.2.65：仅行 sink（实现 holdWhilePaused，行可显「已暂停」）参与保持；pipelineSink
+        //（重跑/临时链）abort 恒 false，原实现批次暂停时在此无限等待 → 重跑按钮卡灰
+        if (batchId && s.holdWhilePaused) {
           while (pausedBatches.has(batchId) && !s.abort()) {
             await new Promise((r2) => setTimeout(r2, 500));
           }
@@ -5379,6 +5405,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           s.fail(d.error, 2);
           resolve([false, { error: d.network ? "音频上传失败（网络错误）" : d.error } as UploadStatus]);
         }
+      }).catch((e: unknown) => {
+        // 0.2.65：同 serverUpload——IPC reject 落失败结局，不悬挂
+        const msg = "音频上传失败：" + String((e as Error)?.message || e);
+        s.fail(msg, 2);
+        resolve([false, { error: msg } as UploadStatus]);
       });
     });
   }
@@ -5401,6 +5432,12 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           s.fail(d.error, 1);
           resolve([false, { error: d.network ? "上传失败（网络错误）" : d.error }]);
         }
+      }).catch((e: unknown) => {
+        // 0.2.65：IPC reject（main 进程死亡/窗口销毁等）→ 落失败结局收口，
+        // 不把派发链变成永不 settle 的「按钮永久置灰」黑洞
+        const msg = "上传失败：" + String((e as Error)?.message || e);
+        s.fail(msg, 1);
+        resolve([false, { error: msg }]);
       });
     });
   }
@@ -5438,7 +5475,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
           }
           if (!r || "skipped" in r) {
             if (state.extractMode === "local") {
-              const msg = "文件超过 1.6GB，无法在浏览器本地提取";
+              // 0.2.65：重跑 0 字节 shim 也走此分支（desktop MAX=Infinity，skipped 仅可能 size<=0）
+              const msg = f.size <= 0
+                ? "源文件为空，无法本机提取"
+                : "文件超过 1.6GB，无法在浏览器本地提取";
               s.fail(prefix + msg, 1);
               return [false, { error: msg }];
             }
