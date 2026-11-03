@@ -14,26 +14,28 @@ test("桌面壳结构（frameless 标题栏 + 侧边栏导航 + 默认视图 dis
   await expect(page.locator(".tb-logo")).toBeVisible();
   await expect(page.locator(".tb-app")).toHaveText("JavScribe Client");
   for (const id of ["win-min", "win-max", "win-close"]) await expect(page.locator(`#${id}`)).toBeVisible();
-  // 侧边栏四视图导航（顺序：10-18 应用户要求再交换 → 字幕服务 / 生成字幕 / 字幕任务 / 设置）
+  // 侧边栏五视图导航（顺序：字幕服务 / 生成字幕 / 字幕任务 / 设置 / 日志；日志 0.2.66 由设置页升为一级视图）
   await expect(page.locator("#nav")).toBeVisible();
   const navLabels = page.locator("#nav .view-tab > span:not(.nav-badge)");
-  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务", "设置"]);
-  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs", "ccfg"]);
+  expect(await navLabels.evaluateAll((els) => els.map((e) => e.textContent))).toEqual(["字幕服务", "生成字幕", "字幕任务", "设置", "日志"]);
+  expect(await page.locator("#nav .view-tab").evaluateAll((els) => els.map((e) => e.dataset.view))).toEqual(["engines", "dispatch", "jobs", "ccfg", "logs"]);
   // 默认视图 = dispatch（新 userData，localStorage 空）
   await expect(page.locator(".view-tab[data-view=dispatch]")).toHaveClass(/on/);
   await expect(page.locator("#sec-dispatch")).toHaveClass(/view-on/);
   await expect(page.locator("#sec-engines")).not.toHaveClass(/view-on/);
   await expect(page.locator("#sec-jobs")).not.toHaveClass(/view-on/);
   const sections = await page.locator("main > section").evaluateAll((els) => els.map((e) => e.id));
-  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg"]);
+  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg", "sec-logs"]);
   await expect(page.locator("#sec-engines h2")).toHaveText("字幕服务");
   await expect(page.locator("#sec-dispatch h2")).toHaveText("生成字幕");
   await expect(page.locator("#sec-jobs h2")).toHaveText("字幕任务");
   await expect(page.locator("#sec-ccfg h2")).toHaveText("设置");
+  await expect(page.locator("#sec-logs h2")).toHaveText("日志中心");
   await expect(page.locator("#sec-engines .kicker")).toHaveText("Services");
   await expect(page.locator("#sec-dispatch .kicker")).toHaveText("Generate");
   await expect(page.locator("#sec-jobs .kicker")).toHaveText("Tasks");
   await expect(page.locator("#sec-ccfg .kicker")).toHaveText("Settings");
+  await expect(page.locator("#sec-logs .kicker")).toHaveText("Logs");
 });
 
 test("默认启动（无 --remote-debug）调试端口未监听：9222/9223 ECONNREFUSED", async ({ page }) => {

@@ -1212,7 +1212,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   let viewBadge: (n: number) => void = () => {};
 
   // web 壳顶部视图 tab 钩子：desktop 形态恒空操作（桌面用侧边栏）
-  let webShowView: (v: "dispatch" | "jobs" | "engines" | "ccfg") => void = () => {};
+  let webShowView: (v: "dispatch" | "jobs" | "engines" | "ccfg" | "logs") => void = () => {};
 
   // 文件夹监听「设置 → 客户端」钩子：桌面形态由 watch 块接线（与派单页监听面板同一数据源）；web 形态恒 null
   let ccWatchCtl: {
@@ -7270,8 +7270,6 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   let ccViewSeq = 0;
-  // 0.2.62 日志中心自动刷新 timer（renderCcView 每次激活重渲染 → 重入前清旧；离开 ccfg 视图清）
-  let ccLogsTimer: number | null = null;
   async function renderCcView(): Promise<void> {
     const body = $("cc-body");
     if (!body) return;
@@ -7436,28 +7434,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         <span class="cfg-foot-actions"><button type="button" class="btn" id="cc-watch-toggle"${ws && ws.paths.length ? "" : " disabled"}>${ws && ws.enabled ? "停止监听" : "开始监听"}</button></span>
       </div>
     </section>
-    <section class="cfg-sec cc-card" data-sec="ccfg-logs">
-      <h4 class="cfg-sec-title">日志中心<span class="cc-only-badge">仅桌面</span><span class="cfg-sec-desc">主进程 / 页面 / 内嵌 serve 日志（内存环 2 万条 + 每日文件留 7 天）</span></h4>
-      <div class="cfg-sec-body">
-        <div class="cfg-row"><span class="cfg-lab">来源</span>
-        <select id="cc-logs-source" class="mono"><option value="all">全部</option><option value="main">主进程</option><option value="ui">页面</option><option value="serve">内嵌 serve</option></select></div>
-        <div class="cfg-row"><span class="cfg-lab">最低级别</span>
-        <select id="cc-logs-level" class="mono"><option value="">全部</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select></div>
-        <div class="cfg-row"><span class="cfg-lab">关键词</span>
-        <input id="cc-logs-q" class="mono" type="text" placeholder="大小写不敏感子串；留空不过滤" spellcheck="false" autocomplete="off">
-        <label class="chk-row"><input type="checkbox" id="cc-logs-auto"><span>自动刷新（2s）</span></label></div>
-      </div>
-      <pre id="cc-logs-out" class="cc-logs-pre"></pre>
-      <div class="ccfg-foot">
-        <span class="cfg-foot-note" id="cc-logs-note"></span>
-        <span class="cfg-foot-actions">
-          <button type="button" class="btn" id="cc-logs-refresh">刷新</button>
-          <button type="button" class="btn" id="cc-logs-copy">复制</button>
-          <button type="button" class="btn" id="cc-logs-export">导出</button>
-          <button type="button" class="btn" id="cc-logs-clear">清空</button>
-        </span>
-      </div>
-    </section>`;
+    `;
     }
     html += "</div>"; // cc-cards
     html += `
@@ -7704,93 +7681,150 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         ccWatchRenderBits(ctl.state()); // 初始化目录行 + 状态（模板占位为空）
       }
     }
-    // 桌面专属：日志中心（0.2.62；环在 main 进程，页面只做过滤 + 展示）
-    const logsOut = $("cc-logs-out") as HTMLPreElement | null;
-    if (logsOut) {
-      const logsBridge = (window as unknown as {
-        javDesktop?: { logs?: {
-          tail(p?: { source?: string; level?: string; q?: string; limit?: number }): Promise<{ lines: string[]; total: number; truncated: boolean; serveLogPath: string | null }>;
-          export(): Promise<string | null>;
-          clear(): Promise<{ ok: boolean }>;
-        } };
-      }).javDesktop?.logs;
-      if (logsBridge) {
-        const srcEl = $("cc-logs-source") as HTMLSelectElement;
-        const lvEl = $("cc-logs-level") as HTMLSelectElement;
-        const qEl = $("cc-logs-q") as HTMLInputElement;
-        const autoEl = $("cc-logs-auto") as HTMLInputElement;
-        const noteEl = $("cc-logs-note") as HTMLElement;
-        const loadLogs = async (): Promise<void> => {
-          if (!logsOut.isConnected) return; // 视图已切走：停止
-          try {
-            const r = await logsBridge.tail({
-              source: srcEl.value,
-              level: lvEl.value || undefined,
-              q: qEl.value || undefined,
-              limit: 2000,
-            });
-            if (!logsOut.isConnected) return;
-            logsOut.textContent = r.lines.join("\n") || "（无日志）";
-            const bits = [`环 ${r.total} 条`];
-            if (r.truncated) bits.push("仅尾部");
-            if (r.serveLogPath) bits.push(`serve 文件 ${r.serveLogPath}`);
-            noteEl.textContent = bits.join(" · ");
-          } catch {
-            if (logsOut.isConnected) { logsOut.textContent = "（日志读取失败）"; noteEl.textContent = ""; }
-          }
-        };
-        // 重渲染前先清旧 timer（ccLogsTimer 为外层变量，跨渲染存活）
-        if (ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
-        const syncAuto = (): void => {
-          if (ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
-          if (autoEl.checked) ccLogsTimer = window.setInterval(() => void loadLogs(), 2000);
-        };
-        autoEl.addEventListener("change", syncAuto);
-        const refreshBtn = $("cc-logs-refresh") as HTMLButtonElement;
-        refreshBtn.addEventListener("click", () => void loadLogs());
-        const copyBtn = $("cc-logs-copy") as HTMLButtonElement;
-        copyBtn.addEventListener("click", () => {
-          void navigator.clipboard?.writeText(logsOut.textContent || "").then(
-            () => toast("日志已复制到剪贴板", "ok"),
-            () => toast("复制失败", "err"),
-          );
-        });
-        const exportBtn = $("cc-logs-export") as HTMLButtonElement;
-        exportBtn.addEventListener("click", async () => {
-          const p = await logsBridge.export();
-          if (p) toast(`已导出：${p}`, "ok");
-        });
-        const clearBtn = $("cc-logs-clear") as HTMLButtonElement;
-        clearBtn.addEventListener("click", async () => {
-          await logsBridge.clear();
-          toast("已清空内存环（文件历史保留）", "ok");
-          void loadLogs();
-        });
-        void loadLogs();
-        syncAuto();
-      } else {
-        logsOut.closest(".cc-card")?.remove(); // 无 logs 字段（桌面形态恒有，兜底防呆）
+  }
+
+  // ---------- 日志中心独立页（0.2.66：设置页卡片 → 侧边栏一级视图；环仍在 main 进程，页面做过滤 + 展示） ----------
+  type LogsBridge = {
+    tail(p?: { source?: string; level?: string; q?: string; limit?: number }): Promise<{ lines: string[]; total: number; truncated: boolean; serveLogPath: string | null }>;
+    export(): Promise<string | null>;
+    clear(): Promise<{ ok: boolean }>;
+  };
+  const logsBridge: LogsBridge | null =
+    (window as unknown as { javDesktop?: { logs?: LogsBridge } }).javDesktop?.logs ?? null;
+  const logsEl: HTMLElement | null = platform.kind === "desktop" ? $("logs-out") : null;
+  let logsTimer: number | null = null;
+  let logsLastLines: string[] = [];
+  // 逐行着色：分隔头（──）/ 级别；对 serve 行无时间戳的格式亦稳健
+  const logLineClass = (line: string): string => {
+    if (line.startsWith("──")) return "log-sec";
+    if (line.includes("[error]")) return "log-err";
+    if (line.includes("[warn]")) return "log-warn";
+    if (line.includes("[debug]")) return "log-dbg";
+    return "log-info";
+  };
+  const renderLogLines = (lines: string[]): void => {
+    if (!logsEl) return;
+    const atBottom = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 48;
+    logsEl.replaceChildren(
+      ...lines.map((l) => {
+        const d = document.createElement("div");
+        d.className = `log-line ${logLineClass(l)}`;
+        d.textContent = l;
+        return d;
+      }),
+    );
+    // 用户已在底部 → 自动吸附；否则保留当前滚动位置
+    if (atBottom || lines.length === 0) logsEl.scrollTop = logsEl.scrollHeight;
+  };
+  const renderLogStats = (lines: string[], truncated: boolean): void => {
+    const s = $("logs-stats");
+    if (!s) return;
+    let err = 0, warn = 0;
+    for (const l of lines) {
+      if (l.includes("[error]")) err++;
+      else if (l.includes("[warn]")) warn++;
+    }
+    const mk = (txt: string, cls: string): HTMLSpanElement => {
+      const sp = document.createElement("span");
+      sp.className = cls ? `stat ${cls}` : "stat";
+      sp.textContent = txt;
+      return sp;
+    };
+    s.replaceChildren(
+      mk(`error ${err}`, err > 0 ? "stat-hot" : ""),
+      mk(`warn ${warn}`, warn > 0 ? "stat-warm" : ""),
+      mk(truncated ? `尾部 ${lines.length} 条` : `${lines.length} 条`, ""),
+    );
+  };
+  const loadLogs = async (): Promise<void> => {
+    if (!logsBridge || !logsEl || !logsEl.isConnected) return;
+    const srcEl = $("logs-source") as HTMLSelectElement | null;
+    const lvEl = $("logs-level") as HTMLSelectElement | null;
+    const qEl = $("logs-q") as HTMLInputElement | null;
+    try {
+      const r = await logsBridge.tail({
+        source: srcEl?.value ?? "all",
+        level: lvEl?.value || undefined,
+        q: qEl?.value || undefined,
+        limit: 2000,
+      });
+      if (!logsEl.isConnected) return;
+      logsLastLines = r.lines;
+      renderLogLines(r.lines.length ? r.lines : ["（无日志）"]);
+      renderLogStats(r.lines, r.truncated);
+      const noteEl = $("logs-note") as HTMLElement | null;
+      if (noteEl) {
+        const bits = [`环 ${r.total} 条`];
+        if (r.serveLogPath) bits.push(`serve 文件 ${r.serveLogPath}`);
+        noteEl.textContent = bits.join(" · ");
+      }
+    } catch {
+      if (logsEl.isConnected) {
+        logsLastLines = [];
+        renderLogLines(["（日志读取失败）"]);
+        renderLogStats([], false);
+        const noteEl = $("logs-note") as HTMLElement | null;
+        if (noteEl) noteEl.textContent = "";
       }
     }
-  }
+  };
+  const stopLogsPolling = (): void => {
+    if (logsTimer !== null) { clearInterval(logsTimer); logsTimer = null; }
+  };
+  const startLogsPolling = (): void => {
+    stopLogsPolling();
+    const autoEl = $("logs-auto") as HTMLInputElement | null;
+    if (autoEl?.checked) logsTimer = window.setInterval(() => void loadLogs(), 2000);
+  };
+  const initLogsView = (): void => {
+    if (!logsEl || !logsBridge) return; // web 形态无桥：导航入口已移除，此视图不可达
+    const autoEl = $("logs-auto") as HTMLInputElement | null;
+    autoEl?.addEventListener("change", () => { if (currentView === "logs") startLogsPolling(); });
+    const srcEl = $("logs-source") as HTMLSelectElement | null;
+    srcEl?.addEventListener("change", () => void loadLogs());
+    const lvEl = $("logs-level") as HTMLSelectElement | null;
+    lvEl?.addEventListener("change", () => void loadLogs());
+    const qEl = $("logs-q") as HTMLInputElement | null;
+    qEl?.addEventListener("input", () => void loadLogs()); // 关键词边输边过滤
+    ($("logs-refresh") as HTMLButtonElement | null)?.addEventListener("click", () => void loadLogs());
+    ($("logs-copy") as HTMLButtonElement | null)?.addEventListener("click", () => {
+      void navigator.clipboard?.writeText(logsLastLines.join("\n")).then(
+        () => toast("日志已复制到剪贴板", "ok"),
+        () => toast("复制失败", "err"),
+      );
+    });
+    ($("logs-export") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+      const p = await logsBridge.export();
+      if (p) toast(`已导出：${p}`, "ok");
+    });
+    ($("logs-clear") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+      await logsBridge.clear();
+      toast("已清空内存环（文件历史保留）", "ok");
+      void loadLogs();
+    });
+  };
 
   // ---------- 共享工作台导航 + 平台必要的桌面窗口控制 ----------
   // Web 与 Desktop 使用同一套导航节点、视图状态和交互；桌面只额外保留窗口控制。
-  const VIEWS = ["engines", "dispatch", "jobs", "ccfg"] as const;
+  // 0.2.66：日志中心从设置页升为侧边栏一级视图「日志」（仅桌面形态：日志环在 main 进程，web 无桥）
+  const VIEWS = ["engines", "dispatch", "jobs", "ccfg", "logs"] as const;
   type ViewName = (typeof VIEWS)[number];
   const secs: Record<ViewName, HTMLElement> = {
-    engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"), ccfg: $("sec-ccfg"),
+    engines: $("sec-engines"), dispatch: $("sec-dispatch"), jobs: $("sec-jobs"), ccfg: $("sec-ccfg"), logs: $("sec-logs"),
   };
+  if (platform.kind !== "desktop") document.querySelector('.view-tab[data-view="logs"]')?.remove(); // web 形态无日志环：入口整体移除
   const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>("#nav .view-tab[data-view]"));
   const navBadge = $("nav-badge") as HTMLElement | null;
   // URL 锚点：hash 是合法 view 名时优先于 localStorage（分享/书签直接定位 tab）
+  // 日志视图仅桌面形态可达（hash / localStorage 残留 logs 时 web 回落 dispatch）
+  const isDesktopView = (v: ViewName): boolean => v !== "logs" || platform.kind === "desktop";
   const hashView = (() => {
     const h = location.hash.replace(/^#/, "");
-    return VIEWS.includes(h as ViewName) ? (h as ViewName) : null;
+    return VIEWS.includes(h as ViewName) && isDesktopView(h as ViewName) ? (h as ViewName) : null;
   })();
   let savedView = "dispatch";
   try { savedView = localStorage.getItem("javview_view") || "dispatch"; } catch { /* 忽略 */ }
-  const initialView: ViewName = hashView || (VIEWS.includes(savedView as ViewName) ? (savedView as ViewName) : "dispatch");
+  const initialView: ViewName = hashView || (VIEWS.includes(savedView as ViewName) && isDesktopView(savedView as ViewName) ? (savedView as ViewName) : "dispatch");
   let currentView: ViewName = initialView;
   // 0.2.49 P6：设置页未保存改动检测 —— 客户端卡 / 服务端表单任一 dirty 即视为脏
   function ccViewDirty(): boolean {
@@ -7804,8 +7838,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 0.2.49 P6：离开设置视图 / 重设已激活的设置 tab 都会整体重渲染（改动静默丢失）→ 先确认
     if (currentView === "ccfg" && ccViewDirty()
       && !window.confirm("设置页有未保存的改动，切换后将丢弃。继续？")) return;
-    // 0.2.62：离开设置视图停日志自动刷新（回到 ccfg 时 renderCcView 重渲染会重挂）
-    if (view !== "ccfg" && ccLogsTimer !== null) { clearInterval(ccLogsTimer); ccLogsTimer = null; }
+    // 0.2.66：进入日志视图立即拉一次 + 按自动刷新勾选起轮询；离开停轮询
+    if (view === "logs") { void loadLogs(); startLogsPolling(); }
+    else if (currentView === "logs") stopLogsPolling();
     for (const v of VIEWS) secs[v].classList.toggle("view-on", v === view);
     for (const item of navItems) {
       const active = item.dataset.view === view;
@@ -7820,6 +7855,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     if (view === "ccfg") void renderCcView(); // 激活即重渲染（取最新值；seq 丢弃过期异步）
   };
+  initLogsView(); // 日志中心独立页控件一次性挂接（幂等；重渲染无关）
   webShowView(initialView);
   for (const item of navItems) {
     item.addEventListener("click", () => webShowView(item.dataset.view as ViewName));
@@ -7827,7 +7863,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   // 外部 hash 变化（浏览器前进/后退、手改地址栏）→ 跟随切 tab
   window.addEventListener("hashchange", () => {
     const h = location.hash.replace(/^#/, "");
-    if (VIEWS.includes(h as ViewName) && h !== currentView) webShowView(h as ViewName);
+    if (VIEWS.includes(h as ViewName) && isDesktopView(h as ViewName) && h !== currentView) webShowView(h as ViewName);
   });
   viewBadge = (n: number) => {
     if (!navBadge) return;

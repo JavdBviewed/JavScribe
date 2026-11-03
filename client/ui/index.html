@@ -33,6 +33,7 @@
     <button type="button" class="view-tab on" data-view="dispatch" role="tab" aria-selected="true"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.75"/><path d="M10.2 9.2v5.6l4.9-2.8z" fill="currentColor" stroke="none"/></svg><span>生成字幕</span></button>
     <button type="button" class="view-tab" data-view="jobs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg><span>字幕任务</span><span id="nav-badge" class="nav-badge" hidden>0</span></button>
     <button type="button" class="view-tab" data-view="ccfg" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="1.9" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="17" r="1.9" fill="currentColor" stroke="none"/></svg><span>设置</span></button>
+    <button type="button" class="view-tab" data-view="logs" role="tab" aria-selected="false"><svg class="tab-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9.5l3 2.75L7 15"/><path d="M12.5 15h4.5"/></svg><span>日志</span></button>
   </nav>
   <div class="nav-up" id="nav-up" hidden>
     <label class="nav-up-auto" title="启用后启动时自动检查新版本（只检查，不自动下载）"><input type="checkbox" id="up-auto"><span>自动更新</span></label>
@@ -284,6 +285,30 @@
       <div class="sec-title"><span class="kicker">Settings</span><h2>设置</h2></div>
     </div>
     <div id="cc-body" class="cc-body"><div class="muted small">加载中…</div></div>
+  </section>
+
+  <section id="sec-logs">
+    <div class="sec-head">
+      <div class="sec-title"><span class="kicker">Logs</span><h2>日志中心</h2></div>
+      <label class="chk-row"><input type="checkbox" id="logs-auto" checked><span>自动刷新（2s）</span></label>
+      <button type="button" class="btn" id="logs-refresh" title="立即拉取一次日志环">刷新</button>
+      <button type="button" class="btn" id="logs-copy" title="复制当前过滤后的日志到剪贴板">复制</button>
+      <button type="button" class="btn" id="logs-export" title="导出全量日志包（元信息头 + 内存环 + 每日文件 + serve 尾）">导出</button>
+      <button type="button" class="btn" id="logs-clear" title="清空内存日志环（每日文件历史保留）">清空</button>
+    </div>
+    <div class="logs-bar">
+      <span class="logs-lab">来源</span>
+      <select id="logs-source" class="mono"><option value="all">全部</option><option value="main">主进程</option><option value="ui">页面</option><option value="serve">内嵌 serve</option></select>
+      <span class="logs-lab">最低级别</span>
+      <select id="logs-level" class="mono"><option value="">全部</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select>
+      <input id="logs-q" class="mono" type="text" placeholder="关键词过滤（大小写不敏感子串；留空不过滤）" spellcheck="false" autocomplete="off">
+      <span id="logs-stats" class="logs-stats" aria-live="polite"></span>
+    </div>
+    <div id="logs-out" class="logs-out mono" role="log" aria-label="日志输出"></div>
+    <div class="logs-foot">
+      <span id="logs-note" class="muted small"></span>
+      <span class="muted small">内存环 2 万条 · 每日文件保留 7 天（userData/logs）</span>
+    </div>
   </section>
 </main>
 

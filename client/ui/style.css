@@ -1849,21 +1849,6 @@ body.desktop main > section.view-on { display: block; }
   padding: 1px 8px; border-radius: 999px;
 }
 /* 0.2.62 日志中心：等宽日志区（卡片内，限高滚动） */
-.cc-logs-pre {
-  margin: 10px 0 0;
-  max-height: 320px;
-  overflow: auto;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--fg);
-}
 .cc-watch-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cc-watch-row #cc-watch-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-card .cfg-row input:not([type="checkbox"]) { width: 100%; max-width: 560px; }
@@ -1998,3 +1983,68 @@ body.desktop main > section.view-on { display: block; }
   .scan-task-actions { justify-content: flex-end; }
   .scan-task-main > span:last-child { white-space: normal; }
 }
+
+/* ---------- 日志中心独立页（0.2.66：设置页卡片 → 侧边栏一级视图） ---------- */
+#sec-logs .sec-head { margin-bottom: 10px; }
+#logs-clear:hover { border-color: var(--err); color: var(--err); background: var(--err-soft); }
+.logs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.logs-lab { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; }
+.logs-bar select { padding: 5px 8px; border-radius: 7px; font-size: 12px; }
+#logs-q { flex: 1 1 180px; min-width: 140px; padding: 5px 10px; border-radius: 7px; font-size: 12px; }
+.logs-stats { display: inline-flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.logs-stats .stat {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.logs-stats .stat-hot { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+.logs-stats .stat-warm { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.logs-out {
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 640px;
+}
+.logs-out .log-line { min-height: 1em; }
+.log-line.log-err { color: var(--err); }
+.log-line.log-warn { color: var(--accent); }
+.log-line.log-dbg { color: var(--muted); }
+.log-line.log-sec { color: var(--fg); font-weight: 700; margin-top: 6px; }
+.log-line.log-info { color: var(--fg); }
+.logs-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+/* 桌面形态：内容区撑满，日志区独立滚动（日志区是页面主体） */
+body.desktop #sec-logs { padding: 16px 0 0; }
+body.desktop #sec-logs.view-on {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+body.desktop #sec-logs .logs-out { flex: 1 1 auto; min-height: 200px; max-height: none; }
