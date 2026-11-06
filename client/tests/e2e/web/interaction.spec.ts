@@ -251,6 +251,40 @@ test("整片上传回退路径（extract-select=server）：上传视频→提�
   await expect(page.locator("#dispatch-status.ok")).toBeVisible();
 });
 
+test("上传已受理但状态查询持续失败：派发退出忙态并保留核对线索", async ({ page, request }) => {
+  await page.route("**/api/uploads/*", (route) => route.abort());
+  await page.selectOption("#extract-select", "server");
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect.poll(async () =>
+    (await (await request.get(`${MOCK_URL}/_mock/uploads`)).json() as unknown[]).length,
+  { timeout: 30_000 }).toBe(1);
+  await expect(page.locator("#dispatch-status.err")).toContainText("核对任务", { timeout: 20_000 });
+  await expect(page.locator("#dispatch-go")).toBeEnabled();
+  await expect(page.locator("#file-chip")).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("javweb_writeback_v1"))).toContain('"videoName":"video-a.mp4"');
+});
+
+test("上传状态标记完成但缺任务 ID：不把未知结果宣称提交成功", async ({ page, request }) => {
+  await page.route("**/api/uploads/*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ phase: "done", progress: 1, job_id: "" }),
+  }));
+  await page.selectOption("#extract-select", "server");
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect.poll(async () =>
+    (await (await request.get(`${MOCK_URL}/_mock/uploads`)).json() as unknown[]).length,
+  { timeout: 30_000 }).toBe(1);
+  await expect(page.locator("#dispatch-status.err")).toContainText("未返回任务 ID", { timeout: 15_000 });
+  await expect(page.locator("#dispatch-go")).toBeEnabled();
+  await expect(page.locator("#file-chip")).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("javweb_writeback_v1"))).toContain('"videoName":"video-a.mp4"');
+});
+
 test("文件夹批量：待选表手动勾选 → 顺序流水线 1/2 → 批量完成", async ({ page }) => {
   await page.setInputFiles("#folder", FIXTURES); // webkitdirectory：传目录，相对路径自动带上
   // 夹具小文件均低于默认「忽略小于 200MB」→ 默认 0 勾选，待选表 3 行

@@ -19,7 +19,7 @@ import {
   mockJobs, mockReset, mockSeed, mockSpeed,
 } from "./helpers";
 import type { Page } from "@playwright/test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,8 @@ function makeFakeFfmpeg(): { dir: string; bin: string } {
   const bin = join(dir, "ffmpeg");
   const lines = [
     "#!/bin/bash",
+    `touch "${join(dir, "started")}"`,
+    `while test -e "${join(dir, "hold")}"; do sleep 0.1; done`,
     'out="${@: -1}"',
     "printf 'Duration: 00:00:10.00, start: 0.000000, bitrate: 128 kb/s\\n' >&2",
     "printf 'size= 10kB time=00:00:02.00 bitrate=40.0kbits/s speed=0.6x \\r' >&2; sleep 0.6",
@@ -260,6 +262,98 @@ test("S6：工具条「N 中断 · 重跑」——批量重跑中断行 + toast 
   } finally {
     await app.close().catch(() => {});
   }
+});
+
+test("S8：服务读不到本机路径时，中断重跑必须本机提取音轨，不上传整片", async ({ userData, request }) => {
+  const ff = makeFakeFfmpeg();
+  try {
+    const { app, page, pkeys } = await setupInterrupted(request, userData, "S8", { all: false, ffBin: ff.bin });
+    try {
+      await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(1, { timeout: 20_000 });
+      await page.locator("#job-rerun-interrupted").click();
+      await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 70_000 });
+      await expect.poll(async () => (await mockJobs(request)).length, { timeout: 30_000 }).toBe(1);
+      await expect(page.locator("#job-rerun-interrupted")).toBeHidden({ timeout: 15_000 });
+      expect(await ledgerPkeys(page)).not.toContain(pkeys[0]);
+      const uploads = await (await request.get("http://127.0.0.1:8302/_mock/uploads")).json() as Array<{ ext: string }>;
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0].ext).toBe("opus"); // 旧实现走 mp4 整片上传
+    } finally { await app.close().catch(() => {}); }
+  } finally { rmSync(ff.dir, { recursive: true, force: true }); }
+});
+
+test("S9：重跑提取中切全局暂停，入口解锁、账本保留，继续后可重试", async ({ userData, request }) => {
+  const ff = makeFakeFfmpeg();
+  try {
+    const { app, page, pkeys } = await setupInterrupted(request, userData, "S9", { all: false, ffBin: ff.bin });
+    try {
+      // setup 阶段可能已缓存音轨；删缓存确保本次重跑确实经过 ffmpeg 与上传前暂停闸。
+      rmSync(join(userData, "audio-cache"), { recursive: true, force: true });
+      rmSync(join(ff.dir, "started"), { force: true });
+      writeFileSync(join(ff.dir, "hold"), "");
+      const btn = page.locator("#job-rerun-interrupted");
+      await btn.click();
+      await expect(btn).toBeDisabled();
+      await expect.poll(() => existsSync(join(ff.dir, "started")), { timeout: 15_000 }).toBe(true);
+      expect((await icall(page, "pauseAll", "true")).ok).toBe(true);
+      rmSync(join(ff.dir, "hold"), { force: true });
+      await expect(page.locator("#toasts .toast.err", { hasText: "全局暂停中" })).toBeVisible({ timeout: 20_000 });
+      await expect(btn).toBeEnabled({ timeout: 10_000 });
+      expect(await ledgerPkeys(page)).toContain(pkeys[0]);
+      expect((await icall(page, "pauseAll", "false")).ok).toBe(true);
+      await btn.click();
+      await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 70_000 });
+      expect(await ledgerPkeys(page)).not.toContain(pkeys[0]);
+    } finally { await app.close().catch(() => {}); }
+  } finally { rmSync(ff.dir, { recursive: true, force: true }); }
+});
+
+test("S10：服务返回 201 但缺任务 ID，不清中断账本且允许再试", async ({ userData, request }) => {
+  const ff = makeFakeFfmpeg();
+  try {
+    const { app, page, pkeys } = await setupInterrupted(request, userData, "S10", { all: false, ffBin: ff.bin });
+    try {
+      rmSync(join(userData, "audio-cache"), { recursive: true, force: true });
+      await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: true } });
+      const btn = page.locator("#job-rerun-interrupted");
+      await btn.click();
+      await expect(page.locator("#toasts .toast.err", { hasText: "任务 ID" })).toBeVisible({ timeout: 30_000 });
+      await expect(btn).toBeEnabled();
+      expect(await ledgerPkeys(page)).toContain(pkeys[0]);
+      expect(await mockJobs(request)).toHaveLength(0);
+      await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: false } });
+      await btn.click();
+      await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 30_000 });
+      expect(await ledgerPkeys(page)).not.toContain(pkeys[0]);
+    } finally { await app.close().catch(() => {}); }
+  } finally { rmSync(ff.dir, { recursive: true, force: true }); }
+});
+
+test("S11：未提交占位行重试须确认任务 ID 后才清占位", async ({ userData, request }) => {
+  const dir = makeScanDir("javscribe-ghost-recovery-S11");
+  const path = join(dir, "AKDL-001.mp4");
+  const key = "mock|pre|AKDL-001.mp4";
+  writeFileSync(join(userData, "writeback.json"), JSON.stringify({
+    jobs: [[key, { info: { engine: "mock", videoName: "AKDL-001.mp4", videoPath: path, dirHandle: null }, at: Date.now() }]],
+    forced: [],
+  }));
+  const app = await launchApp(userData);
+  try {
+    const page = await app.firstWindow();
+    await waitForReady(page);
+    await goView(page, "jobs");
+    const retry = page.locator(".job-row .ghost-retry");
+    await expect(retry).toBeVisible({ timeout: 20_000 });
+    await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: true } });
+    await retry.click();
+    await expect(page.locator("#toasts .toast.err", { hasText: "任务 ID" })).toBeVisible({ timeout: 20_000 });
+    await expect(retry).toBeEnabled();
+    expect(await mockJobs(request)).toHaveLength(0);
+    await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: false } });
+    await retry.click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "已重新提交" })).toBeVisible({ timeout: 20_000 });
+    await expect(retry).toHaveCount(0);
+  } finally { await app.close(); }
 });
 
 // 0.2.65：重跑 × 全局暂停死局回归。用户事故链：暂停所有 → 客户端退出（暂停态持久化）→

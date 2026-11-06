@@ -18,7 +18,7 @@ test("页头与板块顺序", async ({ page }) => {
   await expect(page.locator("header h1")).toHaveText("字幕工作台");
   await expect(page.locator(".brand-sub")).toHaveText("JAVSCRIBE · SUBTITLE CONSOLE");
   const sections = await page.locator("main > section").evaluateAll((els) => els.map((e) => e.id));
-  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg"]);
+  expect(sections).toEqual(["sec-engines", "sec-dispatch", "sec-jobs", "sec-ccfg", "sec-logs"]);
   // 板块先后顺序（09-06 用户指定）：字幕服务 → 生成字幕 → 字幕任务 → 设置（S3 新增独立 tab）
   await expect(page.locator("#sec-engines h2")).toHaveText("字幕服务");
   await expect(page.locator("#sec-dispatch h2")).toHaveText("生成字幕");

@@ -5,7 +5,7 @@
 import type { Transport } from "../core/transport";
 import { LOCAL_SUB_PATTERNS, SRT_SUFFIX, VIDEO_EXTS } from "../core/constants";
 import type { BatchRecord, BulkResult, ClientConfig, ConfigItem, Engine, EngineMetrics, JobRow, JobSummary, MetricsResponse, ReadinessPayload, ScanItem, ScanResult, ScanTaskSnapshot, ServeRelease, UpdateInfo, UploadStatus } from "../core/types";
-import type { AudioCacheHit, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
+import type { AudioCacheHit, JavDesktop, LocalServeState, UpdateSettings, UpdateState, WatchCandidate, WatchState } from "../core/desktop-bridge";
 import type { FolderFile, FolderVideo, PlatformAdapter, WriteBackInfo } from "../core/platform";
 import type { JavExtractAPI } from "./extract";
 import { canStartInFlight, CLIENT_CFG_DEFAULTS, countInFlightRows, ExtractAbortError, freeVramGb, isVramExcluded, normalizeClientConfig, pickAutoEngine } from "../core/concurrency";
@@ -871,6 +871,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   async function ghostRetryCore(g: GhostRow): Promise<{ ok: boolean; error?: string }> {
     const vp = g.videoPath;
     if (!vp) return { ok: false, error: "该任务无本机路径，无法重试" };
+    if (await pipelinePausedNow()) return { ok: false, error: "全局暂停中：点「继续任务」后再重试" };
     const name = g.row.file || "";
     const origOnline = !!g.engine && state.engines.some((e) => e.name === g.engine && e.online);
     const engine = origOnline ? g.engine! : (resolveAutoEngine() || "");
@@ -879,11 +880,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (g.kind === "lost" && g.sourceKind === "local" && origOnline && VIDEO_EXT_RE.test(name)) {
       const r = await submitScanFile(g.engine!, vp, batch);
       if (r.kind === "ok") {
-        if (r.jobId) {
-          rekeyWriteBack(g.engine! + "|" + g.jobId, g.engine! + "|" + r.jobId);
-          registerWriteBack(g.engine! + "|" + r.jobId,
-            { engine: g.engine!, videoName: name, dirHandle: null, videoPath: vp });
-        }
+        if (!r.jobId || r.okFiles <= 0 || r.skipped.includes(vp))
+          return { ok: false, error: "服务未受理文件（未返回有效任务 ID）" };
+        rekeyWriteBack(g.engine! + "|" + g.jobId, g.engine! + "|" + r.jobId);
+        registerWriteBack(g.engine! + "|" + r.jobId,
+          { engine: g.engine!, videoName: name, dirHandle: null, videoPath: vp });
         removeGhost(g);
         return { ok: true };
       }
@@ -892,15 +893,20 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const f = new File([new Blob()], name) as FolderFile;
     f._localPath = vp;
+    (f as FolderFile & { _javRerun: boolean })._javRerun = true;
     try {
+      if (platform.kind === "desktop") {
+        const size = await (window as unknown as { javDesktop: { videoFileSize(p: string): Promise<number | null> } }).javDesktop.videoFileSize(vp);
+        if (!size) return { ok: false, error: "源文件不存在、为空或不可读取" };
+        Object.defineProperty(f, "size", { value: size, configurable: true });
+      }
       const [ok, d] = await dispatchTracked(f, engine, "", batch);
       if (!ok) return { ok: false, error: String((d as { error?: string }).error || "派发失败") };
       const up = d as UploadStatus;
-      if (up.job_id) {
-        const newKey = engine + "|" + up.job_id;
-        rekeyWriteBack(g.kind === "pre" ? g.preKey! : (g.engine! + "|" + g.jobId), newKey);
-        registerWriteBack(newKey, { engine, videoName: name, dirHandle: null, videoPath: vp });
-      }
+      if (!up.job_id) return { ok: false, error: "服务未返回任务 ID；请核对服务任务后再试" };
+      const newKey = engine + "|" + up.job_id;
+      rekeyWriteBack(g.kind === "pre" ? g.preKey! : (g.engine! + "|" + g.jobId), newKey);
+      registerWriteBack(newKey, { engine, videoName: name, dirHandle: null, videoPath: vp });
       removeGhost(g);
       return { ok: true };
     } catch (e) {
@@ -923,8 +929,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       toast(r.ok ? `「${g.row.file}」已重新提交` : `重试失败：${r.error}`, r.ok ? "ok" : "err");
     } catch (e) {
       toast(`重试失败：${(e as Error).message}`, "err");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "↻ 重试";
+      refresh();
     }
-    refresh();
   }
 
   // ---------- 0.2.57 中断账本行重跑（ghost-retry 同款路径） ----------
@@ -948,7 +957,14 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   async function rerunLedgerChild(c: LedgerChild): Promise<{ ok: boolean; error?: string }> {
     const vp = c.file_path || "";
     if (!vp) return { ok: false, error: "源文件路径未记录" };
-    if (typeof t.fsExists === "function") {
+    const desktop = platform.kind === "desktop"
+      ? (window as unknown as { javDesktop?: { videoFileSize?: (p: string) => Promise<number | null> } }).javDesktop
+      : null;
+    let fileSize: number | null = null;
+    if (desktop?.videoFileSize) {
+      try { fileSize = await desktop.videoFileSize(vp); } catch { fileSize = null; }
+      if (fileSize === null) return { ok: false, error: "源文件不存在、为空或不可读取" };
+    } else if (typeof t.fsExists === "function") {
       let exists = false;
       try { exists = await t.fsExists(vp); } catch { exists = false; }
       if (!exists) return { ok: false, error: "源文件已不存在（可能移动/删除）" };
@@ -965,26 +981,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     if (origOnline && VIDEO_EXT_RE.test(name)) {
       const r = await submitScanFile(c.engine!, vp, batch);
       if (r.kind === "ok") {
-        if (r.jobId) {
+        if (r.jobId && r.okFiles > 0 && !r.skipped.includes(vp)) {
           if (c.job_id) rekeyWriteBack(oldKey, c.engine! + "|" + r.jobId);
           registerWriteBack(c.engine! + "|" + r.jobId,
             { engine: c.engine!, videoName: name, dirHandle: null, videoPath: vp });
+          return { ok: true };
         }
-        return { ok: true };
+        return { ok: false, error: "服务未受理文件（未返回有效任务 ID）" };
       }
       if (r.kind === "error") return { ok: false, error: r.message };
       // not-found：服务读不到路径 → 落下面本机链
     }
     const f = new File([new Blob()], name) as FolderFile;
     f._localPath = vp;
+    (f as FolderFile & { _javRerun: boolean })._javRerun = true;
+    if (fileSize !== null) Object.defineProperty(f, "size", { value: fileSize, configurable: true });
     const [ok, d] = await dispatchTracked(f, engine, "", batch);
     if (!ok) return { ok: false, error: String((d as { error?: string }).error || "派发失败") };
     const up = d as UploadStatus;
-    if (up.job_id) {
-      const newKey = engine + "|" + up.job_id;
-      if (c.job_id) rekeyWriteBack(oldKey, newKey);
-      registerWriteBack(newKey, { engine, videoName: name, dirHandle: null, videoPath: vp });
-    }
+    if (!up.job_id) return { ok: false, error: "服务未返回任务 ID；请检查服务状态后再试" };
+    const newKey = engine + "|" + up.job_id;
+    if (c.job_id) rekeyWriteBack(oldKey, newKey);
+    registerWriteBack(newKey, { engine, videoName: name, dirHandle: null, videoPath: vp });
     return { ok: true };
   }
 
@@ -4963,7 +4981,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     try {
       const d = await t.submitScan(engine, [path], subStatus && subStatus[path] ? { [path]: subStatus[path] } : undefined, batch);
       const jobId = d.jobId || "";
-      if (jobId) {
+      if (jobId && Number(d.files) > 0 && !(d.skipped || []).includes(path)) {
         rekeyWriteBack(preKey, engine + "|" + jobId);
         registerWriteBack(engine + "|" + jobId, { engine, videoName: name, dirHandle: null, videoPath: path });
       }
@@ -5446,7 +5464,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   function dispatchOne(f: File, engine: string, labelPrefix?: string, batch?: { id: string; label?: string }, sink?: ChainSink): Promise<DispatchOutcome> {
     const s = sink || pipelineSink();
     const prefix = labelPrefix || "";
-    const mode = effectiveMode(f);
+    const rerun = (f as File & { _javRerun?: boolean })._javRerun === true;
+    const mode = rerun ? "local" : effectiveMode(f);
     const Jav = jav();
     if (mode === "server" && state.extractMode === "auto" && Jav
         && f.size > Jav.MAX_BYTES) {
@@ -5464,7 +5483,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             if (err instanceof ExtractAbortError) s.abort();
             if (s.abort()) return [false, { error: "主任务已取消，未提交服务" }];
             const msg = String((err as Error)?.message || err);
-            if (state.extractMode === "local") {
+            if (state.extractMode === "local" || rerun) {
               s.fail(prefix + msg, 1);
               return [false, { error: msg }];
             }
@@ -5474,7 +5493,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             return serverUpload(f, engine, prefix, batch, s);
           }
           if (!r || "skipped" in r) {
-            if (state.extractMode === "local") {
+            if (state.extractMode === "local" || rerun) {
               // 0.2.65：重跑 0 字节 shim 也走此分支（desktop MAX=Infinity，skipped 仅可能 size<=0）
               const msg = f.size <= 0
                 ? "源文件为空，无法本机提取"
@@ -5531,9 +5550,28 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const s = sink || pipelineSink();
     const prefix = labelPrefix || "";
     let extractT0: number | null = null;
+    let inFlight = false;
+    let failures = 0;
+    const fail = (message: string) => {
+      clearInterval(timer);
+      s.fail(message, 3);
+      onDone([false, { error: message } as UploadStatus]);
+    };
     const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
       let d: UploadStatus;
-      try { d = await t.getUpload(id); } catch (_e) { return; }
+      try {
+        d = await t.getUpload(id);
+        failures = 0;
+      } catch (_e) {
+        if (++failures >= 5) {
+          fail("上传已受理，但状态查询连续失败；请先到字幕任务核对任务，确认未创建后再重试");
+        }
+        return;
+      } finally {
+        inFlight = false;
+      }
       if (d.phase === "extracting") {
         if (extractT0 == null) extractT0 = Date.now() / 1000;
         let meta = `${prefix}提取音频中 · ${Math.round(d.progress * 100)}%`;
@@ -5544,6 +5582,10 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         s.stageDone(2, extractDoneMeta(d.audio_mb));
         s.stage(3, "提交中…", 1, "100%");
       } else if (d.phase === "done") {
+        if (!d.job_id) {
+          fail("上传已受理，但未返回任务 ID；请先到字幕任务核对任务，确认未创建后再重试");
+          return;
+        }
         clearInterval(timer);
         s.done(`任务 ${d.job_id}`, { audioMb: d.audio_mb, jobId: d.job_id == null ? null : String(d.job_id) });
         if (d.cached && platform.kind === "web") toast("服务端已缓存该音轨，免上传", "ok");
@@ -7684,16 +7726,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   // ---------- 日志中心独立页（0.2.66：设置页卡片 → 侧边栏一级视图；环仍在 main 进程，页面做过滤 + 展示） ----------
-  type LogsBridge = {
-    tail(p?: { source?: string; level?: string; q?: string; limit?: number }): Promise<{ lines: string[]; total: number; truncated: boolean; serveLogPath: string | null }>;
-    export(): Promise<string | null>;
-    clear(): Promise<{ ok: boolean }>;
-  };
-  const logsBridge: LogsBridge | null =
-    (window as unknown as { javDesktop?: { logs?: LogsBridge } }).javDesktop?.logs ?? null;
+  const logsBridge: JavDesktop["logs"] | null =
+    (window as unknown as { javDesktop?: { logs?: JavDesktop["logs"] } }).javDesktop?.logs ?? null;
   const logsEl: HTMLElement | null = platform.kind === "desktop" ? $("logs-out") : null;
   let logsTimer: number | null = null;
   let logsLastLines: string[] = [];
+  let logsPage = 1;
+  let logsSeq = 0;
   // 逐行着色：分隔头（──）/ 级别；对 serve 行无时间戳的格式亦稳健
   const logLineClass = (line: string): string => {
     if (line.startsWith("──")) return "log-sec";
@@ -7716,7 +7755,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     // 用户已在底部 → 自动吸附；否则保留当前滚动位置
     if (atBottom || lines.length === 0) logsEl.scrollTop = logsEl.scrollHeight;
   };
-  const renderLogStats = (lines: string[], truncated: boolean): void => {
+  const renderLogStats = (lines: string[]): void => {
     const s = $("logs-stats");
     if (!s) return;
     let err = 0, warn = 0;
@@ -7733,36 +7772,53 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     s.replaceChildren(
       mk(`error ${err}`, err > 0 ? "stat-hot" : ""),
       mk(`warn ${warn}`, warn > 0 ? "stat-warm" : ""),
-      mk(truncated ? `尾部 ${lines.length} 条` : `${lines.length} 条`, ""),
+      mk(`本页 ${lines.length} 条`, ""),
     );
   };
   const loadLogs = async (): Promise<void> => {
     if (!logsBridge || !logsEl || !logsEl.isConnected) return;
+    const seq = ++logsSeq;
     const srcEl = $("logs-source") as HTMLSelectElement | null;
     const lvEl = $("logs-level") as HTMLSelectElement | null;
     const qEl = $("logs-q") as HTMLInputElement | null;
+    const from = ($("logs-from") as HTMLInputElement | null)?.value;
+    const to = ($("logs-to") as HTMLInputElement | null)?.value;
+    if (from && to && from > to) {
+      renderLogLines(["开始日期不能晚于结束日期"]);
+      return;
+    }
     try {
-      const r = await logsBridge.tail({
-        source: srcEl?.value ?? "all",
-        level: lvEl?.value || undefined,
+      const r = await logsBridge.query({
+        source: (srcEl?.value || "all") as "all" | "main" | "ui" | "serve",
+        level: (lvEl?.value || undefined) as "debug" | "info" | "warn" | "error" | undefined,
         q: qEl?.value || undefined,
-        limit: 2000,
+        from: from || undefined,
+        to: to || undefined,
+        page: logsPage,
+        pageSize: Number(($("logs-page-size") as HTMLSelectElement | null)?.value) || 100,
       });
-      if (!logsEl.isConnected) return;
+      if (!logsEl.isConnected || seq !== logsSeq) return;
+      logsPage = r.page;
       logsLastLines = r.lines;
       renderLogLines(r.lines.length ? r.lines : ["（无日志）"]);
-      renderLogStats(r.lines, r.truncated);
+      renderLogStats(r.lines);
       const noteEl = $("logs-note") as HTMLElement | null;
       if (noteEl) {
-        const bits = [`环 ${r.total} 条`];
-        if (r.serveLogPath) bits.push(`serve 文件 ${r.serveLogPath}`);
-        noteEl.textContent = bits.join(" · ");
+        const bits = [`共 ${r.total} 条`, r.truncated ? "大文件仅显示尾部 8MB" : ""];
+        if (r.serveLogPath) bits.push(`serve 文件按修改日归档：${r.serveLogPath}`);
+        noteEl.textContent = bits.filter(Boolean).join(" · ");
       }
+      const pageEl = $("logs-page");
+      if (pageEl) pageEl.textContent = `${r.page} / ${r.pages} 页`;
+      const prev = $("logs-prev") as HTMLButtonElement | null;
+      const next = $("logs-next") as HTMLButtonElement | null;
+      if (prev) prev.disabled = r.page <= 1;
+      if (next) next.disabled = r.page >= r.pages;
     } catch {
-      if (logsEl.isConnected) {
+      if (logsEl.isConnected && seq === logsSeq) {
         logsLastLines = [];
         renderLogLines(["（日志读取失败）"]);
-        renderLogStats([], false);
+        renderLogStats([]);
         const noteEl = $("logs-note") as HTMLElement | null;
         if (noteEl) noteEl.textContent = "";
       }
@@ -7774,18 +7830,26 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   const startLogsPolling = (): void => {
     stopLogsPolling();
     const autoEl = $("logs-auto") as HTMLInputElement | null;
-    if (autoEl?.checked) logsTimer = window.setInterval(() => void loadLogs(), 2000);
+    if (autoEl?.checked) logsTimer = window.setInterval(() => {
+      if (logsPage === 1 && !($('logs-to') as HTMLInputElement | null)?.value) void loadLogs();
+    }, 2000);
   };
   const initLogsView = (): void => {
     if (!logsEl || !logsBridge) return; // web 形态无桥：导航入口已移除，此视图不可达
     const autoEl = $("logs-auto") as HTMLInputElement | null;
     autoEl?.addEventListener("change", () => { if (currentView === "logs") startLogsPolling(); });
     const srcEl = $("logs-source") as HTMLSelectElement | null;
-    srcEl?.addEventListener("change", () => void loadLogs());
+    const resetLogs = (): void => { logsPage = 1; void loadLogs(); };
+    srcEl?.addEventListener("change", resetLogs);
     const lvEl = $("logs-level") as HTMLSelectElement | null;
-    lvEl?.addEventListener("change", () => void loadLogs());
+    lvEl?.addEventListener("change", resetLogs);
     const qEl = $("logs-q") as HTMLInputElement | null;
-    qEl?.addEventListener("input", () => void loadLogs()); // 关键词边输边过滤
+    qEl?.addEventListener("input", resetLogs);
+    ($("logs-from") as HTMLInputElement | null)?.addEventListener("change", resetLogs);
+    ($("logs-to") as HTMLInputElement | null)?.addEventListener("change", resetLogs);
+    ($("logs-page-size") as HTMLSelectElement | null)?.addEventListener("change", resetLogs);
+    ($("logs-prev") as HTMLButtonElement | null)?.addEventListener("click", () => { logsPage--; void loadLogs(); });
+    ($("logs-next") as HTMLButtonElement | null)?.addEventListener("click", () => { logsPage++; void loadLogs(); });
     ($("logs-refresh") as HTMLButtonElement | null)?.addEventListener("click", () => void loadLogs());
     ($("logs-copy") as HTMLButtonElement | null)?.addEventListener("click", () => {
       void navigator.clipboard?.writeText(logsLastLines.join("\n")).then(
@@ -7801,6 +7865,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       await logsBridge.clear();
       toast("已清空内存环（文件历史保留）", "ok");
       void loadLogs();
+    });
+    ($("logs-clear-history") as HTMLButtonElement | null)?.addEventListener("click", async () => {
+      if (!window.confirm("删除本机每日历史日志文件，并清空当前内存环？此操作不可撤销。")) return;
+      const serve = window.confirm("是否同时清空内嵌服务日志？取消则只删除客户端每日文件。");
+      try {
+        const r = await logsBridge.clearHistory({ serve });
+        toast(`已删除 ${r.deleted} 个每日文件${r.serveCleared ? "，内嵌服务日志已清空" : ""}${r.errors.length ? `；失败：${r.errors.join("、")}` : ""}`, r.errors.length ? "err" : "ok");
+        logsPage = 1;
+        void loadLogs();
+      } catch (e) { toast(`删除日志失败：${(e as Error).message}`, "err"); }
     });
   };
 

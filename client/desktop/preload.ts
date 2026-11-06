@@ -33,6 +33,7 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
     ipcRenderer.invoke("srt-exists", { videoPath, srtName }) as Promise<boolean>,
 
   fileExists: (p: string) => ipcRenderer.invoke("file-exists", p) as Promise<boolean>,
+  videoFileSize: (p: string) => ipcRenderer.invoke("video-file-size", p) as Promise<number | null>,
 
   // 日志中心（0.2.62）：环尾读 / 导出 / 清空
   logs: {
@@ -40,6 +41,10 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
       ipcRenderer.invoke("logs-tail", p) as Promise<import("../core/desktop-bridge").LogTailResult>,
     export: () => ipcRenderer.invoke("logs-export") as Promise<string | null>,
     clear: () => ipcRenderer.invoke("logs-clear") as Promise<{ ok: boolean }>,
+    query: (p: { from?: string; to?: string; source?: "all" | "main" | "ui" | "serve"; level?: "debug" | "info" | "warn" | "error"; q?: string; page: number; pageSize: number }) =>
+      ipcRenderer.invoke("logs-query", p) as Promise<import("../core/desktop-bridge").LogHistoryResult>,
+    clearHistory: (p?: { serve?: boolean }) =>
+      ipcRenderer.invoke("logs-clear-history", p) as Promise<{ deleted: number; serveCleared: boolean; errors: string[] }>,
   },
 
   download: (url: string, filename: string) =>
@@ -54,7 +59,7 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
   },
 
   // 提取进度走 main→renderer 推送事件；按任务 id 过滤（并行提取互不串扰）
-  extractAudio(args: { videoPath?: string; data?: Uint8Array; id?: string }, onProgress?: (frac: number) => void) {
+  extractAudio(args: { videoPath?: string; data?: Uint8Array; id?: string; rerun?: boolean }, onProgress?: (frac: number) => void) {
     const id = args.id || `ext-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const payload = { ...args, id };
     if (onProgress) {
@@ -86,7 +91,7 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
 
 // 上传通道独立于 t-call（main 侧需要对象参数）
 const upload = {
-  audio: (args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) =>
+  audio: (args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }) =>
     ipcRenderer.invoke("upload-audio", args) as Promise<UploadDispatchResult>,
   file: (args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) =>
     ipcRenderer.invoke("upload-file", args) as Promise<UploadDispatchResult>,

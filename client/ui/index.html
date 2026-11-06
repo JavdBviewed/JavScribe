@@ -294,17 +294,28 @@
       <button type="button" class="btn" id="logs-refresh" title="立即拉取一次日志环">刷新</button>
       <button type="button" class="btn" id="logs-copy" title="复制当前过滤后的日志到剪贴板">复制</button>
       <button type="button" class="btn" id="logs-export" title="导出全量日志包（元信息头 + 内存环 + 每日文件 + serve 尾）">导出</button>
-      <button type="button" class="btn" id="logs-clear" title="清空内存日志环（每日文件历史保留）">清空</button>
+      <button type="button" class="btn" id="logs-clear" title="仅清空当前会话内存；磁盘历史不受影响">清内存</button>
+      <button type="button" class="btn" id="logs-clear-history" title="删除本机每日文件日志，需要确认">删除历史</button>
     </div>
     <div class="logs-bar">
       <span class="logs-lab">来源</span>
       <select id="logs-source" class="mono"><option value="all">全部</option><option value="main">主进程</option><option value="ui">页面</option><option value="serve">内嵌 serve</option></select>
       <span class="logs-lab">最低级别</span>
       <select id="logs-level" class="mono"><option value="">全部</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select>
-      <input id="logs-q" class="mono" type="text" placeholder="关键词过滤（大小写不敏感子串；留空不过滤）" spellcheck="false" autocomplete="off">
+      <input id="logs-q" class="mono" type="search" aria-label="搜索日志" placeholder="搜索日志" spellcheck="false" autocomplete="off">
+      <div class="logs-range">
+        <label class="logs-date">从 <input id="logs-from" type="date" aria-label="开始日期"></label>
+        <label class="logs-date">到 <input id="logs-to" type="date" aria-label="结束日期"></label>
+      </div>
       <span id="logs-stats" class="logs-stats" aria-live="polite"></span>
     </div>
     <div id="logs-out" class="logs-out mono" role="log" aria-label="日志输出"></div>
+    <div class="logs-pager" aria-label="日志分页">
+      <button type="button" class="btn" id="logs-prev" title="上一页" aria-label="上一页">&lsaquo;</button>
+      <span id="logs-page" aria-live="polite">1 / 1 页</span>
+      <button type="button" class="btn" id="logs-next" title="下一页" aria-label="下一页">&rsaquo;</button>
+      <label>每页 <select id="logs-page-size" aria-label="每页行数"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option></select></label>
+    </div>
     <div class="logs-foot">
       <span id="logs-note" class="muted small"></span>
       <span class="muted small">内存环 2 万条 · 每日文件保留 7 天（userData/logs）</span>

@@ -1987,6 +1987,13 @@ body.desktop main > section.view-on { display: block; }
 /* ---------- 日志中心独立页（0.2.66：设置页卡片 → 侧边栏一级视图） ---------- */
 #sec-logs .sec-head { margin-bottom: 10px; }
 #logs-clear:hover { border-color: var(--err); color: var(--err); background: var(--err-soft); }
+#logs-clear-history:hover { border-color: var(--err); color: var(--err); background: var(--err-soft); }
+.logs-date { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.logs-range { display: inline-flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.logs-date input { min-width: 135px; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; color-scheme: light dark; }
+.logs-pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; padding: 7px 0; font-size: 12px; }
+.logs-pager select { padding: 4px 6px; border-radius: 4px; }
+.logs-pager .btn { min-width: 30px; padding: 4px 8px; }
 .logs-bar {
   display: flex;
   align-items: center;
@@ -1996,7 +2003,7 @@ body.desktop main > section.view-on { display: block; }
   margin-bottom: 8px;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 6px;
 }
 .logs-lab { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; }
 .logs-bar select { padding: 5px 8px; border-radius: 7px; font-size: 12px; }

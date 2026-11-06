@@ -154,6 +154,15 @@ export interface LogTailResult {
   serveLogPath: string | null;
 }
 
+export interface LogHistoryResult {
+  lines: string[];
+  total: number;
+  page: number;
+  pages: number;
+  truncated: boolean;
+  serveLogPath: string | null;
+}
+
 export interface JavDesktop {
   /** 服务请求（直连 serve 协议，语义等价工作台 /api/*） */
   call(method: string, args?: string[]): Promise<TCallResult>;
@@ -168,12 +177,13 @@ export interface JavDesktop {
   srtExists(videoPath: string, srtName: string): Promise<boolean>;
   /** 只读探测文件是否存在（换服务重跑：恢复任务行的本机源视频路径） */
   fileExists(p: string): Promise<boolean>;
+  videoFileSize(p: string): Promise<number | null>;
   /** srt 保存对话框（手动下载 / 自动下载兜底） */
   download(url: string, filename: string): Promise<FileOpResult>;
   /** renderer File 的真实磁盘路径（对话框选中的文件；合成文件返回 ""） */
   filePath(f: File): string;
   extractAudio(
-    args: { videoPath?: string; data?: Uint8Array; id?: string },
+    args: { videoPath?: string; data?: Uint8Array; id?: string; rerun?: boolean },
     onProgress?: (frac: number) => void,
   ): Promise<ExtractResult>;
   /** 终止在跑本机提取（主任务取消）；ok=false=无匹配任务 */
@@ -192,6 +202,8 @@ export interface JavDesktop {
     export(): Promise<string | null>;
     /** 清空内存环（文件历史保留） */
     clear(): Promise<{ ok: boolean }>;
+    query(p: { from?: string; to?: string; source?: "all" | "main" | "ui" | "serve"; level?: "debug" | "info" | "warn" | "error"; q?: string; page: number; pageSize: number }): Promise<LogHistoryResult>;
+    clearHistory(p?: { serve?: boolean }): Promise<{ deleted: number; serveCleared: boolean; errors: string[] }>;
   };
   /** 订阅上传字节进度；返回取消订阅函数 */
   onTProgress(cb: (p: TProgress) => void): () => void;

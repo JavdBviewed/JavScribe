@@ -98,6 +98,19 @@ test("upload-audio IPC 全链路：opus 字节流 → 201 job → finished → s
   expect((rd as { text: string }).text).toContain("テスト字幕 test-a.mp4");
 });
 
+test("upload-audio 收到无任务 ID 的 201 不算受理", async ({ page, request }) => {
+  await request.post(`${MOCK}/_mock/omit-job-id`, { data: { enabled: true } });
+  try {
+    const r = await page.evaluate(async () => (window as any).javDesktop.upload.audio({
+      id: "missing-id", engine: "mock", name: "missing-id.mp4", data: new Uint8Array([1, 2, 3]),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("任务 ID");
+  } finally {
+    await request.post(`${MOCK}/_mock/omit-job-id`, { data: { enabled: false } });
+  }
+});
+
 test("服务端音轨缓存：同 opus 二次提交免上传（cache/check → upload/submit）", async ({ page, request }) => {
   const opus = readFileSync(fx("sine.opus"));
   const up1 = await page.evaluate(async (p) => {

@@ -47,7 +47,7 @@ function extractAudio(f: File, opts?: ExtractOpts): Promise<Blob | { skipped: tr
     activeExtracts.set(localPath || f.name, { id });
     try {
       const res = localPath
-        ? await desktop.extractAudio({ videoPath: localPath, id }, o?.onProgress)
+        ? await desktop.extractAudio({ videoPath: localPath, id, rerun: (f as File & { _javRerun?: boolean })._javRerun === true }, o?.onProgress)
         : await desktop.extractAudio({ data: new Uint8Array(await f.arrayBuffer()), id }, o?.onProgress);
       if (!res.ok) {
         if (res.cancelled) throw new ExtractAbortError(); // main 侧被 kill（主任务取消）

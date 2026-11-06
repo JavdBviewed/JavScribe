@@ -69,6 +69,7 @@ const state = {
   queuePaused: false,   // 用户面队列暂停（/jobs/pause|resume，与 serve 0.2.3 一致；mock 无队列，冻结全部在途）
   batchPaused: new Set(), // 主任务（batch）暂停标记（/jobs/batch/<id>/pause|resume|cancel；按 batch 冻结晋升，在跑不受影响）
   uploadDelayMs: 0,    // 测试控速：PUT /upload 收到全部字节后延迟应答（桌面端「上传中」帧基线用）
+  omitJobId: false,
   tickMs: 100,
   step: 0.25,           // 每 tick 进度增量（0.25 → ~4s 完成）
   seq: 0,
@@ -318,7 +319,7 @@ const server = http.createServer((req, res) => {
         });
       }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; applyTick(); return send(200, { ok: true }); }
+      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.omitJobId = false; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; applyTick(); return send(200, { ok: true }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -408,6 +409,12 @@ const server = http.createServer((req, res) => {
         return readBody().then((b) => {
           state.uploadDelayMs = (b && JSON.parse(b).ms) || 0;
           return send(200, { ok: true, ms: state.uploadDelayMs });
+        });
+      }
+      if (sub === "omit-job-id") {
+        return readBody().then((b) => {
+          state.omitJobId = !!(b && JSON.parse(b).enabled);
+          return send(200, { ok: true });
         });
       }
       if (sub === "legacy-detail") {
@@ -549,6 +556,7 @@ const server = http.createServer((req, res) => {
         if (declared && declared !== actual) return sendErr(400, "sha1 不匹配");
         state.cache.set(actual, { size: buf.length, ext });
         state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex"), sha1: actual, ext });
+        if (state.omitJobId) return send(201, { ok: true, file: source });
         // 主任务（batch）：query 带 batch → job 归属该主任务，文件 pending 起步（tick 串行晋升；非 batch 保持创建即 running）
         const bId = url.searchParams.get("batch_id") || null;
         const bLabel = url.searchParams.get("batch_label") || null;
@@ -630,6 +638,7 @@ const server = http.createServer((req, res) => {
       // 与真实 serve validate_submit_files 同形，供「提交 400 回退本机提取上传」用例触发）
       const nf = files.find((f) => f.includes("__notfound__"));
       if (nf) return sendErr(400, `文件不存在: ${nf.split("/").pop()}`);
+      if (state.omitJobId) return send(201, { ok: true, files: files.length });
       // 主任务（batch）：body 带 batch → 单 job 多文件 pending 起步（tick 每 job 晋升 1 个，串行；非 batch 保持旧口径）
       const batchId = body.batch_id || null;
       const batchLabel = body.batch_label || null;

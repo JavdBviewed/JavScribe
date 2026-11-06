@@ -45,6 +45,7 @@ import {
   type LogLevel,
   type LogSource,
 } from "../core/log-center";
+import { managedLogName, parseDailyLine, queryHistory, type HistoryLine, type HistoryQuery } from "../core/log-history";
 
 // ---------------------------------------------------------------------------
 // 日志中心（0.2.62）：main 进程 console → 环形缓冲 + daily 文件
@@ -54,14 +55,30 @@ import {
 //   模块顶层装钩：userData 在 app ready 前不可用 → 文件路径懒取，取不到只进环。
 // ---------------------------------------------------------------------------
 const logRing = new LogRing();
-let logDir: string | null = null;
+let logWrites: Promise<void> = Promise.resolve();
+
+function managedLogDir(create = false): string | null {
+  try {
+    const dir = path.join(process.env.JAVSCRIBE_CLIENT_USERDATA || app.getPath("userData"), "logs");
+    if (create && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return fs.lstatSync(dir).isDirectory() ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+function managedDailyFile(dir: string, name: string): boolean {
+  if (!managedLogName(name)) return false;
+  try { return fs.lstatSync(path.join(dir, name)).isFile(); } catch { return false; }
+}
 
 function logFileForToday(): string | null {
   try {
-    if (!logDir) logDir = path.join(app.getPath("userData"), "logs");
+    const dir = managedLogDir(true);
+    if (!dir) return null;
     const d = new Date();
     const p2 = (n: number): string => String(n).padStart(2, "0");
-    return path.join(logDir, `jav-scribe-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}.log`);
+    return path.join(dir, `jav-scribe-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}.log`);
   } catch {
     return null; // app 未 ready：仅入环
   }
@@ -78,7 +95,11 @@ function ringPush(level: LogLevel, src: LogSource, msg: string): void {
   logRing.push(level, src, msg);
   const p = logFileForToday();
   if (p) {
-    try { fs.appendFile(p, formatLine(line) + "\n", () => { /* fire-and-forget */ }); } catch { /* 磁盘错误不阻断主流程 */ }
+    const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0);
+    logWrites = logWrites.then(async () => {
+      if (fs.existsSync(p) && !fs.lstatSync(p).isFile()) return;
+      await fs.promises.appendFile(p, formatLine(line) + "\n", { flag: flags });
+    }).catch(() => { /* 磁盘错误不阻断主流程 */ });
   }
 }
 
@@ -1334,8 +1355,11 @@ function uploadAccept(
   data: unknown,
 ): { ok: true; job_id: string; file: string } | { ok: false; error: string; network?: boolean } {
   if (status === 201) {
-    const d = data as { job_id?: string; file?: string };
-    return { ok: true, job_id: String(d?.job_id || ""), file: String(d?.file || "") };
+    const d = data as { job_id?: unknown; file?: unknown } | null;
+    if (typeof d?.job_id !== "string" || !d.job_id.trim()) {
+      return { ok: false, error: "服务未返回任务 ID（可能已受理，请先核对服务任务）" };
+    }
+    return { ok: true, job_id: d.job_id, file: String(d.file || "") };
   }
   const msg = data && typeof data === "object" && (data as { error?: unknown }).error
     ? String((data as { error?: unknown }).error)
@@ -1868,9 +1892,10 @@ function registerIpc(): void {
 
   // 本地提音轨：videoPath（本机文件）或 data（无路径的 File 字节，e2e setInputFiles 场景）；
   // id = renderer 生成任务 id（进度按 id 回推，防并行提取互串）
-  ipcMain.handle("extract-audio", async (_ev, args: { videoPath?: string; data?: Uint8Array; id?: string }) => {
+  ipcMain.handle("extract-audio", async (_ev, args: { videoPath?: string; data?: Uint8Array; id?: string; rerun?: boolean }) => {
     const id = (args && args.id) || "";
-    await pipelineGateWait(); // 全局暂停闸：暂停期间不开新提取（已开跑阶段不中断）
+    if (args?.rerun && pipelinePaused) return { ok: false, error: "全局暂停中：恢复任务已停止，请继续任务后重试" };
+    if (!args?.rerun) await pipelineGateWait(); // 常规派发仍等待放行；重跑不能无限占用按钮
     return runExtract(args || {}, (frac) => sendToWin("extract-progress", { id, frac }));
   });
 
@@ -1895,8 +1920,9 @@ function registerIpc(): void {
   });
 
   // 音频上传（opus 字节流 → serve /upload?ext=opus，无 key）
-  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
-    await pipelineGateWait(); // 全局暂停闸：暂停期间不提交新任务（先于缓存预检：缓存命中同样会在服务端建任务）
+  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }) => {
+    if (args?.rerun && pipelinePaused) return { ok: false, error: "全局暂停中：恢复任务已停止，请继续任务后重试" };
+    if (!args?.rerun) await pipelineGateWait();
     let opusDir: string | null = null;
     try {
       const entry = engineByName(String(args.engine || ""));
@@ -2106,8 +2132,9 @@ function registerIpc(): void {
     // 诊断级（0.2.64）：导出件自描述（meta 头供 AI 分析）+ 内存环全量 + 每个 daily 文件 + serve 尾
     const listDaily = (): string[] => {
       try {
-        const d = path.join(app.getPath("userData"), "logs");
-        return fs.readdirSync(d).filter((f) => /^jav-scribe-\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort();
+        const d = managedLogDir();
+        if (!d) return [];
+        return fs.readdirSync(d).filter((f) => managedDailyFile(d, f)).sort();
       } catch {
         return []; // userData 不可用（ready 前）：无 daily 文件
       }
@@ -2134,16 +2161,20 @@ function registerIpc(): void {
     const parts: string[] = [meta, sep, `[内存日志环（cap 20000，共 ${ringLines.length} 条）]`];
     if (ringLines.length) parts.push(formatLines(ringLines));
     for (const name of dailyNames) {
-      const fp = path.join(app.getPath("userData"), "logs", name);
+      const dir = managedLogDir();
+      if (!dir) continue;
+      const fp = path.join(dir, name);
       let content = "";
       let big = false;
       try {
         const maxBytes = 2 * 1024 * 1024; // 单文件 >2MB 只取尾部，防导出件膨胀
-        const st = fs.statSync(fp);
+        const st = fs.lstatSync(fp);
+        if (!st.isFile()) continue;
         const use = Math.min(st.size, maxBytes);
         const buf = Buffer.alloc(use);
-        const fd = fs.openSync(fp, "r");
+        const fd = fs.openSync(fp, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
         try {
+          if (!fs.fstatSync(fd).isFile()) continue;
           fs.readSync(fd, buf, 0, use, st.size - use);
         } finally {
           fs.closeSync(fd);
@@ -2194,9 +2225,118 @@ function registerIpc(): void {
     return { ok: true };
   });
 
+  ipcMain.handle("logs-query", async (_ev, raw?: Partial<HistoryQuery>) => {
+    await logWrites;
+    const dateValid = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+    const q: HistoryQuery = {
+      from: dateValid(raw?.from) ? raw.from : undefined,
+      to: dateValid(raw?.to) ? raw.to : undefined,
+      source: ["all", "main", "ui", "serve"].includes(String(raw?.source)) ? raw?.source : "all",
+      level: ["debug", "info", "warn", "error"].includes(String(raw?.level)) ? raw?.level : undefined,
+      q: typeof raw?.q === "string" ? raw.q.slice(0, 200) : "",
+      page: Number(raw?.page) || 1,
+      pageSize: Number(raw?.pageSize) || 100,
+    };
+    const entries: HistoryLine[] = [];
+    let truncated = false;
+    const dir = managedLogDir();
+    let names: string[] = [];
+    if (dir) {
+      try { names = fs.readdirSync(dir).filter((name) => managedDailyFile(dir, name)); } catch { /* 启动时还没有文件 */ }
+    }
+    for (const name of names) {
+      if (!dir) break;
+      const date = name.slice("jav-scribe-".length, -".log".length);
+      if ((q.from && date < q.from) || (q.to && date > q.to)) continue;
+      const fp = path.join(dir, name);
+      try {
+        const st = fs.lstatSync(fp);
+        if (!st.isFile()) continue;
+        const cap = 8 * 1024 * 1024;
+        const offset = Math.max(0, st.size - cap);
+        const buf = Buffer.alloc(st.size - offset);
+        const fd = fs.openSync(fp, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+        try {
+          if (!fs.fstatSync(fd).isFile()) continue;
+          fs.readSync(fd, buf, 0, buf.length, offset);
+        } finally { fs.closeSync(fd); }
+        const lines = buf.toString("utf8").split("\n");
+        if (offset) { lines.shift(); truncated = true; }
+        for (const l of lines) {
+          const parsed = parseDailyLine(l, date);
+          if (parsed) entries.push(parsed);
+        }
+      } catch { truncated = true; }
+    }
+    // 当日文件未创建（启动初期/磁盘写入失败）时用环兜底，不能与每日文件重复计数。
+    const today = new Date();
+    const localDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    if (!names.includes(`jav-scribe-${localDate}.log`)) {
+      for (const l of logRing.tail(0)) {
+        const parsed = parseDailyLine(formatLine(l), localDate);
+        if (parsed) entries.push(parsed);
+      }
+    }
+    const sp = serveLogPath();
+    if (sp && (!q.source || q.source === "all" || q.source === "serve")) {
+      const serve = readServeTail(sp);
+      truncated ||= serve.truncated;
+      const date = new Date(fs.lstatSync(sp).mtimeMs);
+      const serveDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      for (const line of serve.lines) {
+        const parsed = parseDailyLine(line, serveDate);
+        if (parsed) entries.push({ ...parsed, text: `[serve · 文件日期 ${serveDate}] ${line}`, source: "serve" });
+      }
+    }
+    return { ...queryHistory(entries, q), truncated, serveLogPath: sp };
+  });
+
+  ipcMain.handle("logs-clear-history", async (_ev, opts?: { serve?: boolean }) => {
+    await logWrites;
+    const dir = managedLogDir();
+    let deleted = 0;
+    const errors: string[] = [];
+    try {
+      for (const name of dir ? fs.readdirSync(dir).filter((entry) => managedDailyFile(dir, entry)) : []) {
+        if (!dir) break;
+        try {
+          const fp = path.join(dir, name);
+          if (!fs.lstatSync(fp).isFile()) continue;
+          fs.unlinkSync(fp);
+          deleted++;
+        } catch { errors.push(name); }
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") errors.push("日志目录不可读");
+    }
+    logRing.clear();
+    let serveCleared = false;
+    if (opts?.serve === true) {
+      const sp = serveLogPath();
+      if (sp) {
+        try {
+          const fd = fs.openSync(sp, fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0));
+          try {
+            if (!fs.fstatSync(fd).isFile()) throw new Error("不是普通文件");
+            fs.ftruncateSync(fd, 0);
+            serveCleared = true;
+          } finally { fs.closeSync(fd); }
+        } catch { errors.push("内嵌服务日志"); }
+      }
+    }
+    return { deleted, serveCleared, errors };
+  });
+
   ipcMain.handle("file-exists", (_ev, p: unknown) => {
     if (typeof p !== "string" || !p) return false;
     try { return fs.statSync(p).isFile(); } catch { return false; }
+  });
+  ipcMain.handle("video-file-size", (_ev, p: unknown): number | null => {
+    if (typeof p !== "string" || !path.isAbsolute(p)) return null;
+    try {
+      const stat = fs.statSync(p);
+      return stat.isFile() && stat.size > 0 ? stat.size : null;
+    } catch { return null; }
   });
 
   // 原生对话框
@@ -3907,11 +4047,11 @@ const openedExternalUrls: string[] = [];
 /** 日志中心：清理 7 天前的 daily 文件（whenReady 调；文件数小，同步无妨） */
 function pruneOldLogs(): void {
   try {
-    const d = path.join(app.getPath("userData"), "logs");
-    if (!fs.existsSync(d)) return;
+    const d = managedLogDir();
+    if (!d) return;
     const cutoff = Date.now() - 7 * 86400_000;
     for (const f of fs.readdirSync(d)) {
-      if (!/^jav-scribe-\d{4}-\d{2}-\d{2}\.log$/.test(f)) continue;
+      if (!managedDailyFile(d, f)) continue;
       try {
         const p = path.join(d, f);
         if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
@@ -3927,7 +4067,7 @@ function serveLogPath(): string | null {
     : [path.join(app.getPath("userData"), "local-serve.log")];
   for (const c of cands) {
     try {
-      if (fs.statSync(c).isFile()) return c;
+      if (fs.lstatSync(c).isFile()) return c;
     } catch { /* 试下一个候选 */ }
   }
   return null;
@@ -3937,13 +4077,17 @@ function serveLogPath(): string | null {
 function readServeTail(p: string, maxBytes = 2 * 1024 * 1024): { lines: string[]; truncated: boolean } {
   if (!p) return { lines: [], truncated: false };
   let st: fs.Stats;
-  try { st = fs.statSync(p); } catch { return { lines: [], truncated: false }; }
+  try { st = fs.lstatSync(p); } catch { return { lines: [], truncated: false }; }
+  if (!st.isFile()) return { lines: [], truncated: false };
   const start = st.size > maxBytes ? st.size - maxBytes : 0;
   const truncated = start > 0;
   try {
     const buf = Buffer.alloc(st.size - start);
-    const fd = fs.openSync(p, "r");
-    try { fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
+    const fd = fs.openSync(p, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) return { lines: [], truncated: false };
+      fs.readSync(fd, buf, 0, buf.length, start);
+    } finally { fs.closeSync(fd); }
     let lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
     if (truncated && lines.length) lines = lines.slice(1);
     return { lines, truncated };

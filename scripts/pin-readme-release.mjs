@@ -79,7 +79,7 @@ for (let attempt = 1; attempt <= 3; attempt++) {
     console.log("[pin-readme] rebase 后无差异，退出");
     process.exit(0);
   }
-  run("git", ["commit", "-m", `docs(readme): 钉最新版 ${tag}`]);
+  run("git", ["commit", "-m", `docs(readme): 钉最新版${kind === "client" ? "客户端" : "服务端"} ${tag}`, "-m", `- 更新 README 下载入口至 ${tag}\n- 保留另一端的现有版本链接`]);
   const push = spawnSync("git", ["push", "origin", "HEAD:main"], { stdio: "inherit" });
   if (push.status === 0) {
     console.log("[pin-readme] 已推送 main");

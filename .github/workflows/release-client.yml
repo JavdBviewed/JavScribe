@@ -182,8 +182,13 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG 已存在 → 仅覆盖上传"
           else
+            NOTES="docs/releases/$TAG.md"
+            if [ ! -f "$NOTES" ]; then
+              echo "::error title=release-notes-missing::缺少 $NOTES，不能使用占位更新说明发布"
+              exit 1
+            fi
             echo "创建 release $TAG"
-            if ! gh release create "$TAG" --title "$TAG" --notes "JavScribe Client — 未签名构建（签名/公证为后续议题）"; then
+            if ! gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"; then
               echo "::error title=release-create-failed::gh release create 失败（报错见上方日志）"
               exit 1
             fi

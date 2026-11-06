@@ -16,7 +16,7 @@ import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 /** preload 实际暴露的窗口对象（JavDesktop + 上传通道） */
 export interface DesktopBridge extends JavDesktop {
   upload: {
-    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }): Promise<UploadDispatchResult>;
+    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }): Promise<UploadDispatchResult>;
     file(args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }): Promise<UploadDispatchResult>;
   };
 }
@@ -68,7 +68,6 @@ function dispatchUpload(
     onProgress(p.loaded, p.total, status.progress * 100);
   });
   return invoke(id).then((r) => {
-    off();
     if (r.ok) {
       Object.assign(status, {
         phase: "done", progress: 1, finished: Date.now() / 1000, job_id: r.job_id || "",
@@ -79,7 +78,7 @@ function dispatchUpload(
       phase: "error", error: r.error || "上传失败", finished: Date.now() / 1000,
     });
     return { ok: false as const, error: r.error || "上传失败", network: r.network };
-  });
+  }).finally(off);
 }
 
 function localPathOf(f: File): string {
@@ -167,11 +166,12 @@ export const desktopTransport: Transport = {
       : {};
     const bArgs = batchArgs(batch);
     return dispatchUpload(file, engine, async (id) => {
+      const rerun = (file as File & { _javRerun?: boolean })._javRerun === true;
       if (b._javOpusPath) {
-        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath, ...bArgs });
+        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath, rerun, ...bArgs });
       }
       return desktop.upload.audio({
-        id, engine, name: file.name,
+        id, engine, name: file.name, rerun,
         data: new Uint8Array(await audio.arrayBuffer()),
         ...bArgs,
       });
