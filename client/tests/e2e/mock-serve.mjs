@@ -62,6 +62,10 @@ const state = {
   jobs: new Map(),      // id -> job
   uploads: [],          // PUT /upload 收到的载荷（测试断言：只传 opus）
   cache: new Map(),     // sha1 -> {size, ext}（内容寻址缓存，/cache/check、/upload/submit 用）
+  requests: new Map(),  // 幂等请求 ID -> job ID（可模拟响应丢失后的查询）
+  loseNextAdmission: false,
+  hideJobs: false,
+  legacyRequests: false,
   values: Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])),
   apiKeyMode: "ok",     // ok | no-key
   healthFailLeft: 0,  // 0.2.48 宽限期 e2e：剩余故障注入次数（/_mock/health-fail 设；>0 时 /health 回 503）
@@ -150,7 +154,7 @@ function newId() {
 function makeTask(path, opts = {}) {
   return {
     path,
-    name: path.split("/").pop(),
+    name: path.split(/[\\/]/).pop(),
     status: opts.status || "running",
     phase: opts.phase || "subtitling",
     progress: opts.progress ?? 0,
@@ -319,7 +323,11 @@ const server = http.createServer((req, res) => {
         });
       }
       if (sub === "resume") { state.paused = false; return send(200, { ok: true }); }
-      if (sub === "reset") { state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.omitJobId = false; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; applyTick(); return send(200, { ok: true }); }
+      if (sub === "reset") { state.hideJobs = false; state.legacyRequests = false; state.jobs.clear(); state.uploads.length = 0; state.cache.clear(); state.requests.clear(); state.loseNextAdmission = false; state.paused = false; state.queuePaused = false; state.batchPaused = new Set(); state.uploadDelayMs = 0; state.omitJobId = false; state.healthFailLeft = 0; state.seq = 0; state.seedSeq = 0; state.version = VERSION; state.step = 0.25; state.tickMs = 100; state.metrics = { gpu_present: false, gpu_util: 12, mem_used_mb: 3000, mem_total_mb: 8192 }; seedMetricsHist(); state.ready = { model: "ok", vad: "ok", fe: "ok", ffmpeg: "ok", gpu: "ok", disk: "ok", watch: "ok", polish: "off", emby: "off", jasna: "off", proxy: "off" }; state.reqCount = { jobs_list: 0, jobs_list_detail: 0, jobs_detail: 0 }; state.legacyDetail = false; state.values = Object.fromEntries(CONFIG_ITEMS.map(([p, , , , , v]) => [p, v])); state.apiKeyMode = 'ok'; applyTick(); return send(200, { ok: true }); }
+      if (sub === "restart-jobs") { state.jobs.clear(); return send(200, { ok: true }); }
+      if (sub === "lose-next-admission") { state.loseNextAdmission = true; return send(200, { ok: true }); }
+      if (sub === "hide-jobs") { return readBody().then((b) => { state.hideJobs = !!JSON.parse(b || "{}").hide; return send(200, { ok: true }); }); }
+      if (sub === "legacy-requests") { return readBody().then((b) => { state.legacyRequests = !!JSON.parse(b || "{}").legacy; return send(200, { ok: true }); }); }
       if (sub === "ready") {
         const q = url.searchParams;
         for (const k of ["model", "vad", "fe", "ffmpeg", "gpu", "disk", "watch", "polish", "emby", "jasna", "proxy"]) {
@@ -428,6 +436,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === "GET" && parts[1] === "uploads") return send(200, state.uploads);
     if (req.method === "GET" && parts[1] === "cache") return send(200, Object.fromEntries(state.cache));
+    if (req.method === "GET" && parts[1] === "requests") return send(200, Object.fromEntries(state.requests));
     if (req.method === "GET" && parts[1] === "last-scan-submit") {
       if (url.searchParams.get("reset")) state.lastScanSubmit = null;
       return send(200, state.lastScanSubmit ?? { none: true });
@@ -437,6 +446,14 @@ const server = http.createServer((req, res) => {
       return send(200, { ...state.reqCount });
     }
     return sendErr(404, "not found");
+  }
+
+  if (req.method === "GET" && parts.length === 2 && parts[0] === "requests") {
+    if (state.legacyRequests) return sendErr(404, "not found");
+    if (!checkKey()) return;
+    const jobId = state.requests.get(parts[1]);
+    if (!jobId) return sendErr(404, "request-not-found");
+    return send(200, { ok: true, status: state.jobs.has(jobId) ? "accepted" : "lost", job_id: jobId });
   }
 
   // ---- GET ----
@@ -456,7 +473,7 @@ const server = http.createServer((req, res) => {
           else if (f.status === "error" || f.status === "canceled") stats.failed++;
         }
       }
-      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, batch_paused: [...state.batchPaused], jobs: [...state.jobs.values()].map((j) => jobToDict(j)) });
+      return send(200, { ok: true, app: "JavScribe", version: state.version, profile: "default", device: "cuda", stats, paused: state.queuePaused, batch_paused: [...state.batchPaused], jobs: state.hideJobs ? [] : [...state.jobs.values()].map((j) => jobToDict(j)) });
     }
     if (parts[0] === "ready") {
       const LABELS = {
@@ -511,7 +528,7 @@ const server = http.createServer((req, res) => {
         state.reqCount[withDetail ? "jobs_list_detail" : "jobs_list"] += 1;
         if (withDetail && state.legacyDetail) return sendErr(404, "not found");
         const bq = url.searchParams.get("batch_id");
-        const jobs = bq ? [...state.jobs.values()].filter((j) => j.batch_id === bq) : [...state.jobs.values()];
+        const jobs = state.hideJobs ? [] : bq ? [...state.jobs.values()].filter((j) => j.batch_id === bq) : [...state.jobs.values()];
         return send(200, jobs.map((j) => jobToDict(j, withDetail)));
       }
       const j = state.jobs.get(parts[1]);
@@ -548,7 +565,7 @@ const server = http.createServer((req, res) => {
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       const buf = Buffer.concat(chunks);
-      const source = req.headers["x-source-name"] || "remote";
+      const source = decodeURIComponent(req.headers["x-source-name"] || "remote");
       const ext = url.searchParams.get("ext") || "opus";
       const actual = createHash("sha1").update(buf).digest("hex");
       const done = () => {
@@ -557,11 +574,18 @@ const server = http.createServer((req, res) => {
         state.cache.set(actual, { size: buf.length, ext });
         state.uploads.push({ source, size: buf.length, head: buf.subarray(0, 4).toString("hex"), sha1: actual, ext });
         if (state.omitJobId) return send(201, { ok: true, file: source });
+        const token = req.headers["x-request-id"];
+        if (token && state.requests.has(token)) {
+          const jobId = state.requests.get(token);
+          return state.jobs.has(jobId) ? send(201, { ok: true, job_id: jobId, file: source, sha1: actual })
+            : sendErr(409, "request-uncertain-or-lost");
+        }
         // 主任务（batch）：query 带 batch → job 归属该主任务，文件 pending 起步（tick 串行晋升；非 batch 保持创建即 running）
         const bId = url.searchParams.get("batch_id") || null;
         const bLabel = url.searchParams.get("batch_label") || null;
         const t = makeTask(`/mock/out/${source}`, { status: bId ? "pending" : "running", message: bId ? "排队中" : "已收到" });
         const j = jobOf([t], { source_kind: "remote", label: source, batch_id: bId, batch_label: bLabel });
+        if (token) state.requests.set(token, j.id);
         return send(201, { ok: true, job_id: j.id, file: source, sha1: actual });
       };
       return state.uploadDelayMs > 0
@@ -578,11 +602,19 @@ const server = http.createServer((req, res) => {
     const ext = url.searchParams.get("ext") || "opus";
     const ent = state.cache.get(sha1);
     if (!ent || ent.ext !== ext) return send(409, { ok: false, error: "not-cached" });
-    const source = req.headers["x-source-name"] || "remote";
+    const source = decodeURIComponent(req.headers["x-source-name"] || "remote");
     const bId = url.searchParams.get("batch_id") || null;
     const bLabel = url.searchParams.get("batch_label") || null;
+    const token = req.headers["x-request-id"];
+    if (state.omitJobId) return send(201, { ok: true, file: source, cached: true });
+    if (token && state.requests.has(token)) {
+      const jobId = state.requests.get(token);
+      return state.jobs.has(jobId) ? send(201, { ok: true, job_id: jobId, file: source, cached: true })
+        : sendErr(409, "request-uncertain-or-lost");
+    }
     const t = makeTask(`/mock/out/${source}`, { status: bId ? "pending" : "running", message: bId ? "排队中" : "已收到" });
     const j = jobOf([t], { source_kind: "remote", label: source, batch_id: bId, batch_label: bLabel });
+    if (token) state.requests.set(token, j.id);
     return send(201, { ok: true, job_id: j.id, file: source, cached: true });
   }
 
@@ -632,17 +664,25 @@ const server = http.createServer((req, res) => {
       const files = body.files;
       if (!Array.isArray(files) || !files.length) return sendErr(400, "files 需要非空数组");
       for (const f of files) {
-        if (typeof f !== "string" || !f.startsWith("/")) return sendErr(400, `非法路径: ${f}`);
+        if (typeof f !== "string" || !(/^(\/|[A-Za-z]:[\\/])/.test(f))) return sendErr(400, `非法路径: ${f}`);
       }
       // e2e 缝隙：路径含 __notfound__ → 400「文件不存在」（模拟远程 serve 读不到客户端本机路径；
       // 与真实 serve validate_submit_files 同形，供「提交 400 回退本机提取上传」用例触发）
       const nf = files.find((f) => f.includes("__notfound__"));
       if (nf) return sendErr(400, `文件不存在: ${nf.split("/").pop()}`);
       if (state.omitJobId) return send(201, { ok: true, files: files.length });
+      const token = req.headers["x-request-id"];
+      if (token && state.requests.has(token)) {
+        const jobId = state.requests.get(token);
+        return state.jobs.has(jobId) ? send(201, { ok: true, job_id: jobId, files: files.length })
+          : sendErr(409, "request-uncertain-or-lost");
+      }
       // 主任务（batch）：body 带 batch → 单 job 多文件 pending 起步（tick 每 job 晋升 1 个，串行；非 batch 保持旧口径）
       const batchId = body.batch_id || null;
       const batchLabel = body.batch_label || null;
       const j = jobOf(files.map((p) => makeTask(p, { status: batchId ? "pending" : "running", message: batchId ? "排队中" : "已入队" })), { source_kind: "local", label: `文件夹扫描 · ${files.length} 项`, batch_id: batchId, batch_label: batchLabel });
+      if (token) state.requests.set(token, j.id);
+      if (state.loseNextAdmission) { state.loseNextAdmission = false; return res.destroy(); }
       return send(201, { ok: true, job_id: j.id, files: files.length });
     });
     return;

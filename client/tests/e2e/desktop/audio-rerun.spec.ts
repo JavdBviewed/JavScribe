@@ -123,6 +123,24 @@ test("音轨缓存：本机提取落缓存；同影片二次派发命中缓存�
   }
 });
 
+test("音轨缓存：中文文件名再次提交可免传并保留源名", async ({ request }) => {
+  const dir = freshUserData();
+  const video = join(dir, "中文字幕影片.mp4");
+  cpSync(join(FIXTURES, "video-a.mp4"), video);
+  const { app, page } = await launch(dir);
+  try {
+    await mockReset(request);
+    await dispatchFile(page, video);
+    await dispatchFile(page, video);
+    expect(await mockUploads(request, MOCK)).toHaveLength(1);
+    const jobs = (await (await request.get(`${MOCK}/jobs`)).json()) as Array<{ label: string }>;
+    expect(jobs.filter((j) => j.label === "中文字幕影片.mp4")).toHaveLength(2);
+  } finally {
+    await app.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("换服务重跑：终态行 → 选第二服务 → 复用缓存音轨提交 → 任务表出现新服务任务", async ({ request }) => {
   const dir = freshUserData();
   const { app, page } = await launch(dir);

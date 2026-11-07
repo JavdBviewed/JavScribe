@@ -108,7 +108,7 @@ async function setupInterrupted(
   const ids = (await mockJobs(request)).map((j: { id: string }) => j.id);
   const pkeys = await ledgerPkeys(page); // close 前快照：迁移/重启后键应稳定（不丢键）
   await app.close();
-  await mockReset(request); // 模拟客户端停机期间 serve 重启丢非终态
+  await request.post("http://127.0.0.1:8302/_mock/restart-jobs", { data: {} }); // 在途任务丢失，受理索引保留
   const app2 = await launchApp(userData, opts.ffBin ? { JAVSCRIBE_FFMPEG: opts.ffBin } : {});
   const page2 = await app2.firstWindow();
   await waitForReady(page2);
@@ -171,7 +171,6 @@ test("S3：行级「重跑」——源文件仍在 → 重新提交新 job，旧
     await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(1, { timeout: 20_000 });
     await page.locator(".job-row .led-rerun").click();
     await expect(page.locator("#toasts .toast.ok", { hasText: "已重新提交" })).toBeVisible({ timeout: 30_000 });
-    // mock /reset 清零 seq → 重启后首个 job 复用 000001（与旧 id 相同为 mock 语义，真实 serve 必新 id）；
     // 产品口径断言：任务表恰好 1 行 + 中断清零 + 旧账本条目删除（不双行）
     await expect.poll(async () => (await mockJobs(request)).length, { timeout: 60_000 }).toBe(1);
     await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(0);
@@ -179,6 +178,78 @@ test("S3：行级「重跑」——源文件仍在 → 重新提交新 job，旧
   } finally {
     await app.close().catch(() => {});
   }
+});
+
+test("受理响应丢失后重启：按请求 ID 对账，不创建第二个服务任务", async ({ userData, request }) => {
+  writeFileSync(join(userData, "client-config.json"), JSON.stringify({ scan_min_size_mb: 0, extract_workers: 3, queue_cap: 3 }));
+  await mockSpeed(request, { step: 0.005, tickMs: 500 });
+  await request.post("http://127.0.0.1:8302/_mock/lose-next-admission", { data: {} });
+  const app = await launchApp(userData);
+  let pkey = "";
+  let jobId = "";
+  let requestId = "";
+  try {
+    const page = await app.firstWindow();
+    await waitForReady(page);
+    await goView(page, "dispatch");
+    const dir = makeScanDir(`reconcile-${Date.now()}`);
+    await submitScan(page, dir, ["AKDL-001.mp4"]);
+    await expect.poll(async () => (await mockJobs(request)).length, { timeout: 30_000 }).toBe(1);
+    jobId = (await mockJobs(request))[0].id;
+    await expect.poll(async () => {
+      const d = JSON.parse(readFileSync(join(userData, "ledger.json"), "utf8"));
+      return Object.entries(d.children).find(([, c]: any) => c.request_id && c.status === "error")?.[0] || "";
+    }, { timeout: 30_000 }).not.toBe("");
+    pkey = (await ledgerPkeys(page))[0];
+    requestId = JSON.parse(readFileSync(join(userData, "ledger.json"), "utf8")).children[pkey].request_id;
+  } finally { await app.close(); }
+  await request.post("http://127.0.0.1:8302/_mock/hide-jobs", { data: { hide: true } });
+  await request.post("http://127.0.0.1:8302/_mock/legacy-requests", { data: { legacy: true } });
+  const app2 = await launchApp(userData);
+  try {
+    const page = await app2.firstWindow();
+    await waitForReady(page);
+    await goView(page, "jobs");
+    const oldLookup = await icall(page, "lookupRequest", "mock", requestId, jobId);
+    expect(oldLookup.data.status).toBe("uncertain"); // 旧任务还在不能证明新请求已受理
+    // 请求已受理、响应丢失：本地派发记录为失败；重跑前先查受理索引。
+    await expect(page.locator(".job-row .led-rerun")).toBeVisible();
+    await page.locator(".job-row .led-rerun").click();
+    await expect(page.locator("#toasts .toast.err", { hasText: "提交状态仍不确定" })).toBeVisible();
+    expect(await ledgerPkeys(page)).toContain(pkey);
+    await request.post("http://127.0.0.1:8302/_mock/legacy-requests", { data: { legacy: false } });
+    await page.locator(".job-row .led-rerun").click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "已重新提交" })).toBeVisible();
+    await request.post("http://127.0.0.1:8302/_mock/hide-jobs", { data: { hide: false } });
+    expect((await mockJobs(request)).map((j: { id: string }) => j.id)).toEqual([jobId]);
+    expect(await ledgerPkeys(page)).not.toContain(pkey);
+  } finally {
+    await app2.close();
+    await request.post("http://127.0.0.1:8302/_mock/hide-jobs", { data: { hide: false } });
+    await request.post("http://127.0.0.1:8302/_mock/legacy-requests", { data: { legacy: false } });
+  }
+});
+
+test("本机提取中退出：尚未发送服务请求的中断行可重跑", async ({ userData, request }) => {
+  const dir = makeScanDir(`javscribe-before-admission-${Date.now()}`);
+  const path = join(dir, "AKDL-001.mp4");
+  const key = "pend|pre-admission|0";
+  writeFileSync(join(userData, "ledger.json"), JSON.stringify({ v: 1, children: {
+    [key]: { engine: "mock", job_id: null, videoName: "AKDL-001.mp4", status: "interrupted",
+      phase: "extracting", progress: 0, message: "本机提取音轨中", created: Date.now() / 1000,
+      updatedAt: Date.now(), file_path: path, request_id: "pre-admission-12345678901234567890" },
+  }, suppress: [] }));
+  const app = await launchApp(userData);
+  try {
+    const page = await app.firstWindow();
+    await waitForReady(page);
+    await goView(page, "jobs");
+    await expect(page.locator(".job-row .led-rerun")).toBeVisible();
+    await page.locator(".job-row .led-rerun").click();
+    await expect(page.locator("#toasts .toast.ok", { hasText: "已重新提交" })).toBeVisible({ timeout: 20_000 });
+    expect(await mockJobs(request)).toHaveLength(1);
+    expect(await ledgerPkeys(page)).not.toContain(key);
+  } finally { await app.close(); }
 });
 
 test("S4：「历史清理」对话框——完成+中断实时计数、勾选清理、toast + 服务端 fan-out", async ({ userData, request }) => {
@@ -211,6 +282,7 @@ test("S4：「历史清理」对话框——完成+中断实时计数、勾选�
 });
 
 test("S5：全中断主任务组——组级 [重跑全部][清除]；ledger-clear 清组 + batches.json 同步删", async ({ userData, request }) => {
+  test.skip(process.platform === "win32", "此用例使用 Bash 假 ffmpeg，Linux 专测");
   const ff = makeFakeFfmpeg();
   try {
     // 3 文件走 400 回退本机提取上传链（__notfound__ 目录，同 ledger.spec B 形态）→ 3 个独立 job
@@ -246,7 +318,7 @@ test("S5：全中断主任务组——组级 [重跑全部][清除]；ledger-cle
 });
 
 test("S6：工具条「N 中断 · 重跑」——批量重跑中断行 + toast 汇总", async ({ userData, request }) => {
-  const { app, page, pkeys } = await setupInterrupted(request, userData, "S6", { all: false });
+  const { app, page, pkeys, oldJobIds } = await setupInterrupted(request, userData, "S6", { all: false });
   const pkey = pkeys[0];
   try {
     await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(1, { timeout: 20_000 });
@@ -255,8 +327,9 @@ test("S6：工具条「N 中断 · 重跑」——批量重跑中断行 + toast 
     await expect(btn).toContainText("1 中断 · 重跑");
     await btn.click();
     await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 60_000 });
-    // 重新提交落 mock；中断态清零；旧账本条目删除（mock /reset 清 seq → id 复用 000001，同 S3 口径）
+    // 服务重启后旧请求索引仍在，新受理的任务 ID 不得复用旧值。
     await expect.poll(async () => (await mockJobs(request)).length, { timeout: 60_000 }).toBe(1);
+    expect((await mockJobs(request))[0].id).not.toBe(oldJobIds[0]);
     await expect(page.locator(".job-row .pill.p-interrupted")).toHaveCount(0);
     expect(await ledgerPkeys(page)).not.toContain(pkey);
   } finally {
@@ -265,6 +338,7 @@ test("S6：工具条「N 中断 · 重跑」——批量重跑中断行 + toast 
 });
 
 test("S8：服务读不到本机路径时，中断重跑必须本机提取音轨，不上传整片", async ({ userData, request }) => {
+  test.skip(process.platform === "win32", "此用例使用 Bash 假 ffmpeg，Linux 专测");
   const ff = makeFakeFfmpeg();
   try {
     const { app, page, pkeys } = await setupInterrupted(request, userData, "S8", { all: false, ffBin: ff.bin });
@@ -283,6 +357,7 @@ test("S8：服务读不到本机路径时，中断重跑必须本机提取音轨
 });
 
 test("S9：重跑提取中切全局暂停，入口解锁、账本保留，继续后可重试", async ({ userData, request }) => {
+  test.skip(process.platform === "win32", "此用例使用 Bash 假 ffmpeg，Linux 专测");
   const ff = makeFakeFfmpeg();
   try {
     const { app, page, pkeys } = await setupInterrupted(request, userData, "S9", { all: false, ffBin: ff.bin });
@@ -302,13 +377,19 @@ test("S9：重跑提取中切全局暂停，入口解锁、账本保留，继续
       expect(await ledgerPkeys(page)).toContain(pkeys[0]);
       expect((await icall(page, "pauseAll", "false")).ok).toBe(true);
       await btn.click();
-      await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 70_000 });
+      await expect(btn).toBeEnabled({ timeout: 70_000 });
+      const outcome = await page.evaluate((key) => ({
+        toasts: [...document.querySelectorAll("#toasts .toast")].map((el) => el.textContent),
+        children: JSON.parse(localStorage.getItem(key) || "{}").children,
+      }), LEDGER_KEY);
+      expect(outcome.toasts, JSON.stringify(outcome)).toContainEqual(expect.stringContaining("已重跑 1 条"));
       expect(await ledgerPkeys(page)).not.toContain(pkeys[0]);
     } finally { await app.close().catch(() => {}); }
   } finally { rmSync(ff.dir, { recursive: true, force: true }); }
 });
 
-test("S10：服务返回 201 但缺任务 ID，不清中断账本且允许再试", async ({ userData, request }) => {
+test("S10：服务返回 201 但缺任务 ID，受理状态不确定时不盲目重发", async ({ userData, request }) => {
+  test.skip(process.platform === "win32", "此用例使用 Bash 假 ffmpeg，Linux 专测");
   const ff = makeFakeFfmpeg();
   try {
     const { app, page, pkeys } = await setupInterrupted(request, userData, "S10", { all: false, ffBin: ff.bin });
@@ -317,14 +398,17 @@ test("S10：服务返回 201 但缺任务 ID，不清中断账本且允许再试
       await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: true } });
       const btn = page.locator("#job-rerun-interrupted");
       await btn.click();
-      await expect(page.locator("#toasts .toast.err", { hasText: "任务 ID" })).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator("#toasts .toast.err", { hasText: "状态不确定" })).toBeVisible({ timeout: 30_000 });
       await expect(btn).toBeEnabled();
       expect(await ledgerPkeys(page)).toContain(pkeys[0]);
       expect(await mockJobs(request)).toHaveLength(0);
+      const uploads = await (await request.get("http://127.0.0.1:8302/_mock/uploads")).json() as unknown[];
       await request.post("http://127.0.0.1:8302/_mock/omit-job-id", { data: { enabled: false } });
       await btn.click();
-      await expect(page.locator("#toasts .toast.ok", { hasText: "已重跑 1 条" })).toBeVisible({ timeout: 30_000 });
-      expect(await ledgerPkeys(page)).not.toContain(pkeys[0]);
+      await expect(page.locator("#toasts .toast.err", { hasText: "状态仍不确定" })).toBeVisible({ timeout: 30_000 });
+      expect(await ledgerPkeys(page)).toContain(pkeys[0]);
+      expect(await mockJobs(request)).toHaveLength(0);
+      expect(await (await request.get("http://127.0.0.1:8302/_mock/uploads")).json()).toHaveLength(uploads.length);
     } finally { await app.close().catch(() => {}); }
   } finally { rmSync(ff.dir, { recursive: true, force: true }); }
 });

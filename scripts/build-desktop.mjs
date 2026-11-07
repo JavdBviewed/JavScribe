@@ -139,6 +139,7 @@ cpSync(resolve(ROOT, "client/vendor/demo"), resolve(ROOT, "client/dist-desktop/d
 for (const [entry, out] of [
   ["client/desktop/main.ts", "client/dist-desktop/main.cjs"],
   ["client/desktop/preload.ts", "client/dist-desktop/preload.cjs"],
+  ["client/desktop/log-history-worker.ts", "client/dist-desktop/log-history-worker.cjs"],
 ]) {
   console.log(`[build-desktop] $ esbuild ${entry} → ${out}`);
   await esbuild.build({

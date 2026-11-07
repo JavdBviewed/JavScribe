@@ -16,8 +16,8 @@ import type { JavDesktop, UploadDispatchResult } from "../core/desktop-bridge";
 /** preload 实际暴露的窗口对象（JavDesktop + 上传通道） */
 export interface DesktopBridge extends JavDesktop {
   upload: {
-    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }): Promise<UploadDispatchResult>;
-    file(args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }): Promise<UploadDispatchResult>;
+    audio(args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean; requestId?: string }): Promise<UploadDispatchResult>;
+    file(args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; requestId?: string }): Promise<UploadDispatchResult>;
   };
 }
 
@@ -147,12 +147,13 @@ export const desktopTransport: Transport = {
   async uploadFile(file, engine, onProgress, batch) {
     const localPath = localPathOf(file);
     const bArgs = batchArgs(batch);
+    const requestId = (file as File & { _javRequestId?: string })._javRequestId;
     return dispatchUpload(file, engine, (id) =>
       localPath
-        ? desktop.upload.file({ id, engine, name: file.name, ext: extOf(file.name), localPath, ...bArgs })
+        ? desktop.upload.file({ id, engine, name: file.name, ext: extOf(file.name), localPath, requestId, ...bArgs })
         : desktop.upload.file({
             id, engine, name: file.name, ext: extOf(file.name),
-            data: new Uint8Array(0),
+            data: new Uint8Array(0), requestId,
             ...bArgs,
           }),
       onProgress,
@@ -165,14 +166,15 @@ export const desktopTransport: Transport = {
       ? { audio_mb: b._javOpusSize / 1048576 }
       : {};
     const bArgs = batchArgs(batch);
+    const requestId = (file as File & { _javRequestId?: string })._javRequestId;
     return dispatchUpload(file, engine, async (id) => {
       const rerun = (file as File & { _javRerun?: boolean })._javRerun === true;
       if (b._javOpusPath) {
-        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath, rerun, ...bArgs });
+        return desktop.upload.audio({ id, engine, name: file.name, opusPath: b._javOpusPath, rerun, requestId, ...bArgs });
       }
       return desktop.upload.audio({
         id, engine, name: file.name, rerun,
-        data: new Uint8Array(await audio.arrayBuffer()),
+        data: new Uint8Array(await audio.arrayBuffer()), requestId,
         ...bArgs,
       });
     }, onProgress, extra);
@@ -198,9 +200,12 @@ export const desktopTransport: Transport = {
   // 字幕预览：desktop 形态字幕文件在本机，走 IPC 直读（main 侧校验扩展名/大小）
   readSrt: (p) => desktop.readSrt(p),
   // batch 参数以 JSON 串透传 main（call 通道全字符串参）
-  submitScan: (name, files, _sub, batch) =>
+  submitScan: (name, files, _sub, batch, requestId) =>
     call<{ files: number; jobId: string }>("submitScan", name, JSON.stringify(files),
-      batch ? JSON.stringify(batch) : ""),
+      batch ? JSON.stringify(batch) : "", requestId || ""),
+  lookupRequest: (engine, requestId, oldJobId) =>
+    call<{ status: "accepted" | "lost" | "uncertain" | "unsupported"; jobId?: string }>(
+      "lookupRequest", engine, requestId, oldJobId || ""),
   // 主任务操作：main 直连所有已登记服务 fan-out（单服务失败不 throw，逐条返回）
   batchOp: (action, batchId) => call<BatchOpResult>("batchOp", action, batchId),
   // 主任务记录列表（main 进程 batches.json，created 降序）

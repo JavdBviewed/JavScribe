@@ -91,9 +91,9 @@ const api: Omit<JavDesktop, "update" | "watch" | "localServe" | "win" | "audioCa
 
 // 上传通道独立于 t-call（main 侧需要对象参数）
 const upload = {
-  audio: (args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }) =>
+  audio: (args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean; requestId?: string }) =>
     ipcRenderer.invoke("upload-audio", args) as Promise<UploadDispatchResult>,
-  file: (args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) =>
+  file: (args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; requestId?: string }) =>
     ipcRenderer.invoke("upload-file", args) as Promise<UploadDispatchResult>,
 };
 

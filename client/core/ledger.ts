@@ -23,6 +23,10 @@ export interface LedgerChild {
   // ↓ 0.2.57 新增（可选字段；旧数据缺失 = 按 null 处理）
   /** 派发时源视频路径（本地扫描/文件夹行的 file_path/local_path；中断重跑的前置） */
   file_path?: string | null;
+  /** 最后派发阶段；只有 extracting 且无 job ID 能证明服务请求尚未发出。 */
+  phase?: string | null;
+  /** 新版服务端幂等提交标识；发请求前写入，响应丢失后可对账。 */
+  request_id?: string | null;
   /** 中断前最后状态（running/pending/extracting…） */
   last_status?: string | null;
   /** 中断时刻（ms；= 迁移前 updatedAt） */
@@ -65,6 +69,8 @@ export function normalizeChild(c: Partial<LedgerChild> | null | undefined, now: 
     finished: typeof c.finished === "number" ? c.finished : null,
     updatedAt: typeof c.updatedAt === "number" ? c.updatedAt : now,
     file_path: typeof c.file_path === "string" ? c.file_path : null,
+    phase: typeof c.phase === "string" ? c.phase : null,
+    request_id: typeof c.request_id === "string" ? c.request_id : null,
     last_status: typeof c.last_status === "string" ? c.last_status : null,
     interrupted_at: typeof c.interrupted_at === "number" ? c.interrupted_at : null,
     interrupted_reason: typeof c.interrupted_reason === "string" ? c.interrupted_reason : undefined,
@@ -155,6 +161,8 @@ export function childFromPendingRow(
     finished?: number | null;
     file_path?: string | null;
     local_path?: string | null;
+    phase?: string | null;
+    request_id?: string | null;
   },
   now: number,
 ): LedgerChild {
@@ -171,6 +179,8 @@ export function childFromPendingRow(
     finished: r.finished ?? null,
     updatedAt: now,
     file_path: r.file_path || r.local_path || null,
+    phase: r.phase || null,
+    request_id: r.request_id || null,
   };
 }
 

@@ -9,8 +9,8 @@ import type {
   ReadinessPayload, ScanResult, ScanTaskSnapshot, SrtReadResult, UpdateInfo, UploadStatus,
 } from "../core/types";
 
-async function jget<T>(url: string): Promise<T> {
-  const r = await fetch(url, { cache: "no-store" });
+async function jget<T>(url: string, timeoutMs?: number): Promise<T> {
+  const r = await fetch(url, { cache: "no-store", ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) });
   if (!r.ok) throw new TransportError(`${url} -> ${r.status}`);
   return (await r.json()) as T;
 }
@@ -237,7 +237,7 @@ export const webTransport: Transport = {
     return xhrUpload("/api/upload-audio", fd, onProgress);
   },
 
-  getUpload: (id) => jget<UploadStatus>("/api/uploads/" + id),
+  getUpload: (id) => jget<UploadStatus>("/api/uploads/" + encodeURIComponent(id), 2000),
 
   startScanTask: async (name, path) => {
     const r = await fetch("/api/scan/local/tasks", {

@@ -20,6 +20,7 @@ export interface PickedFile {
 export type FolderFile = File & {
   _dirHandle?: FileSystemDirectoryHandle | null;
   _localPath?: string;
+  _javRequestId?: string;
   /** main 进程侧已判定的字幕/过小元数据（desktop 原生选择目录时携带；缺省则渲染层按扫描规则判定） */
   _meta?: FolderVideoMeta;
 };

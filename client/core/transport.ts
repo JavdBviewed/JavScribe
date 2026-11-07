@@ -107,6 +107,8 @@ export interface Transport {
   loadLedgerMirror?(): Promise<string | null>;
   /** 文件是否存在（中断重跑前校验源文件；web 形态未实现，UI 门控跳过） */
   fsExists?(path: string): Promise<boolean>;
+  /** 查派发请求的受理结果；旧服务端或索引过期不得由旧 job_id 推断新请求状态。 */
+  lookupRequest?(engine: string, requestId: string, oldJobId?: string | null): Promise<{ status: "accepted" | "lost" | "uncertain" | "unsupported"; jobId?: string }>;
   /** 本机管线任务 重试/继续（error 或 已暂停，且本机视频仍在）：重提取音轨并重提交；失败 throw(detail) */
   rerunLocal?(taskId: string): Promise<{ ok: boolean; task_id: string }>;
   /** 本机管线任务暂停（仅排队/提取/派发阶段）；失败 throw(detail)；未实现则 UI 隐藏按钮 */
@@ -150,7 +152,7 @@ export interface Transport {
   cancelScanTask?(id: string): Promise<import("./types").ScanTaskSnapshot>;
   /** 扫描结果入队；web 形态返回 uploadIds（逐文件任务），desktop 返回 jobId；失败 throw
    *  subStatus：{path: subtitle_status} 提交前检测到的字幕状态（制作图提示展示用） */
-  submitScan(name: string, files: string[], subStatus?: Record<string, string>, batch?: { id: string; label?: string }): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
+  submitScan(name: string, files: string[], subStatus?: Record<string, string>, batch?: { id: string; label?: string }, requestId?: string): Promise<{ files: number; jobId?: string; uploadIds?: string[]; skipped?: string[] }>;
   /** 目录浏览（web 形态：客户端部署机 /api/fs/browse；desktop 形态无此方法，走原生对话框） */
   fsBrowse?(path: string): Promise<import("./types").FsBrowseResult>;
   /** 字幕预览：读字幕文件内容（web：/api/fs/read-srt；desktop：IPC 读本机文件） */

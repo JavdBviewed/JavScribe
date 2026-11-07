@@ -34,6 +34,7 @@ try {
   const n = normalizeChild(mk(), NOW);
   assert.equal(n.videoName, "AAA-001.mp4");
   assert.equal(n.file_path, null);            // 旧数据无新字段 → null
+  assert.equal(n.phase, null);
   assert.equal(n.last_status, null);
   assert.equal(n.interrupted_at, null);
   assert.ok(n.interrupted_reason === undefined);
@@ -42,8 +43,9 @@ try {
   assert.equal(normalizeChild({ videoName: "x" }, NOW), null);
   assert.equal(normalizeChild(null, NOW), null);
   // 新字段原样保留
-  const n2 = normalizeChild({ ...mk(), status: "interrupted", file_path: "/media/a.mp4", last_status: "running", interrupted_at: 123, interrupted_reason: "客户端重启，任务链路断开" }, NOW);
+  const n2 = normalizeChild({ ...mk(), status: "interrupted", phase: "extracting", file_path: "/media/a.mp4", last_status: "running", interrupted_at: 123, interrupted_reason: "客户端重启，任务链路断开" }, NOW);
   assert.equal(n2.file_path, "/media/a.mp4");
+  assert.equal(n2.phase, "extracting");
   assert.equal(n2.interrupted_at, 123);
   assert.equal(n2.interrupted_reason, "客户端重启，任务链路断开");
   console.log("ok 1 - normalizeChild 旧数据兼容 + 拒收");
@@ -124,12 +126,13 @@ try {
   // ---------- childFromPendingRow：file_path 透传 ----------
   const row = {
     batch_id: "b1", batch_label: "批次A", engine: "158-npc", job_id: null,
-    file: "BBB-002.mp4", label: "BBB-002.mp4", status: "running", progress: 12,
+    file: "BBB-002.mp4", label: "BBB-002.mp4", status: "running", phase: "extracting", progress: 12,
     phase_detail: "本地提取音轨…", position: null, message: null,
     created: NOW - 100, finished: null, local_path: "D:\\Videos\\BBB-002.mp4",
   };
   const ch = childFromPendingRow(row, NOW);
   assert.equal(ch.file_path, "D:\\Videos\\BBB-002.mp4");
+  assert.equal(ch.phase, "extracting");
   assert.equal(ch.videoName, "BBB-002.mp4");
   assert.equal(ch.job_id, null);
   assert.equal(ch.updatedAt, NOW);
@@ -140,6 +143,10 @@ try {
   const ch3 = childFromPendingRow({ engine: "127", file: "c.opus", status: "running", created: null }, NOW);
   assert.equal(ch3.file_path, null);
   assert.equal(ch3.created, null);
+  const ch4 = childFromPendingRow({ ...row, request_id: "req-12345678901234567890" }, NOW);
+  assert.equal(ch4.request_id, "req-12345678901234567890");
+  assert.equal(normalizeChild(ch4, NOW).request_id, ch4.request_id);
+  assert.equal(normalizeChild({ ...ch4, request_id: 42 }, NOW).request_id, null);
   console.log("ok 6 - childFromPendingRow file_path 透传");
 
   // ---------- cleanupCatOf ----------

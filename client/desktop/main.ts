@@ -22,6 +22,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Worker } from "node:worker_threads";
 import { LOCAL_SUB_PATTERNS, OPUS_EXTRACT_ARGS, VIDEO_EXTS } from "../core/constants";
 import type { AudioCacheHit, UploadDispatchResult } from "../core/desktop-bridge";
 import type { ScanItem, ScanResult, ScanTaskSnapshot } from "../core/types";
@@ -45,7 +46,7 @@ import {
   type LogLevel,
   type LogSource,
 } from "../core/log-center";
-import { managedLogName, parseDailyLine, queryHistory, type HistoryLine, type HistoryQuery } from "../core/log-history";
+import { managedLogName, type HistoryQuery } from "../core/log-history";
 
 // ---------------------------------------------------------------------------
 // 日志中心（0.2.62）：main 进程 console → 环形缓冲 + daily 文件
@@ -476,41 +477,69 @@ function sha1File(p: string): Promise<string> {
 
 const sha1Hex = (buf: Buffer): string => crypto.createHash("sha1").update(buf).digest("hex");
 
+async function requestStatus(entry: EngineEntry, token: string): Promise<{ status: "accepted" | "lost" | "uncertain" | "unsupported"; jobId?: string }> {
+  if (!entry.api_key) return { status: "unsupported" };
+  const r = await httpJson<{ status?: string; job_id?: string }>(
+    `${entry.url}/requests/${encodeURIComponent(token)}`,
+    { headers: { "X-Api-Key": entry.api_key }, timeoutMs: 10000 },
+  );
+  if (r.status === 200 && ["accepted", "lost", "uncertain"].includes(r.data?.status || "")) {
+    return { status: r.data.status as "accepted" | "lost" | "uncertain", jobId: r.data.job_id || undefined };
+  }
+  // 404 既可能是旧服务不支持接口，也可能是新服务索引已过期；都不能判定未受理。
+  return { status: "uncertain" };
+}
+
 /**
  * 预检 + 命中提交。成功返回 ok+cached:true 的受理结果；
- * 需要回退上传（未命中 / 404 / 409 / 预检网络异常）时返回 null。
+ * 需要回退上传（未命中 / 旧版服务 / 缓存确已失效）时返回 null。
  */
 async function tryServerCache(
-  base: string,
+  entry: EngineEntry,
   sha1: string,
   sizeBytes: number,
   ext: string,
   sourceName: string,
   onProgress: (loaded: number, total: number) => void,
   batch?: { id: string; label?: string } | null,
+  requestId?: string,
 ): Promise<UploadDispatchResult | null> {
   const batchQ = batch
     ? `&batch_id=${encodeURIComponent(batch.id)}&batch_label=${encodeURIComponent(batch.label || "")}`
     : "";
+  let cached = false;
   try {
     const ck = await httpJson<{ ok?: boolean; cached?: boolean }>(
-      `${base}/cache/check?sha1=${sha1}&size=${sizeBytes}&ext=${encodeURIComponent(ext)}`,
+      `${entry.url}/cache/check?sha1=${sha1}&size=${sizeBytes}&ext=${encodeURIComponent(ext)}`,
       { timeoutMs: 10000 },
     );
-    if (ck.status !== 200 || ck.data?.cached !== true) return null; // 404=旧版服务，直接回退
+    cached = ck.status === 200 && ck.data?.cached === true;
+  } catch {
+    return null; // 预检只读，失败时可直接回退上传
+  }
+  if (!cached) return null;
+  try {
     onProgress(sizeBytes, sizeBytes); // 命中：直接推满进度（无需传字节）
     const sub = await httpJson<{ job_id?: string; file?: string }>(
-      `${base}/upload/submit?sha1=${sha1}&ext=${encodeURIComponent(ext)}${batchQ}`,
-      { method: "POST", headers: { "X-Source-Name": sourceName }, timeoutMs: 15000 },
+      `${entry.url}/upload/submit?sha1=${sha1}&ext=${encodeURIComponent(ext)}${batchQ}`,
+      { method: "POST", headers: { "X-Source-Name": encodeURIComponent(sourceName), ...(requestId ? { "X-Request-Id": requestId } : {}) }, timeoutMs: 15000 },
     );
-    if (sub.status === 201 && sub.data && typeof sub.data === "object") {
+    if (sub.status === 201 && sub.data?.job_id) {
       const d = sub.data as { job_id?: string; file?: string };
       return { ok: true, job_id: String(d.job_id || ""), file: String(d.file || ""), cached: true };
     }
-    return null; // 命中后 submit 失败（如缓存文件恰被 retention 清理）→ 回退重传
-  } catch {
-    return null; // 预检网络异常不阻断主上传流程，回退后由 PUT 报真实错误
+    if (sub.status === 409 && (sub.data as { error?: string })?.error === "not-cached") return null;
+    if (!requestId && sub.status === 409) return null; // 旧服务缓存失效
+  } catch (e) {
+    if (!requestId) return null; // 旧服务无幂等索引，不改变旧版降级入口
   }
+  if (requestId) {
+    try {
+      const found = await requestStatus(entry, requestId);
+      if (found.status === "accepted" && found.jobId) return { ok: true, job_id: found.jobId, file: "", cached: true };
+    } catch { /* 服务不可查询，受理结果仍不确定 */ }
+  }
+  throw new Error("缓存提交状态不确定，请核对服务任务后重试");
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,6 +1485,12 @@ function registerIpc(): void {
           if (!e) return { ok: false, error: "服务不存在" };
           return { ok: true, data: { api_key: e.api_key } };
         }
+        case "lookupRequest": {
+          const entry = engineByName(String(a0));
+          const token = String(a1 || "");
+          if (!/^[A-Za-z0-9_-]{20,96}$/.test(token)) return { ok: false, error: "请求标识无效" };
+          return { ok: true, data: await requestStatus(entry, token) };
+        }
         case "refreshEngines": {
           // 手动重探测所有服务在线状态/版本/运行任务数：绕过 3s TTL 单飞快照
           const s = await refresh(true);
@@ -1710,6 +1745,8 @@ function registerIpc(): void {
           const entry = engineByName(String(a0));
           const headers: Record<string, string> = {};
           if (entry.api_key) headers["X-Api-Key"] = entry.api_key;
+          const requestId = String(a3 || "");
+          if (requestId) headers["X-Request-Id"] = requestId;
           let files: unknown;
           try {
             files = JSON.parse(String(a1 || "[]"));
@@ -1920,7 +1957,7 @@ function registerIpc(): void {
   });
 
   // 音频上传（opus 字节流 → serve /upload?ext=opus，无 key）
-  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean }) => {
+  ipcMain.handle("upload-audio", async (_ev, args: { id: string; engine: string; name: string; opusPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; rerun?: boolean; requestId?: string }) => {
     if (args?.rerun && pipelinePaused) return { ok: false, error: "全局暂停中：恢复任务已停止，请继续任务后重试" };
     if (!args?.rerun) await pipelineGateWait();
     let opusDir: string | null = null;
@@ -1949,9 +1986,9 @@ function registerIpc(): void {
       }
       // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务（batch 随 /upload/submit 透传）
       const hit = await tryServerCache(
-        entry.url, sha1, totalBytes, "opus", String(args.name || "remote"),
+        entry, sha1, totalBytes, "opus", String(args.name || "remote"),
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
-        batch,
+        batch, args.requestId,
       );
       if (hit) {
         if (!Buffer.isBuffer(body)) (body as unknown as { destroy?: () => void }).destroy?.(); // 命中免传，释放未读的文件流
@@ -1965,7 +2002,7 @@ function registerIpc(): void {
         entry.url + `/upload?ext=opus&sha1=${sha1}` + batchQ,
         totalBytes,
         body,
-        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
+        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")), ...(args.requestId ? { "X-Request-Id": args.requestId } : {}) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
       const res = uploadAccept(r.status, r.data);
@@ -1988,7 +2025,7 @@ function registerIpc(): void {
   });
 
   // 整片直传（用户显式选「整片直传字幕服务」时的逃生通道；受服务端 MAX_UPLOAD_MB 限制）
-  ipcMain.handle("upload-file", async (_ev, args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string }) => {
+  ipcMain.handle("upload-file", async (_ev, args: { id: string; engine: string; name: string; ext: string; localPath?: string; data?: Uint8Array; batchId?: string; batchLabel?: string; requestId?: string }) => {
     await pipelineGateWait(); // 全局暂停闸：暂停期间不提交新任务（先于缓存预检：缓存命中同样会在服务端建任务）
     let tmpDir: string | null = null;
     try {
@@ -2009,9 +2046,9 @@ function registerIpc(): void {
       const sha1 = await sha1File(filePath);
       // 先问后传：服务端命中同内容缓存 → 免传字节直接建任务（batch 随 /upload/submit 透传）
       const hit = await tryServerCache(
-        entry.url, sha1, totalBytes, ext, String(args.name || "remote"),
+        entry, sha1, totalBytes, ext, String(args.name || "remote"),
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
-        batch,
+        batch, args.requestId,
       );
       if (hit) {
         if (hit.job_id && batch) batchUpsert(batch.id, batch.label || "", entry.name, hit.job_id);
@@ -2024,7 +2061,7 @@ function registerIpc(): void {
         entry.url + `/upload?ext=${encodeURIComponent(ext)}&sha1=${sha1}` + batchQ,
         totalBytes,
         fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
-        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")) },
+        { "X-Source-Name": encodeURIComponent(String(args.name || "remote")), ...(args.requestId ? { "X-Request-Id": args.requestId } : {}) },
         (loaded, total) => sendToWin("t-progress", { id: args.id, loaded, total }),
       );
       const res = uploadAccept(r.status, r.data);
@@ -2237,58 +2274,22 @@ function registerIpc(): void {
       page: Number(raw?.page) || 1,
       pageSize: Number(raw?.pageSize) || 100,
     };
-    const entries: HistoryLine[] = [];
-    let truncated = false;
     const dir = managedLogDir();
     let names: string[] = [];
     if (dir) {
       try { names = fs.readdirSync(dir).filter((name) => managedDailyFile(dir, name)); } catch { /* 启动时还没有文件 */ }
     }
-    for (const name of names) {
-      if (!dir) break;
-      const date = name.slice("jav-scribe-".length, -".log".length);
-      if ((q.from && date < q.from) || (q.to && date > q.to)) continue;
-      const fp = path.join(dir, name);
-      try {
-        const st = fs.lstatSync(fp);
-        if (!st.isFile()) continue;
-        const cap = 8 * 1024 * 1024;
-        const offset = Math.max(0, st.size - cap);
-        const buf = Buffer.alloc(st.size - offset);
-        const fd = fs.openSync(fp, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-        try {
-          if (!fs.fstatSync(fd).isFile()) continue;
-          fs.readSync(fd, buf, 0, buf.length, offset);
-        } finally { fs.closeSync(fd); }
-        const lines = buf.toString("utf8").split("\n");
-        if (offset) { lines.shift(); truncated = true; }
-        for (const l of lines) {
-          const parsed = parseDailyLine(l, date);
-          if (parsed) entries.push(parsed);
-        }
-      } catch { truncated = true; }
-    }
-    // 当日文件未创建（启动初期/磁盘写入失败）时用环兜底，不能与每日文件重复计数。
     const today = new Date();
     const localDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    if (!names.includes(`jav-scribe-${localDate}.log`)) {
-      for (const l of logRing.tail(0)) {
-        const parsed = parseDailyLine(formatLine(l), localDate);
-        if (parsed) entries.push(parsed);
-      }
-    }
     const sp = serveLogPath();
-    if (sp && (!q.source || q.source === "all" || q.source === "serve")) {
-      const serve = readServeTail(sp);
-      truncated ||= serve.truncated;
-      const date = new Date(fs.lstatSync(sp).mtimeMs);
-      const serveDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-      for (const line of serve.lines) {
-        const parsed = parseDailyLine(line, serveDate);
-        if (parsed) entries.push({ ...parsed, text: `[serve · 文件日期 ${serveDate}] ${line}`, source: "serve" });
-      }
-    }
-    return { ...queryHistory(entries, q), truncated, serveLogPath: sp };
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, "log-history-worker.cjs"), {
+        workerData: { dir, names, servePath: sp, ring: logRing.tail(0).map(formatLine), localDate, query: q },
+      });
+      worker.once("message", resolve);
+      worker.once("error", reject);
+      worker.once("exit", (code) => { if (code !== 0) reject(new Error(`日志查询后台退出: ${code}`)); });
+    });
   });
 
   ipcMain.handle("logs-clear-history", async (_ev, opts?: { serve?: boolean }) => {

@@ -182,7 +182,7 @@ wheels = [
 
 [[package]]
 name = "jav-scribe-web"
-version = "0.2.67"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

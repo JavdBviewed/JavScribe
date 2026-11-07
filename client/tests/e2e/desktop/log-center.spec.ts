@@ -63,6 +63,31 @@ test("日志页紧凑窗口：筛选与分页可操作，无横向溢出", async
   await page.screenshot({ path: testInfo.outputPath("logs-compact.png") });
 });
 
+test("大日志查询放到后台，主进程 IPC 不等待多日文件解析", async ({ userData }) => {
+  const dir = join(userData, "logs");
+  mkdirSync(dir, { recursive: true });
+  for (let day = 1; day <= 7; day++) {
+    const date = `2026-11-${String(day).padStart(2, "0")}`;
+    const line = `${date} 10:01:00.001 [info] [main] perf-marker-${day} ${"x".repeat(700)}\n`;
+    writeFileSync(join(dir, `jav-scribe-${date}.log`), line.repeat(10_000));
+  }
+  const app = await launchApp(userData);
+  try {
+    const page = await app.firstWindow();
+    await waitForReady(page);
+    const result = await page.evaluate(async () => {
+      const bridge = (window as any).javDesktop.logs;
+      const query = bridge.query({ q: "perf-marker", page: 1, pageSize: 10 });
+      const ping = bridge.tail(1).then(() => "main-responsive");
+      const first = await Promise.race([query.then(() => "query-finished"), ping]);
+      const history = await query;
+      return { first, total: history.total };
+    });
+    expect(result.first).toBe("main-responsive");
+    expect(result.total).toBe(70_000);
+  } finally { await app.close(); }
+});
+
 test("历史日志：日期、来源和关键词筛选后可分页，清理后重启不回归", async ({ userData }) => {
   const dir = join(userData, "logs");
   mkdirSync(dir, { recursive: true });

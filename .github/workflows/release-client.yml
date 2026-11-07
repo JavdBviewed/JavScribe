@@ -75,7 +75,9 @@ jobs:
           pnpm exec playwright test --config playwright.desktop.config.ts \
             --reporter=list,github \
             client/tests/e2e/desktop/functional.spec.ts \
-            client/tests/e2e/desktop/ui-structure.spec.ts
+            client/tests/e2e/desktop/ui-structure.spec.ts \
+            client/tests/e2e/desktop/log-center.spec.ts \
+            client/tests/e2e/desktop/jobs-recovery.spec.ts
       - name: 打包（NSIS + portable + zip）
         run: pnpm exec electron-builder --win --x64 --publish never
       - uses: actions/upload-artifact@v4
@@ -124,6 +126,7 @@ jobs:
       - run: pnpm test:unit:client
       - run: pnpm build:desktop
       - name: e2e 系统依赖（Electron 运行库）
+        timeout-minutes: 12
         # sudo 会重置 PATH 到 secure_path，pnpm 在 toolcache 里会丢；用 env 在 sudo 内重建 PATH
         run: sudo env "PATH=$PATH" pnpm exec playwright install-deps
       - name: e2e 冒烟（桌面子集：functional + ui-structure，mock serve，xvfb）
@@ -134,7 +137,9 @@ jobs:
           xvfb-run -a pnpm exec playwright test --config playwright.desktop.config.ts \
             --reporter=list,github \
             client/tests/e2e/desktop/functional.spec.ts \
-            client/tests/e2e/desktop/ui-structure.spec.ts
+            client/tests/e2e/desktop/ui-structure.spec.ts \
+            client/tests/e2e/desktop/log-center.spec.ts \
+            client/tests/e2e/desktop/jobs-recovery.spec.ts
       - name: 打包（AppImage + deb + zip）
         run: pnpm exec electron-builder --linux --x64 --publish never
       - uses: actions/upload-artifact@v4

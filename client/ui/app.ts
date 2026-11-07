@@ -309,7 +309,7 @@ function ledgerPrune(): void {
 function ledgerSyncPending(p: PendingDispatch): void {
   const r = p.row;
   const fin = pendingFingerprint({ status: r.status, phase: r.phase ?? null, job_id: r.job_id ?? null,
-    engine: r.engine, finished: r.finished ?? null, aborted: p.aborted });
+    engine: r.engine, finished: r.finished ?? null, aborted: p.aborted }) + "|" + (r.request_id || "");
   if (ledgerFinger.get(p.pkey) === fin) return;
   ledgerFinger.set(p.pkey, fin);
   ledger.children[p.pkey] = childFromPendingRow(r, Date.now());
@@ -957,6 +957,25 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   async function rerunLedgerChild(c: LedgerChild): Promise<{ ok: boolean; error?: string }> {
     const vp = c.file_path || "";
     if (!vp) return { ok: false, error: "源文件路径未记录" };
+    if (c.request_id && c.engine && t.lookupRequest) {
+      let found: Awaited<ReturnType<NonNullable<Transport["lookupRequest"]>>>;
+      try {
+        found = await t.lookupRequest(c.engine, c.request_id, c.job_id);
+      } catch {
+        return { ok: false, error: "服务请求状态无法核对，旧记录已保留；请确认服务任务后重试" };
+      }
+      if (found.status === "accepted" && found.jobId) {
+        const newKey = c.engine + "|" + found.jobId;
+        rekeyWriteBack(c.job_id ? c.engine + "|" + c.job_id : preKeyOf(c.engine, c.videoName), newKey);
+        registerWriteBack(newKey, { engine: c.engine, videoName: c.videoName, dirHandle: null, videoPath: vp });
+        return { ok: true };
+      }
+      // 本机提取阶段还未调用上传接口；查不到受理记录时可以重新提取。
+      const notSent = !c.job_id && c.phase === "extracting";
+      if (found.status !== "lost" && !(notSent && (found.status === "uncertain" || found.status === "unsupported"))) {
+        return { ok: false, error: "服务提交状态仍不确定，旧记录已保留；请先核对服务任务" };
+      }
+    }
     const desktop = platform.kind === "desktop"
       ? (window as unknown as { javDesktop?: { videoFileSize?: (p: string) => Promise<number | null> } }).javDesktop
       : null;
@@ -979,7 +998,9 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const batch = c.batch_id ? { id: c.batch_id, label: c.batch_label || "" } : undefined;
     const oldKey = c.engine + "|" + (c.job_id || "");
     if (origOnline && VIDEO_EXT_RE.test(name)) {
-      const r = await submitScanFile(c.engine!, vp, batch);
+      c.request_id = crypto.randomUUID();
+      saveLedgerStore();
+      const r = await submitScanFile(c.engine!, vp, batch, undefined, c.request_id);
       if (r.kind === "ok") {
         if (r.jobId && r.okFiles > 0 && !r.skipped.includes(vp)) {
           if (c.job_id) rekeyWriteBack(oldKey, c.engine! + "|" + r.jobId);
@@ -994,10 +1015,35 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     }
     const f = new File([new Blob()], name) as FolderFile;
     f._localPath = vp;
+    f._javRequestId = crypto.randomUUID();
+    c.request_id = f._javRequestId;
+    // /scan/submit 已明确返回路径不存在，本机提取尚未发送上传请求。
+    // 提取期间退出或暂停后，下一次重跑可以安全生成新标识。
+    c.phase = "extracting";
+    saveLedgerStore();
     (f as FolderFile & { _javRerun: boolean })._javRerun = true;
     if (fileSize !== null) Object.defineProperty(f, "size", { value: fileSize, configurable: true });
-    const [ok, d] = await dispatchTracked(f, engine, "", batch);
-    if (!ok) return { ok: false, error: String((d as { error?: string }).error || "派发失败") };
+    const sink = pipelineSink();
+    const uploadSink: ChainSink = {
+      ...sink,
+      stage: (n, meta, progress, width) => {
+        if (n === 2 && c.phase === "extracting") {
+          c.phase = "uploading";
+          saveLedgerStore();
+        }
+        sink.stage(n, meta, progress, width);
+      },
+    };
+    const [ok, d] = await dispatchTracked(f, engine, "", batch, uploadSink);
+    if (!ok) {
+      const error = String((d as { error?: string }).error || "派发失败");
+      // main 的重跑暂停闸在缓存预检/上传之前拒绝，服务端没有收到此请求。
+      if (error.includes("全局暂停中：恢复任务已停止")) {
+        c.phase = "extracting";
+        saveLedgerStore();
+      }
+      return { ok: false, error };
+    }
     const up = d as UploadStatus;
     if (!up.job_id) return { ok: false, error: "服务未返回任务 ID；请检查服务状态后再试" };
     const newKey = engine + "|" + up.job_id;
@@ -1813,7 +1859,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       ? `<button type="button" class="dl-btn led-clear" data-pkey="${esc(key)}" title="清除该本地记录：仅删本机派发账本条目，不动服务端">&#10005; 清除</button>`
       : "";
     // 0.2.57 中断账本行：单行重跑（ghost-retry 同款路径：重提取音轨→上传→提交；原服务在线回原服务，否则自动均衡）
-    const ledRerun = isLedger && j.status === INTERRUPTED
+    const ledRerun = isLedger && (j.status === INTERRUPTED || (j.status === "error" && !!ledger.children[key]?.request_id))
       ? (j.file_path
         ? `<button type="button" class="dl-btn led-rerun" data-pkey="${esc(key)}" data-fp="${esc(j.file_path)}" title="重跑：重新提取音轨并提交服务（源文件需仍存在）">&#8635; 重跑</button>`
         : `<button type="button" class="dl-btn led-rerun" disabled title="源文件路径未记录：请重新扫描该文件并提交">&#8635; 重跑</button>`)
@@ -2049,7 +2095,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
   }
 
   function ghostRowsList(): JobRow[] {
-    return [...ghostRows.values()].map((g) => g.row);
+    const interrupted = new Set(Object.values(ledger.children)
+      .filter((c) => c.status === INTERRUPTED && c.job_id)
+      .map((c) => `${c.engine}|${c.job_id}|${c.videoName}`));
+    const pendingAdmission = new Set(Object.values(ledger.children)
+      .filter((c) => c.request_id && !c.job_id)
+      .map((c) => preKeyOf(c.engine, c.videoName)));
+    return [...ghostRows.values()]
+      .filter((g) => g.kind === "pre" ? !pendingAdmission.has(g.preKey || "")
+        : !interrupted.has(`${g.engine}|${g.jobId}|${g.row.file}`))
+      .map((g) => g.row);
   }
 
   /** serve 行 + pending 行 + 账本行 + ghost 行合并（口径同 job-rows：活跃优先 → created 降序；
@@ -2105,6 +2160,7 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         pkey,
         // 0.2.57：源文件路径透传账本（中断重跑前置；web 形态无 _localPath → null 门控）
         file_path: f._localPath || null,
+        request_id: null,
       };
       const p: PendingDispatch = { row, pkey, started: false, dispatched: false, enqueuedAt: null, aborted: false };
       state._pending.set(pkey, p);
@@ -2827,6 +2883,16 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     const lc = (ev.target as HTMLElement).closest(".led-clear") as HTMLButtonElement | null;
     if (lc && !lc.disabled) {
       const lpkey = lc.dataset.pkey || "";
+      const c = ledger.children[lpkey];
+      if (c && !c.job_id) {
+        const preKey = preKeyOf(c.engine, c.videoName);
+        if (state.writeBackJobs.delete(preKey)) {
+          state.watchWriteBack.delete(preKey);
+          wbAt.delete(preKey);
+          saveWriteBackStore();
+        }
+        ghostRows.delete("ghost|pre|" + preKey);
+      }
       ledgerRemove(lpkey);
       toast("已清除该本地记录", "ok");
       renderJobs(state._jobs);
@@ -2857,10 +2923,24 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
       if (act === "ledger-clear") {
         btn.disabled = true;
         let n = 0;
+        let wbChanged = false;
         for (const k of Object.keys(ledger.children)) {
-          if (ledger.children[k].batch_id === bid) { delete ledger.children[k]; ledgerFinger.delete(k); n++; }
+          const c = ledger.children[k];
+          if (c.batch_id !== bid) continue;
+          const preKey = preKeyOf(c.engine, c.videoName);
+          if (state.writeBackJobs.delete(preKey)) {
+            state.watchWriteBack.delete(preKey);
+            wbAt.delete(preKey);
+            wbChanged = true;
+          }
+          ghostRows.delete("ghost|pre|" + preKey);
+          if (c.job_id) ghostRows.delete(`ghost|lost|${c.engine}|${c.job_id}|${c.videoName}`);
+          delete ledger.children[k];
+          ledgerFinger.delete(k);
+          n++;
         }
         if (n) saveLedgerStore();
+        if (wbChanged) saveWriteBackStore();
         if (t.batchClear) { try { await t.batchClear(bid); } catch { /* 记录可能不存在（子行全过期时） */ } }
         toast(`已清除主任务 ${n} 条本地记录`, "ok");
         renderJobs(state._jobs);
@@ -4719,6 +4799,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
         if (rowFirst) {
           pend[idx].dispatched = true; // 取消/暂停记账：链已派发（含随后进提取池等槽）
           pend[idx].row.engine = real; // auto 解析出的真实服务回填子行
+          pend[idx].row.request_id = crypto.randomUUID();
+          (file as FolderFile & { _javRequestId?: string })._javRequestId = pend[idx].row.request_id;
           ledgerSyncPending(pend[idx]);
         }
         const prefix = rowFirst ? "" : `文件 ${idx + 1}/${total} · `;
@@ -4974,12 +5056,13 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
     path: string,
     batch?: { id: string; label: string },
     subStatus?: Record<string, string>,
+    requestId?: string,
   ): Promise<ScanFileResult> {
     const name = path.split(/[\\/]/).pop() || path;
     const preKey = preKeyOf(engine, name);
     registerWriteBack(preKey, { engine, videoName: name, dirHandle: null, videoPath: path });
     try {
-      const d = await t.submitScan(engine, [path], subStatus && subStatus[path] ? { [path]: subStatus[path] } : undefined, batch);
+      const d = await t.submitScan(engine, [path], subStatus && subStatus[path] ? { [path]: subStatus[path] } : undefined, batch, requestId);
       const jobId = d.jobId || "";
       if (jobId && Number(d.files) > 0 && !(d.skipped || []).includes(path)) {
         rekeyWriteBack(preKey, engine + "|" + jobId);
@@ -5160,6 +5243,8 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
               const idx = started++;
               r.engine = real;
               it.pend.dispatched = true;
+              r.request_id = crypto.randomUUID();
+              it.file._javRequestId = r.request_id;
               ledgerSyncPending(it.pend);
               // 预登记：子行已建、即将提交 → 临时键先持久化（受理后 rekey 正式键）
               registerWriteBack(preKeyOf(real, it.name), {
@@ -5214,10 +5299,11 @@ export function initApp(t: Transport, platform: PlatformAdapter): void {
             const idx = started++;
             r.engine = real; // 服务列提交时刻回填
             it.pend.dispatched = true;
+            r.request_id = crypto.randomUUID();
             ledgerSyncPending(it.pend);
             // 提交 HTTP 计入在途（原先漏计；≤5s 行可见后由行接管，cap 更准）
             chainInFlight.set(real, (chainInFlight.get(real) || 0) + 1);
-            const res = await submitScanFile(real, it.path, batch, subStatus);
+            const res = await submitScanFile(real, it.path, batch, subStatus, r.request_id);
             chainInFlight.set(real, (chainInFlight.get(real) || 0) - 1);
             if (res.kind === "ok") {
               okN += res.okFiles;

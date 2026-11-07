@@ -266,6 +266,20 @@ test("上传已受理但状态查询持续失败：派发退出忙态并保留�
   expect(await page.evaluate(() => localStorage.getItem("javweb_writeback_v1"))).toContain('"videoName":"video-a.mp4"');
 });
 
+test("上传状态查询一直不返回：超时后退出忙态且保留核对线索", async ({ page, request }) => {
+  await page.route("**/api/uploads/*", () => new Promise(() => {}));
+  await page.selectOption("#extract-select", "server");
+  await page.setInputFiles("#file", fx("video-a.mp4"));
+  await page.selectOption("#engine-select", "mock");
+  await page.click("#dispatch-go");
+  await expect.poll(async () =>
+    (await (await request.get(`${MOCK_URL}/_mock/uploads`)).json() as unknown[]).length,
+  { timeout: 30_000 }).toBe(1);
+  await expect(page.locator("#dispatch-status.err")).toContainText("核对任务", { timeout: 35_000 });
+  await expect(page.locator("#dispatch-go")).toBeEnabled();
+  expect(await page.evaluate(() => localStorage.getItem("javweb_writeback_v1"))).toContain('"videoName":"video-a.mp4"');
+});
+
 test("上传状态标记完成但缺任务 ID：不把未知结果宣称提交成功", async ({ page, request }) => {
   await page.route("**/api/uploads/*", (route) => route.fulfill({
     status: 200,

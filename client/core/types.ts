@@ -115,6 +115,7 @@ export interface JobRow {
   ledger?: boolean;
   /** pending 行的稳定 key（无 job_id / created 会重建，供勾选、patch、取消定位） */
   pkey?: string;
+  request_id?: string | null;
   /** 主任务暂停前的状态备份（「继续」时还原；renderer 态字段） */
   _prevStatus?: string;
 }
