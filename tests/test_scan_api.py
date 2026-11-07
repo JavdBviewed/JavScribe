@@ -8,6 +8,7 @@ submit queueing + validation, file persistence of scan rules.
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
 import sys
 import tempfile
@@ -70,7 +71,7 @@ class FakeEngine:
         pass
 
     def job_by_id(self, _id: str):
-        return None
+        return next((j for j in self.jobs if j.id == _id), None)
 
     def retry_job(self, _id: str):
         return None
@@ -86,13 +87,16 @@ class FakeEngine:
         return job
 
 
-def _http(method: str, url: str, body: dict | None = None, key: str | None = None):
+def _http(method: str, url: str, body: dict | None = None, key: str | None = None,
+          request_id: str | None = None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if body is not None:
         req.add_header("Content-Type", "application/json")
     if key is not None:
         req.add_header("X-Api-Key", key)
+    if request_id is not None:
+        req.add_header("X-Request-Id", request_id)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode())
@@ -275,6 +279,45 @@ def test_scan_submit() -> None:
             print("  test_scan_submit PASSED")
         finally:
             http.stop()
+
+
+def test_submit_idempotency_and_lost_after_restart() -> None:
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        media = _media(td)
+        cfg = _merged()
+        cfg["api"]["key"] = "k1"
+        rid = "c1-12345678901234567890"
+        payload = {"files": [str(media / "a.mp4")], "batch_id": "b1"}
+        http, engine, _ = _start(td, cfg, None)
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            code, first = _http("POST", base + "/scan/submit", payload, "k1", rid)
+            assert code == 201 and len(engine.jobs) == 1, (code, first)
+            code, repeat = _http("POST", base + "/scan/submit", payload, "k1", rid)
+            assert code == 201 and repeat["job_id"] == first["job_id"] and len(engine.jobs) == 1
+            code, _ = _http("POST", base + "/scan/submit", {"files": [str(media / "sub" / "d.mp4")]}, "k1", rid)
+            assert code == 409 and len(engine.jobs) == 1
+            code, found = _http("GET", base + "/requests/" + rid, key="k1")
+            assert code == 200 and found["status"] == "accepted" and found["job_id"] == first["job_id"]
+            code, _ = _http("GET", base + "/requests/" + rid, key="wrong")
+            assert code == 401
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                responses = list(pool.map(lambda _: _http("POST", base + "/scan/submit", payload, "k1", rid), range(12)))
+            assert all(code == 201 and result["job_id"] == first["job_id"] for code, result in responses)
+            assert len(engine.jobs) == 1
+        finally:
+            http.stop()
+        # FakeEngine 的在途任务不恢复，索引不得宣称已恢复。
+        http2, _, _ = _start(td, cfg, None)
+        try:
+            base = f"http://127.0.0.1:{http2.server.server_address[1]}"
+            code, found = _http("GET", base + "/requests/" + rid, key="k1")
+            assert code == 200 and found["status"] == "lost", (code, found)
+            code, result = _http("POST", base + "/scan/submit", payload, "k1", rid)
+            assert code == 409 and result["error"] == "request-uncertain-or-lost"
+        finally:
+            http2.stop()
 
 
 
@@ -523,6 +566,7 @@ def main() -> None:
     test_scan_path_errors()
     test_scan_rules_hot_update()
     test_scan_submit()
+    test_submit_idempotency_and_lost_after_restart()
     test_scan_submit_large_body()
     test_scan_submit_chunked_body()
     test_scan_host_root_mapping()

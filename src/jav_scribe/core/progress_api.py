@@ -65,6 +65,7 @@ from . import scan as scanlib
 from . import metrics as metricslib
 from . import readiness as readinesslib
 from . import subprobe
+from .request_index import RequestIndex, TOKEN_RE
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -373,6 +374,23 @@ class _Handler(BaseHTTPRequestHandler):
     profile: str = ""
     inbox_dir: Path
     config_path: Optional[Path] = None
+    request_index: RequestIndex
+
+    def _request_token(self) -> str | None:
+        token = self.headers.get("X-Request-Id")
+        if token is not None and not TOKEN_RE.fullmatch(token):
+            self._send(400, {"ok": False, "error": "X-Request-Id 格式非法"})
+            raise ValueError("invalid request token")
+        return token
+
+    def _admit(self, token: str | None, fingerprint: str, create) -> None:
+        try:
+            code, response = self.request_index.submit(
+                token, fingerprint, create, lambda jid: self.engine.job_by_id(jid) is not None)
+        except (OSError, KeyError, TypeError):
+            self._send(503, {"ok": False, "error": "请求登记失败；请核对服务任务后再重试"})
+            return
+        self._send(code, response)
 
     def log_message(self, fmt: str, *args) -> None:  # quieter default logging
         self.engine.log(f"[http] {self.address_string()} {fmt % args}")
@@ -490,6 +508,15 @@ class _Handler(BaseHTTPRequestHandler):
     # -- GET -------------------------------------------------------------
     def do_GET(self) -> None:
         parts = self.path.split("?")[0].strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "requests":
+            if not self._check_api_key():
+                return
+            if not TOKEN_RE.fullmatch(parts[1]):
+                self._send(400, {"ok": False, "error": "请求标识非法"})
+                return
+            row = self.request_index.lookup(parts[1], lambda jid: self.engine.job_by_id(jid) is not None)
+            self._send(200, row) if row else self._send(404, {"ok": False, "error": "request-not-found"})
+            return
         if not parts or parts[0] == "health":
             e = self.engine
             self._send(
@@ -605,6 +632,10 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "scan" and parts[1] == "submit":
             if not self._check_api_key():
                 return
+            try:
+                token = self._request_token()
+            except ValueError:
+                return
             body = self._read_json_body(max_bytes=MAX_SCAN_SUBMIT_MB * 1024 * 1024)
             if body is None:
                 return
@@ -616,11 +647,16 @@ class _Handler(BaseHTTPRequestHandler):
             # 可选 batch 字段：客户端扫描生成主任务（老客户端不带 → None 不套壳）
             batch_id = body.get("batch_id") or None
             batch_label = body.get("batch_label") or None
-            job = self.engine.submit(
-                files, source_kind="local", label=f"文件夹扫描 · {len(files)} 项",
-                batch_id=batch_id, batch_label=batch_label,
-            )
-            self._send(201, {"ok": True, "job_id": job.id, "files": len(files)})
+            fingerprint = hashlib.sha256(json.dumps(
+                {"files": [str(p) for p in files], "batch_id": batch_id, "batch_label": batch_label},
+                sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            def create() -> dict[str, Any]:
+                job = self.engine.submit(
+                    files, source_kind="local", label=f"文件夹扫描 · {len(files)} 项",
+                    batch_id=batch_id, batch_label=batch_label,
+                )
+                return {"ok": True, "job_id": job.id, "files": len(files)}
+            self._admit(token, fingerprint, create)
             return
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
             if self.engine.job_by_id(parts[1]) is None:
@@ -681,6 +717,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         if len(parts) == 2 and parts[0] == "upload" and parts[1] == "submit":
             # 先问后传命中路径：无 body，直接以已缓存音轨建任务
+            try:
+                token = self._request_token()
+            except ValueError:
+                return
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             sha1 = str((q.get("sha1") or [""])[0]).lower()
             if not _SHA1_RE.match(sha1):
@@ -697,12 +737,14 @@ class _Handler(BaseHTTPRequestHandler):
             source_name = urllib.parse.unquote(self.headers.get("X-Source-Name") or "") or (q.get("source") or ["remote"])[0]
             batch_id = (q.get("batch_id") or [None])[0]
             batch_label = (q.get("batch_label") or [None])[0]
-            job = self.engine.submit_remote_files([p], source_name=source_name,
-                                                  batch_id=batch_id, batch_label=batch_label)
-            self._send(
-                201,
-                {"ok": True, "job_id": job.id, "file": p.name, "sha1": sha1, "cached": True},
-            )
+            fingerprint = hashlib.sha256(json.dumps(
+                {"sha1": sha1, "ext": ext, "name": source_name, "batch_id": batch_id,
+                 "batch_label": batch_label}, sort_keys=True).encode()).hexdigest()
+            def create() -> dict[str, Any]:
+                job = self.engine.submit_remote_files([p], source_name=source_name,
+                                                      batch_id=batch_id, batch_label=batch_label)
+                return {"ok": True, "job_id": job.id, "file": p.name, "sha1": sha1, "cached": True}
+            self._admit(token, fingerprint, create)
             return
         self._send(404, {"ok": False, "error": "not found"})
 
@@ -743,6 +785,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if not self.path.startswith("/upload"):
             self._send(404, {"ok": False, "error": "not found"})
+            return
+        try:
+            token = self._request_token()
+        except ValueError:
             return
         q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
         length = int(self.headers.get("Content-Length") or 0)
@@ -801,12 +847,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": f"落盘失败: {ex}"})
                 return
         self.metrics.add_upload_bytes(final.stat().st_size)
-        job = self.engine.submit_remote_files([final], source_name=source_name,
-                                              batch_id=batch_id, batch_label=batch_label)
-        self._send(
-            201,
-            {"ok": True, "job_id": job.id, "file": final.name, "sha1": hexd},
-        )
+        fingerprint = hashlib.sha256(json.dumps(
+            {"sha1": hexd, "ext": ext, "name": source_name, "batch_id": batch_id,
+             "batch_label": batch_label}, sort_keys=True).encode()).hexdigest()
+        def create() -> dict[str, Any]:
+            job = self.engine.submit_remote_files([final], source_name=source_name,
+                                                  batch_id=batch_id, batch_label=batch_label)
+            return {"ok": True, "job_id": job.id, "file": final.name, "sha1": hexd}
+        self._admit(token, fingerprint, create)
 
 
 class ProgressHTTP:
@@ -825,13 +873,17 @@ class ProgressHTTP:
         self.config_path = config_path
         self.metrics = metricslib.MetricsRegistry()
         self.live = metricslib.LiveSampler(engine)
-        h = _Handler
+        h = type("ProgressHandler", (_Handler,), {})
         h.engine = engine
         h.profile = profile
         h.inbox_dir = self.inbox_dir
         h.config_path = config_path
         h.metrics = self.metrics
         h.live = self.live
+        # 路径跟随任务历史数据目录；自定义 inbox 时独立保存在 inbox 父目录。
+        jobs_path = getattr(engine, "_jobs_path", None)
+        index_dir = Path(jobs_path).parent if jobs_path else self.inbox_dir.parent
+        h.request_index = RequestIndex(index_dir / "requests.json")
         self.server = ThreadingHTTPServer((host, port), h)
         self.thread: threading.Thread | None = None
         self.host, self.port = host, port

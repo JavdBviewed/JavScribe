@@ -8,6 +8,7 @@ Covers: 内容寻址存储 + 同内容去重、声明 sha1 校验（不匹配 40
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import sys
@@ -39,7 +40,7 @@ class FakeEngine:
         pass
 
     def job_by_id(self, _id: str):
-        return None
+        return next((j for j in self.jobs if j.id == _id), None)
 
     def result_srt_bytes(self, _job):
         return None
@@ -109,6 +110,43 @@ def test_upload_content_addressed_and_dedup() -> None:
             assert len([p for p in (td / "inbox").iterdir() if p.is_file()]) == 2
         finally:
             http.server.shutdown()
+
+
+def test_upload_request_id_dedup_and_conflict() -> None:
+    with tempfile.TemporaryDirectory() as td_s:
+        td = Path(td_s)
+        http = _start(td)
+        http.engine.cfg["api"] = {"key": "k1"}
+        try:
+            base = f"http://127.0.0.1:{http.server.server_address[1]}"
+            headers = {"X-Request-Id": "upload-12345678901234567890", "X-Source-Name": "TST-001.mp4"}
+            code, first = _put_upload(base, b"audio-bytes", headers=headers)
+            assert code == 201, (code, first)
+            code, again = _put_upload(base, b"audio-bytes", headers=headers)
+            assert code == 201 and first["job_id"] == again["job_id"] and len(http.engine.jobs) == 1
+            code, conflict = _put_upload(base, b"other-bytes", headers=headers)
+            assert code == 409 and len(http.engine.jobs) == 1, (code, conflict)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                responses = list(pool.map(lambda _: _put_upload(base, b"audio-bytes", headers=headers), range(12)))
+            assert all(code == 201 and row["job_id"] == first["job_id"] for code, row in responses)
+            assert len(http.engine.jobs) == 1
+            code, found = _raw("GET", base + "/requests/" + headers["X-Request-Id"], headers={"X-Api-Key": "k1"})
+            assert code == 200 and found["status"] == "accepted"
+            code, _ = _raw("GET", base + "/requests/" + headers["X-Request-Id"])
+            assert code == 401
+        finally:
+            http.server.shutdown()
+        restarted = _start(td)
+        restarted.engine.cfg["api"] = {"key": "k1"}
+        try:
+            base = f"http://127.0.0.1:{restarted.server.server_address[1]}"
+            code, found = _raw("GET", base + "/requests/" + headers["X-Request-Id"], headers={"X-Api-Key": "k1"})
+            assert code == 200 and found["status"] == "lost"
+            code, row = _put_upload(base, b"audio-bytes", headers=headers)
+            assert code == 409 and row["error"] == "request-uncertain-or-lost"
+            assert restarted.engine.jobs == []
+        finally:
+            restarted.server.shutdown()
 
 
 def test_upload_declared_sha1() -> None:
